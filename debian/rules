@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+PKG_DIR		   = $(CURDIR)/debian/$(PACKAGE)
+BIN_DIR		   = /usr/bin
+MAN_DIR		   = /usr/share/man/man1
+INC_DIR		   = /usr/include/$(PACKAGE)
+LIB_DIR		   = /usr/lib
+GEM_DIR		   = /usr/local/lib/rubinius/gems
+SYSTEM_NAME  = $(shell dpkg-vendor --query Vendor)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	./configure \
+		--system-name=$(SYSTEM_NAME) \
+		--bindir=$(BIN_DIR) \
+		--includedir=$(INC_DIR) \
+		--libdir=$(LIB_DIR) \
+		--mandir=$(MAN_DIR) \
+		--gemsdir=$(GEM_DIR)
+
+override_dh_auto_build:
+	rake build
+
+overrride_dh_auto_install:
+	FAKEROOT=$(PKG_DIR) rake install
