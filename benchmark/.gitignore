@@ -1,0 +1,7 @@
+# C executable for rubinius/bm_stat.rb
+stat
+
+# Results files for benchmarking
+results/*.yaml
+results/*.csv
+results/web/*.html

@@ -1,0 +1,49 @@
+#ifndef RBX_BUILTIN_BLOCK_WRAPPER_HPP
+#define RBX_BUILTIN_BLOCK_WRAPPER_HPP
+
+#include "builtin/object.hpp"
+#include "type_info.hpp"
+
+namespace rubinius {
+  class BlockEnvironment;
+
+  class Proc : public Object {
+  public:
+    const static object_type type = ProcType;
+
+  private:
+    BlockEnvironment* block_; // slot
+    Object* lambda_; // slot
+    Object* bound_method_; // slot
+
+  public:
+    attr_accessor(block, BlockEnvironment);
+    attr_accessor(lambda, Object);
+    attr_accessor(bound_method, Object);
+
+    static void init(STATE);
+
+    // Ruby.primitive :proc_allocate
+    static Proc* create(STATE, Object* self);
+
+    Object* yield(STATE, CallFrame* call_frame, Arguments& args);
+
+    Object* call(STATE, CallFrame* call_frame, Arguments& args);
+
+    // Ruby.primitive? :proc_call
+    Object* call_prim(STATE, Executable* exec, CallFrame* call_frame, Dispatch& msg, Arguments& args);
+
+    // Ruby.primitive? :proc_call_on_object
+    Object* call_on_object(STATE, Executable* exec, CallFrame* call_frame, Dispatch& msg, Arguments& args);
+
+    // Ruby.primitive :proc_from_env
+    static Proc* from_env(STATE, Object* self, Object* env);
+
+    class Info : public TypeInfo {
+    public:
+      BASIC_TYPEINFO(TypeInfo)
+    };
+  };
+}
+
+#endif

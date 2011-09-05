@@ -1,0 +1,1 @@
+fails:Readline::HISTORY.delete_at deletes and returns the history entry at the specified index

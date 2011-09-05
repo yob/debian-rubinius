@@ -1,0 +1,111 @@
+# -*- ruby -*-
+
+require 'autotest/timestamp'
+
+$f = true # quickstart
+$q = ! $v # don't print all the files unless we run -v
+
+ENV['PRETTY'] = "1"
+
+Autotest.add_hook :run_command do |at|
+  system "rake"
+end
+
+class Autotest
+  alias :old_ruby :ruby
+  def ruby
+    ENV["RUBY"] || "bin/mspec ci -fu"
+  end
+
+  alias :old_consolidate_failures :consolidate_failures
+  def consolidate_failures(failed)
+    filters = new_hash_of_arrays
+
+    failed.each do |spec, failed_trace|
+      failed_trace.scan(/ at ([^:]+)/).each do |file,|
+        file.sub!(/^\.\//, '')
+        next unless file =~ /^spec/
+          test_files_for(file).each do |f|
+            filters[f] # mspec doesn't have real spec filtering yet
+          end
+        break
+      end
+    end
+
+    return filters
+  end
+
+  alias :old_make_test_cmd :make_test_cmd
+  def make_test_cmd files_to_test
+    # until bin/ci and bin/mspec allow for regexps, run the whole file again
+    classes = reorder(files_to_test).map { |k,v| k }.join(' ')
+    "PRETTY=1 #{ruby} #{classes} | #{unit_diff}"
+  end
+end
+
+Autotest.add_hook :initialize do |at|
+  at.order = :natural
+
+  at.sleep = 2
+
+  at.add_exception(/\.rbc$/)
+  at.add_exception(/shotgun\/external_libs/)
+  at.add_exception(/README/)
+  at.add_exception(/spec.tags.critical.txt/)
+
+  at.find_directories.clear
+  at.find_directories.push(
+                           'kernel',
+                           'lib',
+                           'shotgun',
+                           'spec/ruby/1.8/core',
+                           'spec/ruby/1.8/language',
+                           'spec/ruby/1.8/library',
+                           'spec/compiler',
+                           'spec/parser',
+                           'spec/tags'
+                           )
+
+  at.failed_results_re = /^\d+\)\n([^\n]*)(?:FAILED|ERROR)?\n(.*?)\n\n/m
+  at.completed_re = /\Z/ # FIX: some sort of summary line at the end?
+
+  at.add_mapping %r%^spec/tags/(.*)_tags.txt$% do |_, m|
+    Dir["spec/#{m[1]}_spec.rb"]
+  end
+
+  at.add_mapping %r%^spec/.*([^/]+)/(shared|fixtures)/% do |_, m|
+    at.files_matching(%r%^spec/.*#{m[1]}/.*_spec.rb$%)
+  end
+
+  at.add_mapping %r%^spec/spec_helper.rb% do
+    at.files_matching(%r%^spec/.*_spec.rb$%)
+  end
+
+  at.add_mapping %r%^spec/compiler/spec_helper.rb% do
+    at.files_matching(%r%^spec/compiler/.*_spec.rb$%)
+  end
+
+  at.add_mapping %r%^spec/parser/sexp_expectations.rb% do
+    at.files_matching(%r%^spec/parser/.*_spec.rb$%)
+  end
+
+  at.add_mapping %r%^spec/.*_spec\.rb$% do |filename, _|
+    filename
+  end
+
+  at.add_mapping %r%^kernel/(.*)/(.*).rb$% do |_, m|
+    Dir["spec/#{m[1]}/#{m[2]}/*_spec.rb"]
+  end
+
+  at.add_mapping %r%^compiler/(bytecode|sexp|translation)/*.rb$% do |_, m|
+    Dir["spec/compiler/rubinius/*_spec.rb"] + Dir["spec/language/*_spec.rb"]
+  end
+
+  at.add_mapping %r%^lib/(.*).rb% do |_, m|
+    Dir["spec/library/#{m[1]}*_spec.rb"]
+  end
+
+  at.add_mapping %r%^shotgun% do |_, m|
+    at.files_matching(/^spec.*_spec\.rb/)
+  end
+end
