@@ -168,6 +168,10 @@ class Configure
       @llvm_prebuilt_name = name
     end
 
+    o.on "--llvm-config", "PROGRAM", "File system path to the llvm-config binary" do |prog|
+      @llvm_configure = prog
+    end
+
     o.on "--llvm-path", "PATH", "File system path to the directory containing LLVM" do |dir|
       @llvm_path = dir
     end
@@ -497,6 +501,14 @@ class Configure
   end
 
   def setup_auto
+
+    # If the path for llvm-config was explicitly passed in the command line,
+    # use that and skip the rest
+    if @llvm_configure
+      @llvm = :config
+      return
+    end
+
     @log.print "  Checking for existing LLVM tree: "
     if File.directory?("#{@llvm_default}/Release")
       version = `#{@perl} #{@llvm_default}/Release/bin/llvm-config --version`.strip
