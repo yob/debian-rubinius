@@ -1,12 +1,13 @@
 #!/usr/bin/make -f
 
-PKG_DIR		   = $(CURDIR)/debian/$(PACKAGE)
-BIN_DIR		   = /usr/bin
-MAN_DIR		   = /usr/share/man/man1
-INC_DIR		   = /usr/include/$(PACKAGE)
-LIB_DIR		   = /usr/lib
-GEM_DIR		   = /usr/local/lib/rubinius/gems
-SYSTEM_NAME  = $(shell dpkg-vendor --query Vendor)
+DESTDIR		= $(CURDIR)/debian/rubinius
+BIN_DIR		= /usr/bin
+MAN_DIR		= /usr/share/man/man1
+INC_DIR		= /usr/include/$(PACKAGE)
+LIB_DIR		= /usr/lib
+GEM_DIR		= /usr/local/lib/rubinius/gems
+SYSTEM_NAME	= $(shell dpkg-vendor --query Vendor)
+LLVM_CONFIG	= /usr/bin/llvm-config-2.8
 
 %:
 	dh $@
@@ -18,10 +19,13 @@ override_dh_auto_configure:
 		--includedir=$(INC_DIR) \
 		--libdir=$(LIB_DIR) \
 		--mandir=$(MAN_DIR) \
-		--gemsdir=$(GEM_DIR)
+		--gemsdir=$(GEM_DIR) \
+		--llvm-config=$(LLVM_CONFIG)
 
 override_dh_auto_build:
 	rake build
 
-overrride_dh_auto_install:
-	FAKEROOT=$(PKG_DIR) rake install
+override_dh_auto_install:
+	FAKEROOT=$(DESTDIR) rake install
+
+# vim: ts=8 sw=8 noexpandtab
