@@ -30,6 +30,11 @@ override_dh_auto_install:
 	for program in $$(find debian/rubinius/usr/bin -not -type d -and -not -name rbx); do \
 		mv $(program) $(program)-rbx; \
 	done
+	mkdir -p $(DESTDIR)/usr/share/man/man1
+	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
+	mkdir -p $(DESTDIR)/etc/bash_completion.d
+	sed -e s/@@VERSION@@/-rbx/g; s/@@DOTLESS_VERSION@@/rbx/g' debian/etc/bash_completion.d/gem.in > $(DESTDIR)/etc/bash_completion.d/gem-rbx
+
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean

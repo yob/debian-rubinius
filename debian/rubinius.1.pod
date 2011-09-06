@@ -1,0 +1,39 @@
+=head1 NAME
+
+rubinius - an implementation of the Ruby programming language
+
+=head1 SYNOPSIS
+
+The main Rubinius program is called B<rbx>. The list below contains other
+common Ruby programs that are also provided by Rubinius. If Rubinius is made
+the default Ruby in the system through B<update-ruby-alternatives(1)>, then
+those programs will also be available without the -rbx suffix. For example, if
+B<rbx> is the default B<ruby>, then B<irb> will be a symbolic link to
+B<irb-rbx>, B<rdoc> will a symbolic link to B<rdoc-rbx>, and so on.
+
+=over
+
+=item B<testrb-rbx>  - run tests
+
+=item B<irb-rbx>  - interactive Ruby console
+
+=item B<rdoc-rbx>  - the RDoc documentation system
+
+=item B<rake-rbx>  - a Ruby build program, similar to make
+
+=item B<gem-rbx>  - Rubygems for Rubinius
+
+=item B<ri-rbx>  - Ruby interactive documentation browser
+
+=back
+
+You can call each of these programs with I<--help> to inspect their individual
+options and arguments.
+
+=head1 AUTHORS
+
+Rubinius has a large number of contributors. Check the project homepage at
+I<http://rubini.us/> for more details.
+
+This manual page was written for the Debian system by Antonio Terceiro
+<terceiro@debian.org>, and may be used by others.

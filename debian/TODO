@@ -14,3 +14,7 @@ move documentation out of /usr/lib
   => to a new package rubinius-doc ?
 
 export build system patches to debian/patches
+
+how to deal with the bundled rake?
+
+Rubinius does not provide /usr/bin/erb !!
