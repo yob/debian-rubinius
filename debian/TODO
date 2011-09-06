@@ -2,6 +2,12 @@ $LOAD_PATH is completely different from MRI. For instance it does not have
 /usr/lib/ruby/vendor_ruby ... how do we make pure-Ruby packages available for
 Rubinius as well?
 
+  => maybe symlink /usr/lib/rubinius/1.2/vendor to /usr/lib/ruby/vendor_ruby.
+  => but this will break the path for arch-dependent libraries
+  => configure would need separate settings for vendorarchdir, and we would
+  probably want that to point to somewhere like
+  /usr/lib/ruby/vendor_ruby/rbx-1.2
+
 lots of lintian warnings
 
 what to do with pre-installed gems?
@@ -12,8 +18,6 @@ what to do with pre-installed gems?
 solve the issue with external libraries in vm/external_libs/
   => some of them are in Debian, we should use them instead
   => some others do not appear to be in Debian
-
-register with update-alternatives on postinst
 
 move documentation out of /usr/lib
 
