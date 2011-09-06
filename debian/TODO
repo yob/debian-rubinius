@@ -12,3 +12,5 @@ register with update-alternatives on postinst
 move documentation out of /usr/lib
 
   => to a new package rubinius-doc ?
+
+export build system patches to debian/patches
