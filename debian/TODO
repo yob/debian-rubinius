@@ -1,5 +1,8 @@
 what to do with pre-installed gems?
   => create a tarball out of debian/rubinius/var/lib/gems/rubinius and install it somewhere
   => during postinst, unpack that tarball at /var/lib/gems/rubinius unless it already exists
+solve the issue with external libraries in vm/external_libs/
+  => some of them are in Debian, we should use them instead
+  => some others do not appear to be in Debian
 remove symlinks installed with generic names in /usr/bin (rdoc, irb etc)
 register with update-alternatives on postinst

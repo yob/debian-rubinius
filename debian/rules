@@ -33,6 +33,8 @@ override_dh_auto_clean: override_dh_auto_configure
 	cp web/_includes/instructions.markdown /tmp/instructions.markdown
 	rake distclean
 	cp /tmp/instructions.markdown web/_includes/instructions.markdown
+	$(RM) vm/external_libs/*.data
+	for dir in vm/external_libs/*; do (cd $$dir && test -f Makefile && make distclean); done
 
 override_dh_clean:
 	dh_clean --exclude=vm/external_libs/libgdtoa/makefile.orig
