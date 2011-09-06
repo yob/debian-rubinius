@@ -28,4 +28,7 @@ override_dh_auto_build:
 override_dh_auto_install:
 	FAKEROOT=$(DESTDIR) rake install
 
+override_dh_clean:
+	dh_clean --exclude=vm/external_libs/libgdtoa/makefile.orig
+
 # vim: ts=8 sw=8 noexpandtab
