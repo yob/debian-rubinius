@@ -28,6 +28,12 @@ override_dh_auto_build:
 override_dh_auto_install:
 	FAKEROOT=$(DESTDIR) rake install
 
+override_dh_auto_clean: override_dh_auto_configure
+	dh_auto_clean
+	cp web/_includes/instructions.markdown /tmp/instructions.markdown
+	rake distclean
+	cp /tmp/instructions.markdown web/_includes/instructions.markdown
+
 override_dh_clean:
 	dh_clean --exclude=vm/external_libs/libgdtoa/makefile.orig
 
