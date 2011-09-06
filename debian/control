@@ -1,8 +1,7 @@
 Source: rubinius
 Section: ruby
 Priority: optional
-Maintainer: Debian Ruby Extras Maintainers <pkg-ruby-extras-maintainers@lists.alioth.debian.org>
-Uploaders: Antonio Terceiro <terceiro@debian.org>
+Maintainer: Antonio Terceiro <terceiro@debian.org>
 DM-Upload-Allowed: yes
 Build-Depends: debhelper (>= 7.0.50~), ruby1.8, rake, ruby1.8-dev, llvm-2.8-dev
 Standards-Version: 3.9.2
