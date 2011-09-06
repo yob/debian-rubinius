@@ -6,7 +6,6 @@ MAN_DIR		= /usr/share/man/man1
 INC_DIR		= /usr/include/rubinius
 LIB_DIR		= /usr/lib
 GEM_DIR		= /var/lib/gems
-SYSTEM_NAME	= $(shell dpkg-vendor --query Vendor)
 LLVM_CONFIG	= /usr/bin/llvm-config-2.8
 
 %:
@@ -14,7 +13,6 @@ LLVM_CONFIG	= /usr/bin/llvm-config-2.8
 
 override_dh_auto_configure:
 	./configure \
-		--system-name=$(SYSTEM_NAME) \
 		--bindir=$(BIN_DIR) \
 		--includedir=$(INC_DIR) \
 		--libdir=$(LIB_DIR) \
