@@ -13,7 +13,7 @@ Package: rubinius
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, ruby-common
 Provides: ruby-interpreter
-Description: an implementation of the Ruby programming language
+Description: implementation of the Ruby programming language
  Rubinius includes a bytecode virtual machine, parser, bytecode compiler,
  garbage collector, JIT native machine code compiler, and Ruby core and
  standard libraries.
