@@ -7,3 +7,5 @@ if [ "$1" = "remove" ]; then
   update-alternatives --remove gem /usr/bin/gem${RUBYVER}
   update-alternatives --remove ruby /usr/bin/ruby${RUBYVER}
 fi
+
+#DEBHELPER#
