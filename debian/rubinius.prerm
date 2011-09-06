@@ -4,8 +4,8 @@ set -e
 
 if [ "$1" = "remove" ]; then
   RUBYVER='-rbx'
-  update-alternatives --remove gem /usr/bin/gem${RUBYVER}
-  update-alternatives --remove ruby /usr/bin/ruby${RUBYVER}
+  update-alternatives --remove gem /usr/bin/rbx
+  update-alternatives --remove ruby /usr/bin/rbx
 fi
 
 #DEBHELPER#
