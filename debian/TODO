@@ -1,3 +1,5 @@
+lots of lintian warnings
+
 what to do with pre-installed gems?
   => create a tarball out of debian/rubinius/var/lib/gems/rubinius and install it somewhere
   => during postinst, unpack that tarball at /var/lib/gems/rubinius unless it already exists
