@@ -5,7 +5,7 @@ BIN_DIR		= /usr/bin
 MAN_DIR		= /usr/share/man/man1
 INC_DIR		= /usr/include/rubinius
 LIB_DIR		= /usr/lib
-GEM_DIR		= /var/lib/gems/rubinius
+GEM_DIR		= /var/lib/gems
 SYSTEM_NAME	= $(shell dpkg-vendor --query Vendor)
 LLVM_CONFIG	= /usr/bin/llvm-config-2.8
 
