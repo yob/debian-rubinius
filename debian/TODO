@@ -1,3 +1,7 @@
+$LOAD_PATH is completely different from MRI. For instance it does not have
+/usr/lib/ruby/vendor_ruby ... how do we make pure-Ruby packages available for
+Rubinius as well?
+
 lots of lintian warnings
 
 what to do with pre-installed gems?
