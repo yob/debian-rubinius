@@ -1,0 +1,5 @@
+what to do with pre-installed gems?
+  => create a tarball out of debian/rubinius/var/lib/gems/rubinius and install it somewhere
+  => during postinst, unpack that tarball at /var/lib/gems/rubinius unless it already exists
+remove symlinks installed with generic names in /usr/bin (rdoc, irb etc)
+register with update-alternatives on postinst
