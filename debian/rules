@@ -44,6 +44,6 @@ override_dh_auto_clean: override_dh_auto_configure
 	for dir in vm/external_libs/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
 
 override_dh_clean:
-	dh_clean --exclude=vm/external_libs/libgdtoa/makefile.orig
+	dh_clean --exclude=vendor/libgdtoa/makefile.orig
 
 # vim: ts=8 sw=8 noexpandtab
