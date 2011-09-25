@@ -17,3 +17,14 @@ Description: implementation of the Ruby programming language
  Rubinius includes a bytecode virtual machine, parser, bytecode compiler,
  garbage collector, JIT native machine code compiler, and Ruby core and
  standard libraries.
+
+Package: rubinius-doc
+Architecture: all
+Depends: ${misc:Depends}
+Description: Rubinius documentation
+ This package contains the Rubinius documentation. Once this package in
+ installed, run `rbx docs` to have a browser window open at the index of the
+ documentation.
+ .
+ The documentation contained in this package is more focused in the development
+ of Rubinius itself, so it will not be so usefull for Rubinius users.

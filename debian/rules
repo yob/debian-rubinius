@@ -32,6 +32,9 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	FAKEROOT=$(DESTDIR) rake install
+	mkdir -p debian/rubinius-doc/usr/share/doc/rubinius-doc
+	mv debian/rubinius/usr/lib/rubinius/2.0/lib/rubinius/documentation debian/rubinius-doc/usr/share/doc/rubinius-doc/html
+	dh_link -p rubinius usr/lib/rubinius/2.0/lib/rubinius/documentation usr/share/doc/rubinius/html
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
 
