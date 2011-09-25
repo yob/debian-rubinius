@@ -232,10 +232,6 @@ class Configure
       @llvm_prebuilt_name = name
     end
 
-    o.on "--llvm-config", "PROGRAM", "File system path to the llvm-config binary" do |prog|
-      @llvm_configure = prog
-    end
-
     o.on "--llvm-path", "PATH", "File system path to the directory containing LLVM" do |dir|
       @llvm_path = dir
     end
