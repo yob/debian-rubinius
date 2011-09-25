@@ -163,10 +163,15 @@ task :clean => %w[
 ]
 
 desc 'Remove rubinius build files and external library build files'
-task :distclean => %w[
-  clean
-  vm:distclean
-]
+task(:distclean => %w[ clean vm:distclean ]) do
+  rm_f 'configure.log'
+  rm_f FileList['vm/capi/*/include/rbx_config.h']
+  rm_f FileList['vm/capi/*/include/config.h']
+  rm_f 'lib/readline.rb'
+  rm_f 'lib/rubinius/build_config.rb'
+  rm_f 'lib/ext/melbourne/.build_ruby'
+  rm_f 'config.rb'
+end
 
 namespace :clean do
   desc "Cleans up editor files and other misc crap"

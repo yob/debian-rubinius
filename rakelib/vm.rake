@@ -30,7 +30,6 @@ INSN_GEN    = %w[ vm/gen/instruction_names.cpp
                   vm/gen/instruction_implementations.hpp
                   vm/gen/instruction_visitors.hpp
                   vm/gen/instruction_effects.hpp
-                  web/_includes/instructions.markdown
                 ]
 TYPE_GEN    = %w[ vm/gen/includes.hpp
                   vm/gen/kind_of.hpp
@@ -330,6 +329,8 @@ namespace :vm do
     end
 
     blueprint.clean
+
+    rm_rf FileList['vm/**/artifacts']
   end
 
   desc "Clean up, including all external libs"
