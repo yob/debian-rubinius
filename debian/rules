@@ -43,7 +43,7 @@ override_dh_auto_clean: override_dh_auto_configure
 	cp web/_includes/instructions.markdown /tmp/instructions.markdown
 	rake distclean
 	cp /tmp/instructions.markdown web/_includes/instructions.markdown
-	$(RM) vm/external_libs/*.data
+	$(RM) vendor/*.data
 	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
 
 override_dh_clean:
