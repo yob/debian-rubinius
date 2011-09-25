@@ -2,21 +2,21 @@ class Hash
 
   include Enumerable
 
-  # Entry stores key, value pairs in Hash. The key's hash
+  # Bucket stores key, value pairs in Hash. The key's hash
   # is also cached in the entry and recalculated when the
   # Hash#rehash method is called.
 
-  class Entry
+  class Bucket
     attr_accessor :key
     attr_accessor :key_hash
     attr_accessor :value
-    attr_accessor :next
+    attr_accessor :link
 
     def initialize(key, key_hash, value)
       @key      = key
       @key_hash = key_hash
       @value    = value
-      @next     = nil
+      @link     = nil
     end
 
     def match?(key, key_hash)
@@ -46,7 +46,7 @@ class Hash
 
     # Returns the next object or +nil+.
     def next(entry)
-      if entry and entry = entry.next
+      if entry and entry = entry.link
         return entry
       end
 
@@ -64,9 +64,7 @@ class Hash
 
   # #entries is a method provided by Enumerable which calls #to_a,
   # so we have to not collide with that.
-  def __entries__
-    @entries
-  end
+  attr_reader_specific :entries, :__entries__
 
   attr_reader :capacity
   attr_reader :max_entries
@@ -126,7 +124,7 @@ class Hash
 
   # Creates a fully-formed instance of Hash.
   def self.allocate
-    hash = super()
+    hash = __allocate__
     Rubinius.privately { hash.__setup__ }
     hash
   end
@@ -201,7 +199,7 @@ class Hash
   end
 
   def []=(key, value)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     redistribute @entries if @size > @max_entries
 
@@ -210,7 +208,7 @@ class Hash
 
     entry = @entries[index]
     unless entry
-      @entries[index] = new_entry key, key_hash, value
+      @entries[index] = new_bucket key, key_hash, value
       return value
     end
 
@@ -219,16 +217,16 @@ class Hash
     end
 
     last = entry
-    entry = entry.next
+    entry = entry.link
     while entry
       if entry.match? key, key_hash
         return entry.value = value
       end
 
       last = entry
-      entry = entry.next
+      entry = entry.link
     end
-    last.next = new_entry key, key_hash, value
+    last.link = new_bucket key, key_hash, value
 
     value
   end
@@ -239,6 +237,7 @@ class Hash
   alias_method :__store__, :[]=
 
   def clear
+    Rubinius.check_frozen
     __setup__
     self
   end
@@ -247,7 +246,7 @@ class Hash
     # current MRI documentation comment is wrong.  Actual behavior is:
     # Hash.new { 1 }.default # => nil
     if @default_proc
-      key.equal?(undefined) ? nil : @default.call(self, key)
+      Rubinius::Type.object_equal(key, undefined) ? nil : @default.call(self, key)
     else
       @default
     end
@@ -263,22 +262,24 @@ class Hash
   end
 
   def delete(key)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     key_hash = key.hash
 
+    ents = @entries
+
     index = key_index key_hash
-    if entry = @entries[index]
+    if entry = ents[index]
       if entry.match? key, key_hash
-        @entries[index] = entry.next
+        ents[index] = entry.link
         @size -= 1
         return entry.value
       end
 
       last = entry
-      while entry = entry.next
+      while entry = entry.link
         if entry.match? key, key_hash
-          last.next = entry.next
+          last.link = entry.link
           @size -= 1
           return entry.value
         end
@@ -290,7 +291,7 @@ class Hash
   end
 
   def delete_if(&block)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     return to_enum(:delete_if) unless block_given?
 
@@ -307,7 +308,7 @@ class Hash
       entry = entries[idx]
       while entry
         yield entry
-        entry = entry.next
+        entry = entry.link
       end
 
       idx += 1
@@ -325,7 +326,7 @@ class Hash
       entry = entries[idx]
       while entry
         yield [entry.key, entry.value]
-        entry = entry.next
+        entry = entry.link
       end
 
       idx += 1
@@ -338,15 +339,6 @@ class Hash
     return to_enum(:each_key) unless block_given?
 
     each_entry { |e| yield e.key }
-    self
-  end
-
-  def each_pair
-    return to_enum(:each_pair) unless block_given?
-
-    each_entry do |entry|
-      yield entry.key, entry.value
-    end
     self
   end
 
@@ -384,7 +376,7 @@ class Hash
       if entry.match? key, key_hash
         return entry
       end
-      entry = entry.next
+      entry = entry.link
     end
   end
 
@@ -396,7 +388,7 @@ class Hash
   end
 
   def initialize(default=undefined, &block)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     if !default.equal?(undefined) and block
       raise ArgumentError, "Specify a default or a block, not both"
@@ -413,11 +405,6 @@ class Hash
     self
   end
   private :initialize
-
-  def initialize_copy(other)
-    replace other
-  end
-  private :initialize_copy
 
   def inspect
     out = []
@@ -466,41 +453,19 @@ class Hash
     dup.merge!(other, &block)
   end
 
-  def merge!(other)
-    other = Rubinius::Type.coerce_to other, Hash, :to_hash
-
-    if block_given?
-      other.each_entry do |entry|
-        key = entry.key
-        if key? key
-          __store__ key, yield(key, self[key], entry.value)
-        else
-          __store__ key, entry.value
-        end
-      end
-    else
-      other.each_entry do |entry|
-        key = entry.key
-        __store__ key, entry.value
-      end
-    end
-    self
-  end
-  alias_method :update, :merge!
-
-  # Returns a new +Entry+ instance having +key+, +key_hash+,
+  # Returns a new +Bucket+ instance having +key+, +key_hash+,
   # and +value+. If +key+ is a kind of +String+, +key+ is
   # duped and frozen.
-  def new_entry(key, key_hash, value)
+  def new_bucket(key, key_hash, value)
     if key.kind_of?(String) and !key.frozen?
       key = key.dup
       key.freeze
     end
 
     @size += 1
-    Entry.new key, key_hash, value
+    Bucket.new key, key_hash, value
   end
-  private :new_entry
+  private :new_bucket
 
   # Adjusts the hash storage and redistributes the entries among
   # the new bins. Any Iterator instance will be invalid after a
@@ -516,11 +481,11 @@ class Hash
     while (i += 1) < capacity
       next unless old = entries[i]
       while old
-        old.next = nil if nxt = old.next
+        old.link = nil if nxt = old.link
 
         index = key_index old.key_hash
         if entry = @entries[index]
-          old.next = entry
+          old.link = entry
         end
         @entries[index] = old
 
@@ -542,11 +507,11 @@ class Hash
     while (i += 1) < capacity
       next unless old = entries[i]
       while old
-        old.next = nil if nxt = old.next
+        old.link = nil if nxt = old.link
 
         index = key_index(old.key_hash = old.key.hash)
         if entry = @entries[index]
-          old.next = entry
+          old.link = entry
         end
         @entries[index] = old
 
@@ -567,7 +532,7 @@ class Hash
   end
 
   def reject!
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     return to_enum(:reject!) unless block_given?
 
@@ -583,13 +548,13 @@ class Hash
         if yield(entry.key,entry.value)
           change += 1
           if !prev_entry
-            entries[i] = entry.next
+            entries[i] = entry.link
           else
-            prev_entry.next = entry.next
-            prev_entry = entry.next
+            prev_entry.link = entry.link
+            prev_entry = entry.link
           end
         end
-        entry = entry.next
+        entry = entry.link
       end
     end
 
@@ -601,33 +566,46 @@ class Hash
   end
 
   def replace(other)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     other = Rubinius::Type.coerce_to other, Hash, :to_hash
     return self if self.equal? other
 
-    # Normally this would be a call to __setup__,
-    # but that will create a new unused Tuple
-    # that we would wind up replacing anyways.
-    @entries = other.__entries__.dup
-    @capacity = other.capacity
-    @mask     = @capacity - 1
-    @max_entries = other.max_entries
-    @size     = other.size
+    size = other.size
 
-    # We now contain a list of the other hash's
-    # Entry objects. We need to re-map them to our
-    # own.
-    i = 0
-    while i < @capacity
-      if orig = @entries[i]
-        @entries[i] = self_entry = orig.dup
-        while orig = orig.next
-          self_entry.next = orig.dup
-          self_entry = self_entry.next
+    # If we're replacing ourself with a Hash that is empty,
+    # then fast path.
+    if 0 == size
+
+      __setup__
+
+    else
+
+      # Normally this would be a call to __setup__,
+      # but that will create a new unused Tuple
+      # that we would wind up replacing anyways.
+      ents = @entries = other.__entries__.dup
+      capa = @capacity = other.capacity
+      @mask     = @capacity - 1
+      @max_entries = other.max_entries
+      @size     = size
+
+      # We now contain a list of the other hash's
+      # Bucket objects. We need to re-map them to our
+      # own.
+      i = 0
+
+      while i < capa
+        if orig = ents[i]
+          ents[i] = self_entry = orig.dup
+          while orig = orig.link
+            self_entry.link = orig.dup
+            self_entry = self_entry.link
+          end
         end
+        i += 1
       end
-      i += 1
+
     end
 
     if other.default_proc
@@ -640,6 +618,9 @@ class Hash
 
     self
   end
+
+  alias_method :initialize_copy, :replace
+  private :initialize_copy
 
   def select
     return to_enum(:select) unless block_given?
@@ -656,7 +637,7 @@ class Hash
   end
 
   def shift
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     return default(nil) if empty?
 
@@ -666,7 +647,7 @@ class Hash
 
     while idx < cap
       if entry = entries[idx]
-        entries[idx] = entry.next
+        entries[idx] = entry.link
         @size -= 1
         break
       end
@@ -715,10 +696,6 @@ class Hash
     self
   end
 
-  def to_s
-    to_a.join
-  end
-
   def value?(value)
     each_entry do |entry|
       return true if entry.value == value
@@ -739,7 +716,13 @@ class Hash
   end
 
   def values_at(*args)
-    args.collect { |key| self[key] }
+    args.map do |key|
+      if entry = find_entry(key)
+        entry.value
+      else
+        default key
+      end
+    end
   end
 
   alias_method :indexes, :values_at

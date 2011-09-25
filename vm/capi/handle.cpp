@@ -1,7 +1,7 @@
 #include "builtin/nativemethod.hpp"
 #include "capi/handle.hpp"
 
-#include "capi/include/ruby.h"
+#include "capi/18/include/ruby.h"
 
 namespace rubinius {
   namespace capi {
@@ -65,7 +65,6 @@ namespace rubinius {
     }
 
     Handles::~Handles() {
-      return;
       capi::Handle* handle = front();
 
       while(handle) {

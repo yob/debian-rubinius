@@ -1,4 +1,7 @@
 class IO
+
+  include Enumerable
+
   # Import platform constants
 
   SEEK_SET = Rubinius::Config['rbx.platform.io.SEEK_SET']
@@ -81,7 +84,7 @@ class IO
       return 0 if @write_synced or empty?
       @write_synced = true
 
-      io.prim_write(String.from_bytearray(@storage, @start, size))
+      io.prim_write(String.from_chararray(@storage, @start, size))
       reset!
 
       return size
@@ -149,7 +152,7 @@ class IO
         total = size
         total = count if count and count < total
 
-        str = String.from_bytearray @storage, @start, total
+        str = String.from_chararray @storage, @start, total
         @start += total
 
         str
@@ -283,6 +286,9 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?:
+      warn("encoding options not supported in 1.8")
+      return ret
     else
       raise ArgumentError, "invalid mode -- #{mode}"
     end
@@ -295,6 +301,9 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?:
+      warn("encoding options not supported in 1.8")
+      return ret
     else
       raise ArgumentError, "invalid mode -- #{mode}"
     end
@@ -454,57 +463,6 @@ class IO
     ensure
       pipe.close unless pipe.closed?
     end
-  end
-
-  ##
-  # Opens the file, optionally seeks to the given offset,
-  # then returns length bytes (defaulting to the rest of
-  # the file). read ensures the file is closed before returning.
-  #
-  #  IO.read("testfile")           #=> "This is line one\nThis is line two\nThis is line three\nAnd so on...\n"
-  #  IO.read("testfile", 20)       #=> "This is line one\nThi"
-  #  IO.read("testfile", 20, 10)   #=> "ne one\nThis is line "
-  def self.read(name, length=undefined, offset=0)
-    name = StringValue(name)
-    length ||= undefined
-    offset ||= 0
-
-    offset = Rubinius::Type.coerce_to(offset, Fixnum, :to_int)
-
-    if offset < 0
-      raise Errno::EINVAL, "offset must not be negative"
-    end
-
-    unless length.equal?(undefined)
-      length = Rubinius::Type.coerce_to(length, Fixnum, :to_int)
-
-      if length < 0
-        raise ArgumentError, "length must not be negative"
-      end
-    end
-
-    # Detect pipe mode
-    if name[0] == ?|
-      io = IO.popen(name[1..-1], "r")
-      return nil unless io # child process
-    else
-      io = File.new(name)
-    end
-
-    str = nil
-    begin
-      io.seek(offset) unless offset == 0
-
-      if length.equal?(undefined)
-        str = io.read
-      else
-        str = io.read length
-      end
-    ensure
-      io.close
-    end
-
-    return str
   end
 
   ##
@@ -1547,7 +1505,7 @@ class IO
         mode = IO.parse_mode(mode)
       end
 
-      reopen_path StringValue(other), mode
+      reopen_path Rubinius::Type.coerce_to_path(other), mode
       seek 0, SEEK_SET
     end
 
