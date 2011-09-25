@@ -44,7 +44,7 @@ override_dh_auto_clean: override_dh_auto_configure
 	rake distclean
 	cp /tmp/instructions.markdown web/_includes/instructions.markdown
 	$(RM) vm/external_libs/*.data
-	for dir in vm/external_libs/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
+	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
 
 override_dh_clean:
 	dh_clean --exclude=vendor/libgdtoa/makefile.orig
