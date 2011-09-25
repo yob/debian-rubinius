@@ -40,9 +40,7 @@ override_dh_auto_install:
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
-	cp web/_includes/instructions.markdown /tmp/instructions.markdown
 	rake distclean
-	cp /tmp/instructions.markdown web/_includes/instructions.markdown
 	$(RM) vendor/*.data
 	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
 
