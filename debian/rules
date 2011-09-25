@@ -45,5 +45,6 @@ override_dh_auto_clean: override_dh_auto_configure
 
 override_dh_clean:
 	dh_clean --exclude=vendor/libgdtoa/makefile.orig
+	$(RM) config.rb
 
 # vim: ts=8 sw=8 noexpandtab
