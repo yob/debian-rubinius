@@ -25,6 +25,9 @@ move documentation out of /usr/lib
 
 export build system patches to debian/patches
 
-how to deal with the bundled rake?
+bundled binaries
 
-Rubinius does not provide /usr/bin/erb !!
+  how to deal with the bundled rake?
+  Rubinius does not provide /usr/bin/erb !!
+  maybe need an optoin --disable-extra-binaries to not install anything besides rbx at all
+  Rubinius code knows where Rubygems are supposed to be (kernel/loader.rb)
