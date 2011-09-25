@@ -8,31 +8,32 @@ LIB_DIR		= /usr/lib
 GEM_DIR		= /var/lib/gems
 LLVM_CONFIG	= /usr/bin/llvm-config-2.8
 
+CONFIGURE       = \
+  ./configure \
+    --llvm-config=/usr/bin/llvm-config-2.8 \
+    --libdir=/usr/lib \
+    --bindir=/usr/bin \
+    --mandir=/usr/share/man/man1 \
+    --includedir=/usr/include/rubinius \
+    --vendordir=/usr/lib/ruby/vendor_ruby \
+    --sitedir=/usr/local/lib/site_ruby \
+    --gemsdir=/usr/local/lib/rubinius/gems \
+    --disable-preinstalled-gems \
+    --disable-extra-programs
+
 %:
 	dh $@
 
 override_dh_auto_configure:
-	./configure \
-		--bindir=$(BIN_DIR) \
-		--includedir=$(INC_DIR) \
-		--libdir=$(LIB_DIR) \
-		--mandir=$(MAN_DIR) \
-		--gemsdir=$(GEM_DIR) \
-		--llvm-config=$(LLVM_CONFIG)
+	$(CONFIGURE)
 
 override_dh_auto_build:
 	rake build
 
 override_dh_auto_install:
 	FAKEROOT=$(DESTDIR) rake install
-	for program in $$(find debian/rubinius/usr/bin -not -type d -and -not -name rbx); do \
-		mv $$program $$program-rbx; \
-	done
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
-	mkdir -p $(DESTDIR)/etc/bash_completion.d
-	sed -e 's/@@VERSION@@/-rbx/g; s/@@DOTLESS_VERSION@@/rbx/g' debian/etc/bash_completion.d/gem.in > $(DESTDIR)/etc/bash_completion.d/gem-rbx
-
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
