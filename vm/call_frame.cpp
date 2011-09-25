@@ -20,7 +20,7 @@ namespace rubinius {
     while(use && use->is_inline_block()) {
       CallFrame* yielder = use->previous;
       if(!yielder) return Qnil;
-      // This works because the creater is always one above
+      // This works because the creator is always one above
       // the yielder with inline blocks.
       use = yielder->previous;
     }
@@ -35,7 +35,7 @@ namespace rubinius {
     while(use && use->is_inline_block()) {
       CallFrame* yielder = use->previous;
       if(!yielder) return;
-      // This works because the creater is always one above
+      // This works because the creator is always one above
       // the yielder with inline blocks.
       use = yielder->previous;
     }
@@ -66,14 +66,19 @@ namespace rubinius {
     return 0;
   }
 
-  void CallFrame::print_backtrace(STATE) {
-    print_backtrace(state, std::cout);
+  void CallFrame::print_backtrace(STATE, int total) {
+    print_backtrace(state, std::cout, total);
   }
 
-  void CallFrame::print_backtrace(STATE, std::ostream& stream) {
+  void CallFrame::print_backtrace(STATE, std::ostream& stream, int total) {
     CallFrame* cf = this;
 
+    int i = -1;
+
     while(cf) {
+      i++;
+
+      if(total > 0 && i == total) return;
       stream << static_cast<void*>(cf) << ": ";
 
       if(NativeMethodFrame* nmf = cf->native_method_frame()) {
@@ -120,10 +125,14 @@ namespace rubinius {
           const char* mod_name;
           if(cf->module()->nil_p()) {
             mod_name = cf->cm->scope()->module()->name()->c_str(state);
-          } else if(cf->module()->name()->nil_p()) {
-            mod_name = cf->cm->scope()->module()->name()->c_str(state);
           } else {
-            mod_name = cf->module()->name()->c_str(state);
+            if(Symbol* s = try_as<Symbol>(cf->module()->name())) {
+              mod_name = s->c_str(state);
+            } else if(Symbol* s = try_as<Symbol>(cf->cm->scope()->module()->name())) {
+              mod_name = s->c_str(state);
+            } else {
+              mod_name = "<anonymous module>";
+            }
           }
           stream << mod_name << "#";
         }
@@ -174,7 +183,7 @@ namespace rubinius {
   }
 
   void CallFrame::dump() {
-    VM* state = VM::current_state();
+    VM* state = VM::current();
     std::cout << "<CallFrame:" << (void*)this << " ";
 
     if(native_method_p()) {
@@ -218,7 +227,7 @@ namespace rubinius {
   /* For debugging. */
   extern "C" {
     void __printbt__(CallFrame* call_frame) {
-      call_frame->print_backtrace(VM::current_state());
+      call_frame->print_backtrace(VM::current());
     }
   }
 }

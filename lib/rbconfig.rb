@@ -41,20 +41,33 @@ module RbConfig
   CONFIG["TEENY"]              = teeny
   CONFIG["ruby_version"]       = "$(MAJOR).$(MINOR)"
   CONFIG["RUBY_SO_NAME"]       = "rubinius-#{Rubinius::VERSION}"
-  CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR_PATH}"
+
+  case
+  when Rubinius.ruby18?
+    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR18_PATH}"
+  when Rubinius.ruby19?
+    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR19_PATH}"
+  when Rubinius.ruby20?
+    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR20_PATH}"
+  else
+    raise Exception, "no C-API header directory defined"
+  end
+
   CONFIG["LIBS"]               = ""
 
-  sitedir                      = Rubinius::SITE_PATH
-  sitelibdir                   = sitedir
-  arch                         = "#{Rubinius::CPU}-#{Rubinius::OS}"
-
-  CONFIG["sitedir"]            = sitedir
-  CONFIG["sitelibdir"]         = sitelibdir
-  CONFIG["arch"]               = arch
-  CONFIG["sitearch"]           = arch
-  CONFIG["rubylibdir"]         = sitelibdir
-  CONFIG["archdir"]            = "#{sitelibdir}/#{arch}"
-  CONFIG["sitearchdir"]        = "#{sitelibdir}/#{arch}"
+  rubinius_version             = 'rbx-' + Rubinius::LIB_VERSION
+  # arch identification
+  CONFIG["arch"]               = "#{Rubinius::CPU}-#{Rubinius::OS}"
+  CONFIG["sitearch"]           = '$(arch)'
+  # paths
+  CONFIG["rubylibdir"]         = "$(libdir)/rubinius/#{rubinius_version}"
+  CONFIG["archdir"]            = '$(rubylibdir)/$(arch)'
+  CONFIG["sitedir"]            = Rubinius::SITE_PATH
+  CONFIG["sitelibdir"]         = "$(sitedir)/#{rubinius_version}"
+  CONFIG["sitearchdir"]        = "$(sitelibdir)/$(arch)"
+  CONFIG["vendordir"]          = Rubinius::VENDOR_PATH
+  CONFIG["vendorlibdir"]       = "$(vendordir)/#{rubinius_version}"
+  CONFIG["vendorarchdir"]      = '$(vendorlibdir)/$(arch)'
   CONFIG["topdir"]             = File.dirname(__FILE__)
   # some of these only relevant to cross-compiling
   cpu                          = Rubinius::CPU
@@ -88,6 +101,7 @@ module RbConfig
   CONFIG["MAKEDIRS"]           = "mkdir -p"
   # compile tools
   CONFIG["CC"]                 = Rubinius::BUILD_CONFIG[:cc]
+  CONFIG["CXX"]                = Rubinius::BUILD_CONFIG[:cxx]
   CONFIG["CPP"]                = "#{Rubinius::BUILD_CONFIG[:cc]} -E"
   CONFIG["YACC"]               = "bison -y"
   CONFIG["RANLIB"]             = "ranlib"
@@ -109,7 +123,12 @@ module RbConfig
   # since we hardcode using gcc, and this flag is only
   # used by mkmf to compile extensions, be sure PIC is in
   # there
-  CONFIG["CFLAGS"]             = "-ggdb3 -O2 -fPIC"
+  CONFIG["CFLAGS"]             = "-ggdb3 -fPIC"
+  if ENV['DEV']
+    CONFIG["CFLAGS"] << " -O0"
+  else
+    CONFIG["CFLAGS"] << " -O2"
+  end
   if user = Rubinius::BUILD_CONFIG[:user_cflags]
     CONFIG["CFLAGS"] << " #{user}" unless user.empty?
   end
@@ -126,7 +145,9 @@ module RbConfig
 
   CONFIG["OBJEXT"]             = "o"
   CONFIG["GNU_LD"]             = ""
-  CONFIG["CPPOUTFILE"]         = ""
+  CONFIG["CPPOUTFILE"]         = "-o conftest.i"
+  CONFIG["OUTFLAG"]            = "-o "
+  CONFIG["COUTFLAG"]           = "-o "
   CONFIG["OUTFLAG"]            = "-o "
   CONFIG["YFLAGS"]             = ""
   CONFIG["ASFLAGS"]            = ""

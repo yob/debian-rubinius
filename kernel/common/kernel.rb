@@ -34,39 +34,8 @@ module Kernel
   end
   module_function :Float
 
-  def Integer(obj)
-    case obj
-    when Integer
-      obj
-    when Float
-      if obj.nan? or obj.infinite?
-        raise FloatDomainError, "unable to coerce #{obj} to Integer"
-      else
-        obj.to_int
-      end
-    when String
-      if obj.empty?
-        raise ArgumentError, "invalid value for Integer: (empty string)"
-      else
-        obj.to_inum(0, true)
-      end
-    else
-      # Can't use coerce_to or try_convert because I think there is an
-      # MRI bug here where it will return the value without checking
-      # the return type.
-      if obj.respond_to? :to_int
-        if val = obj.to_int
-          return val
-        end
-      end
-
-      Rubinius::Type.coerce_to obj, Integer, :to_i
-    end
-  end
-  module_function :Integer
-
   def Array(obj)
-    ary = Rubinius::Type.try_convert obj, Array, :to_ary
+    ary = Rubinius::Type.check_convert_type obj, Array, :to_ary
 
     return ary if ary
 
@@ -195,7 +164,10 @@ module Kernel
     return nil if a.empty?
     a.each { |obj| $stdout.puts obj.inspect }
     $stdout.flush
-    nil
+
+    return nil if Rubinius.ruby18?
+
+    a.size == 1 ? a.first : a
   end
   module_function :p
 
@@ -260,9 +232,8 @@ module Kernel
     prc.lambda_style!
     return prc
   end
-  alias_method :proc, :lambda
+
   module_function :lambda
-  module_function :proc
 
   def caller(start=1, exclude_kernel=true)
     # The + 1 is to skip this frame
@@ -304,11 +275,7 @@ module Kernel
       raise TypeError, 'time interval must be a numeric value'
     end
 
-    key = :__sleep_chanel__
-    unless chan = Thread.current[key]
-      chan = Rubinius::Channel.new
-      Thread.current[key] = chan
-    end
+    chan = Rubinius::Channel.new
 
     start = Process.time
     chan.receive_timeout duration
@@ -369,8 +336,6 @@ module Kernel
     self.class
   end
 
-  alias_method :==, :equal?
-
   # The "sorta" operator, also known as the case equality operator.
   # Generally while #eql? and #== are stricter, #=== is often used
   # to denote an acceptable match or inclusion. It returns true if
@@ -409,7 +374,7 @@ module Kernel
   end
 
   def extend(*modules)
-    Ruby.check_frozen
+    Rubinius.check_frozen
 
     modules.reverse_each do |mod|
       Rubinius.privately do
@@ -471,7 +436,7 @@ module Kernel
   # always false.
 
   def instance_of?(cls)
-    Ruby.primitive :object_instance_of
+    Rubinius.primitive :object_instance_of
 
     if cls.class != Class and cls.class != Module
       # We can obviously compare against Modules but result is always false
@@ -484,7 +449,7 @@ module Kernel
   alias_method :__instance_of__, :instance_of?
 
   def instance_variable_get(sym)
-    Ruby.primitive :object_get_ivar
+    Rubinius.primitive :object_get_ivar
 
     sym = Rubinius::Type.ivar_validate sym
     instance_variable_get sym
@@ -493,7 +458,7 @@ module Kernel
   alias_method :__instance_variable_get__, :instance_variable_get
 
   def instance_variable_set(sym, value)
-    Ruby.primitive :object_set_ivar
+    Rubinius.primitive :object_set_ivar
 
     sym = Rubinius::Type.ivar_validate sym
     instance_variable_set sym, value
@@ -502,7 +467,7 @@ module Kernel
   alias_method :__instance_variable_set__, :instance_variable_set
 
   def remove_instance_variable(sym)
-    Ruby.primitive :object_del_ivar
+    Rubinius.primitive :object_del_ivar
 
     # If it's already a symbol, then we're here because it doesn't exist.
     if sym.kind_of? Symbol
@@ -515,7 +480,7 @@ module Kernel
   private :remove_instance_variable
 
   def all_instance_variables
-    Ruby.primitive :object_ivar_names
+    Rubinius.primitive :object_ivar_names
 
     raise PrimitiveFailure, "Object#instance_variables failed"
   end
@@ -533,7 +498,7 @@ module Kernel
   alias_method :__instance_variables__, :instance_variables
 
   def instance_variable_defined?(name)
-    Ruby.primitive :object_ivar_defined
+    Rubinius.primitive :object_ivar_defined
 
     instance_variable_defined? Rubinius::Type.ivar_validate(name)
   end
@@ -665,16 +630,6 @@ module Kernel
     end
 
     Rubinius.convert_to_names methods.uniq
-  end
-
-  alias_method :send, :__send__
-
-  def to_a
-    if self.kind_of? Array
-      self
-    else
-      [self]
-    end
   end
 
   def to_s

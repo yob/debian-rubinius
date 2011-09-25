@@ -150,7 +150,10 @@ module Enumerable
     return to_enum :sort_by unless block_given?
 
     # Transform each value to a tuple with the value and it's sort by value
-    sort_values = map { |x| SortedElement.new(x, yield(x)) }
+    sort_values = map do
+      x = Rubinius.single_block_arg
+      SortedElement.new(x, yield(x))
+    end
 
     # Now sort the tuple according to the sort by value
     sort_values.sort!
@@ -285,30 +288,6 @@ module Enumerable
 
   ##
   # :call-seq:
-  #   enum.collect { | obj | block }  => array
-  #   enum.map     { | obj | block }  => array
-  #
-  # Returns a new array with the results of running +block+ once for every
-  # element in +enum+.
-  #
-  #   (1..4).collect { |i| i*i }   #=> [1, 4, 9, 16]
-  #   (1..4).collect { "cat"  }   #=> ["cat", "cat", "cat", "cat"]
-
-  def collect
-    if block_given?
-      ary = []
-      each { |o| ary << yield(o) }
-      ary
-    else
-      to_a
-    end
-  end
-
-  alias_method :map, :collect
-
-
-  ##
-  # :call-seq:
   #   enum.cycle(n = nil){ | obj | block } => nil or enumerator
   #
   # Calls block for each element of enum repeatedly n times or forever if none
@@ -404,8 +383,6 @@ module Enumerable
     nil
   end
 
-  alias_method :enum_cons, :each_cons
-
   def each_slice(slice_size)
     return to_enum(:each_slice, slice_size) unless block_given?
 
@@ -424,8 +401,6 @@ module Enumerable
     yield a unless a.empty?
     nil
   end
-
-  alias_method :enum_slice, :each_slice
 
   ##
   # :call-seq:
@@ -453,8 +428,6 @@ module Enumerable
     self
   end
 
-  alias_method :enum_with_index, :each_with_index
-
   ##
   # :call-seq:
   #   enum.detect(ifnone=nil) { | obj | block }  => obj or nil
@@ -470,7 +443,10 @@ module Enumerable
   def find(ifnone=nil)
     return to_enum(:find, ifnone) unless block_given?
 
-    each { |o| return o if yield(o) }
+    each do
+      o = Rubinius.single_block_arg
+      return o if yield(o)
+    end
 
     ifnone.call if ifnone
   end
@@ -491,7 +467,8 @@ module Enumerable
     return to_enum(:find_all) unless block_given?
 
     ary = []
-    each do |o|
+    each do
+      o = Rubinius.single_block_arg
       ary << o if yield(o)
     end
     ary
@@ -911,7 +888,10 @@ module Enumerable
 
   def to_a(*arg)
     ary = []
-    each(*arg) { |o| ary << o }
+    each(*arg) do
+      o = Rubinius.single_block_arg
+      ary << o
+    end
     ary
   end
 

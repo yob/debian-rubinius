@@ -16,7 +16,9 @@ end
 install_dirs = [
   BUILD_CONFIG[:bindir],
   BUILD_CONFIG[:libdir],
-  BUILD_CONFIG[:includedir],
+  BUILD_CONFIG[:include18dir],
+  BUILD_CONFIG[:include19dir],
+  BUILD_CONFIG[:include20dir],
   BUILD_CONFIG[:mandir],
   BUILD_CONFIG[:gemsdir]
 ]
@@ -49,12 +51,6 @@ def need_install?
   File.expand_path(Dir.pwd) != install_dir(BUILD_CONFIG[:libdir])
 end
 
-def precompile(dir)
-  (Dir["#{dir}/*.rb"] + Dir["#{dir}/**/*.rb"]).each do |file|
-    Rubinius::Compiler.compile file, "#{file}c", 1, [:default]
-  end
-end
-
 def install_file(source, pattern, dest)
   return if File.directory? source
 
@@ -66,20 +62,9 @@ def install_file(source, pattern, dest)
 end
 
 desc "Install Rubinius"
-task :install => %w[ build install:build install:files ]
+task :install => %w[ build install:files ]
 
 namespace :install do
-  desc "Compile all lib Ruby files"
-  task :build do
-    if need_install?
-      puts "Compiling library files for install..."
-      precompile "lib"
-
-      puts "Compiling pre-installed gem files for install..."
-      precompile "preinstalled-gems/rubinius/0.13/gems"
-    end
-  end
-
   desc "Install all the Rubinius files"
   task :files do
     if need_sudo? install_dirs
@@ -89,16 +74,18 @@ namespace :install do
     else
       install_dirs.each { |name| mkdir_p install_dir(name), :verbose => $verbose }
 
-      FileList["vm/capi/include/*.h"].each do |name|
-        install_file name, %r[^vm/capi/include], BUILD_CONFIG[:includedir]
+      [["18", "18"], ["19", "19"], ["19", "20"]].each do |a, b|
+        FileList["vm/capi/#{a}/include/**/*.h"].each do |name|
+          install_file name, %r[^vm/capi/#{a}/include], BUILD_CONFIG[:"include#{b}dir"]
+        end
       end
 
       FileList[
-        'runtime/index',
-        'runtime/signature',
         'runtime/platform.conf',
+        'runtime/**/index',
+        'runtime/**/signature',
         'runtime/**/*.rb{a,c}',
-        'runtime/**/load_order.txt'
+        'runtime/**/load_order*.txt'
       ].each do |name|
         install_file name, /^runtime/, BUILD_CONFIG[:runtime]
       end
@@ -128,6 +115,13 @@ namespace :install do
         install_file name, /^lib/, BUILD_CONFIG[:lib_path]
       end
 
+      if Rubinius::BUILD_CONFIG[:vendor_zlib]
+        # Install the zlib library files
+        FileList["lib/zlib/*"].each do |name|
+          install_file name, /^lib/, BUILD_CONFIG[:lib_path]
+        end
+      end
+
       # Install the documentation site
       FileList['lib/rubinius/documentation/**/*'].each do |name|
         install_file name, /^lib/, BUILD_CONFIG[:lib_path]
@@ -139,32 +133,36 @@ namespace :install do
       end
 
       # Install pre-installed gems
-      gems_dest = "#{BUILD_CONFIG[:gemsdir]}/rubinius/preinstalled"
-      FileList["preinstalled-gems/data/**/*"].each do |name|
-        install_file name, %r[^preinstalled-gems/data], gems_dest
-      end
+      if BUILD_CONFIG[:preinst_gems]
+        gems_dest = "#{BUILD_CONFIG[:gemsdir]}/rubinius/preinstalled"
+        FileList["preinstalled-gems/data/**/*"].each do |name|
+          install_file name, %r[^preinstalled-gems/data], gems_dest
+        end
 
-      FileList["preinstalled-gems/bin/*"].each do |name|
-        install_file name, /^preinstalled-gems/, BUILD_CONFIG[:gemsdir]
+        FileList["preinstalled-gems/bin/*"].each do |name|
+          install_file name, /^preinstalled-gems/, BUILD_CONFIG[:gemsdir]
+        end
       end
 
       # Install the Rubinius executable
       exe = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
       install "vm/vm", install_dir(exe), :mode => 0755, :verbose => true
 
-      # Install the testrb command
-      testrb = "#{BUILD_CONFIG[:bindir]}/testrb"
-      install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
+      if BUILD_CONFIG[:bindir_extra]
+        # Install the testrb command
+        testrb = "#{BUILD_CONFIG[:bindir]}/testrb"
+        install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
 
-      # Create symlinks for common commands
-      begin
-        ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
-          name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
-          File.delete name if File.exists? name
-          File.symlink BUILD_CONFIG[:program_name], name
+        # Create symlinks for common commands
+        begin
+          ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
+            name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
+            File.delete name if File.exists? name
+            File.symlink BUILD_CONFIG[:program_name], name
+          end
+        rescue NotImplementedError
+          # ignore
         end
-      rescue NotImplementedError
-        # ignore
       end
 
       STDOUT.puts <<-EOM

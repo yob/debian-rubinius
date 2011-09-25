@@ -311,6 +311,15 @@ class SystemExit < Exception
     @status = status
   end
 
+  ##
+  # Returns true is exiting successfully, false if not. A successful exit is
+  # one with a status equal to 0 (zero). Any other status is considered a
+  # unsuccessful exit.
+
+  def success?
+    status == Process::EXIT_SUCCESS
+  end
+
 end
 
 
@@ -319,7 +328,7 @@ class SystemCallError < StandardError
   attr_reader :errno
 
   def self.errno_error(message, errno)
-    Ruby.primitive :exception_errno_error
+    Rubinius.primitive :exception_errno_error
     raise PrimitiveFailure, "SystemCallError.errno_error failed"
   end
 
