@@ -19,6 +19,7 @@ Description: implementation of the Ruby programming language
  standard libraries.
 
 Package: rubinius-doc
+Section: doc
 Architecture: all
 Depends: ${misc:Depends}
 Description: Rubinius documentation
