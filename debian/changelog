@@ -1,5 +1,5 @@
-rubinius (2.0.0~pre1) unstable; urgency=low
+rubinius (2.0.0~pre1-1) unstable; urgency=low
 
   * Initial release (Closes: #591817)
 
- -- Antonio Terceiro <terceiro@debian.org>  Sat, 24 Sep 2011 18:49:54 -0700
+ -- Antonio Terceiro <terceiro@debian.org>  Sat, 24 Sep 2011 19:01:47 -0700
