@@ -1,4 +1,4 @@
-rubinius (2.0.0~pre2-1) unstable; urgency=low
+rubinius (2.0.0~pre20120520-1) unstable; urgency=low
 
   * Initial release (Closes: #591817)
 
