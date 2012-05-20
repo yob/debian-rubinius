@@ -41,6 +41,18 @@ override_dh_auto_clean: override_dh_auto_configure
 	rake distclean
 	$(RM) vendor/*.data
 	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
+	$(RM) configure.log
+	$(RM) lib/ext/melbourne/.build_ruby
+	$(RM) lib/readline.rb
+	$(RM) lib/rubinius/build_config.rb
+	$(RM) vendor/oniguruma/config.h
+	$(RM) vm/capi/18/include/config.h
+	$(RM) vm/capi/18/include/mri_oop.h
+	$(RM) vm/capi/18/include/rbx_config.h
+	$(RM) vm/capi/19/include/rbx_config.h
+	$(RM) vm/capi/19/include/ruby/config.h
+	$(RM) vm/capi/19/include/ruby/mri_oop.h
+	$(RM) vm/gen/config.h
 
 override_dh_clean:
 	dh_clean --exclude=vendor/libgdtoa/makefile.orig
