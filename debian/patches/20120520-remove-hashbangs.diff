@@ -1,0 +1,178 @@
+diff --git a/lib/18/bigdecimal/sample/linear.rb b/lib/18/bigdecimal/sample/linear.rb
+index 88a62ff..5aca0ca 100644
+--- a/lib/18/bigdecimal/sample/linear.rb
++++ b/lib/18/bigdecimal/sample/linear.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # linear.rb
+ #
+diff --git a/lib/18/bigdecimal/sample/nlsolve.rb b/lib/18/bigdecimal/sample/nlsolve.rb
+index 7f729e6..c36b179 100644
+--- a/lib/18/bigdecimal/sample/nlsolve.rb
++++ b/lib/18/bigdecimal/sample/nlsolve.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # nlsolve.rb
+ # An example for solving nonlinear algebraic equation system.
+diff --git a/lib/18/bigdecimal/sample/pi.rb b/lib/18/bigdecimal/sample/pi.rb
+index 2f7dd27..0d919d4 100644
+--- a/lib/18/bigdecimal/sample/pi.rb
++++ b/lib/18/bigdecimal/sample/pi.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # pi.rb
+ #
+diff --git a/lib/18/irb/cmd/subirb.rb b/lib/18/irb/cmd/subirb.rb
+index aa41271..14f7744 100644
+--- a/lib/18/irb/cmd/subirb.rb
++++ b/lib/18/irb/cmd/subirb.rb
+@@ -1,4 +1,3 @@
+-#!/usr/local/bin/ruby
+ #
+ #   multi.rb - 
+ #   	$Release Version: 0.9.5$
+diff --git a/lib/18/irb/ext/save-history.rb b/lib/18/irb/ext/save-history.rb
+index aa715ca..4e22c89 100644
+--- a/lib/18/irb/ext/save-history.rb
++++ b/lib/18/irb/ext/save-history.rb
+@@ -1,4 +1,3 @@
+-#!/usr/local/bin/ruby
+ #
+ #   save-history.rb -
+ #   	$Release Version: 0.9.5$
+diff --git a/lib/18/set.rb b/lib/18/set.rb
+index 8f23443..d1db6ad 100644
+--- a/lib/18/set.rb
++++ b/lib/18/set.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # set.rb - defines the Set class
+ #++
+diff --git a/lib/18/tsort.rb b/lib/18/tsort.rb
+index a014e7f..9e664ea 100644
+--- a/lib/18/tsort.rb
++++ b/lib/18/tsort.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # tsort.rb - provides a module for topological sorting and strongly connected components.
+ #++
+diff --git a/lib/19/bigdecimal/sample/linear.rb b/lib/19/bigdecimal/sample/linear.rb
+index 88a62ff..5aca0ca 100644
+--- a/lib/19/bigdecimal/sample/linear.rb
++++ b/lib/19/bigdecimal/sample/linear.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # linear.rb
+ #
+diff --git a/lib/19/bigdecimal/sample/nlsolve.rb b/lib/19/bigdecimal/sample/nlsolve.rb
+index 7f729e6..c36b179 100644
+--- a/lib/19/bigdecimal/sample/nlsolve.rb
++++ b/lib/19/bigdecimal/sample/nlsolve.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # nlsolve.rb
+ # An example for solving nonlinear algebraic equation system.
+diff --git a/lib/19/bigdecimal/sample/pi.rb b/lib/19/bigdecimal/sample/pi.rb
+index 2f7dd27..0d919d4 100644
+--- a/lib/19/bigdecimal/sample/pi.rb
++++ b/lib/19/bigdecimal/sample/pi.rb
+@@ -1,5 +1,3 @@
+-#!/usr/local/bin/ruby
+-
+ #
+ # pi.rb
+ #
+diff --git a/lib/19/set.rb b/lib/19/set.rb
+index 1423dae..1694e16 100644
+--- a/lib/19/set.rb
++++ b/lib/19/set.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # set.rb - defines the Set class
+ #++
+diff --git a/lib/abbrev.rb b/lib/abbrev.rb
+index 01f2f9a..105480f 100644
+--- a/lib/abbrev.rb
++++ b/lib/abbrev.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ =begin
+ #
+ # Copyright (c) 2001,2003 Akinori MUSHA <knu@iDaemons.org>
+diff --git a/lib/bin/gem.rb b/lib/bin/gem.rb
+index 14c3d3c..8be1fc4 100755
+--- a/lib/bin/gem.rb
++++ b/lib/bin/gem.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # Copyright 2006 by Chad Fowler, Rich Kilmer, Jim Weirich and others.
+ # All rights reserved.
+diff --git a/lib/bin/irb.rb b/lib/bin/irb.rb
+index ac01861..ba5f596 100755
+--- a/lib/bin/irb.rb
++++ b/lib/bin/irb.rb
+@@ -1,4 +1,3 @@
+-#!/System/Library/Frameworks/Ruby.framework/Versions/1.8/usr/bin/ruby
+ #
+ #   irb.rb - intaractive ruby
+ #   	$Release Version: 0.9.5 $
+diff --git a/lib/bin/rar.rb b/lib/bin/rar.rb
+index 3e032fd..a1a1118 100644
+--- a/lib/bin/rar.rb
++++ b/lib/bin/rar.rb
+@@ -1,5 +1,3 @@
+-#!/usr/bin/env rubinius
+-
+ require 'bytecode/compiler'
+ require 'bytecode/rubinius'
+ require 'codearchive'
+diff --git a/lib/generator.rb b/lib/generator.rb
+index cd26512..0f8811e 100644
+--- a/lib/generator.rb
++++ b/lib/generator.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # $Idaemons: /home/cvs/rb/generator.rb,v 1.8 2001/10/03 08:54:32 knu Exp $
+ # $RoughId: generator.rb,v 1.10 2003/10/14 19:36:58 knu Exp $
+diff --git a/lib/rubygems/digest/md5.rb b/lib/rubygems/digest/md5.rb
+index f924579..d0e0bb5 100755
+--- a/lib/rubygems/digest/md5.rb
++++ b/lib/rubygems/digest/md5.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # Copyright 2006 by Chad Fowler, Rich Kilmer, Jim Weirich and others.
+ # All rights reserved.
+diff --git a/lib/rubygems/digest/sha1.rb b/lib/rubygems/digest/sha1.rb
+index 5a50b53..53cbed5 100755
+--- a/lib/rubygems/digest/sha1.rb
++++ b/lib/rubygems/digest/sha1.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # Copyright 2006 by Chad Fowler, Rich Kilmer, Jim Weirich and others.
+ # All rights reserved.
+diff --git a/lib/rubygems/digest/sha2.rb b/lib/rubygems/digest/sha2.rb
+index 5876c7a..2aae91f 100755
+--- a/lib/rubygems/digest/sha2.rb
++++ b/lib/rubygems/digest/sha2.rb
+@@ -1,4 +1,3 @@
+-#!/usr/bin/env ruby
+ #--
+ # Copyright 2006 by Chad Fowler, Rich Kilmer, Jim Weirich and others.
+ # All rights reserved.
