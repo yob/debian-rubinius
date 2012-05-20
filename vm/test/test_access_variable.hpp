@@ -37,7 +37,7 @@ public:
     Object* ret = av->access_execute(state, &cf, av, G(object), args);
     TS_ASSERT(try_as<Symbol>(ret));
 
-    TS_ASSERT_EQUALS(std::string("Object"), as<Symbol>(ret)->c_str(state));
+    TS_ASSERT_EQUALS(std::string("Object"), as<Symbol>(ret)->cpp_str(state));
   }
 
   void test_write_variable_is_slot() {
@@ -49,12 +49,12 @@ public:
     Arguments args(state->symbol("blah"), G(object), 1, ary);
 
     av->name(state, state->symbol("@module_name"));
-    av->write(state, Qtrue);
+    av->write(state, cTrue);
 
     Object* ret = av->access_execute(state, &cf, av, G(object), args);
     TS_ASSERT_EQUALS(ret, val);
 
-    TS_ASSERT_EQUALS(val, G(object)->name());
+    TS_ASSERT_EQUALS(val, G(object)->module_name());
   }
 
   void test_access_variable() {
@@ -70,7 +70,7 @@ public:
     Object* ret = av->execute(state, &cf, av, G(object), args);
     TS_ASSERT(try_as<Symbol>(ret));
 
-    TS_ASSERT_EQUALS(std::string("Sweet"), as<Symbol>(ret)->c_str(state));
+    TS_ASSERT_EQUALS(std::string("Sweet"), as<Symbol>(ret)->cpp_str(state));
   }
 
   void test_write_variable() {
@@ -82,7 +82,7 @@ public:
     Arguments args(state->symbol("blah"), G(object), 1, ary);
 
     av->name(state, state->symbol("@blah"));
-    av->write(state, Qtrue);
+    av->write(state, cTrue);
 
     Object* ret = av->execute(state, &cf, av, G(object), args);
     TS_ASSERT_EQUALS(ret, val);

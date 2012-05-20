@@ -10,11 +10,13 @@
 
 #include "object_utils.hpp"
 
+#include "configuration.hpp"
+
 namespace rubinius {
   BlockAsMethod* BlockAsMethod::create(STATE, Object* self, BlockEnvironment* be) {
     BlockAsMethod* pe = state->new_object<BlockAsMethod>(as<Class>(self));
     pe->block_env(state, be);
-
+    pe->inliners_ = 0;
     pe->execute = block_executor;
     return pe;
   }
@@ -25,7 +27,8 @@ namespace rubinius {
     BlockAsMethod* bm = as<BlockAsMethod>(exec);
 
     Object* splat = bm->block_env()->code()->splat();
-    int required = bm->block_env()->code()->required_args()->to_native();
+    size_t required = bm->block_env()->code()->required_args()->to_native();
+    size_t total_args = bm->block_env()->code()->total_args()->to_native();
 
     /*
      * These are the block shapes, required args, and splat that we may see,
@@ -35,7 +38,7 @@ namespace rubinius {
      *  -------------|---------------|-------|-------
      *  { || }       |  0            |  nil  |  ==
      *  {  }         |  0            |  -2   |  none
-     *  { |a| }      |  1            |  nil  |  none
+     *  { |a| }      |  1            |  nil  |  none (1.8), == (>= 1.9)
      *  { |*a| }     |  0            |  0    |  none
      *  { |a, b| }   |  2            |  nil  |  ==
      *  { |a, *b| }  |  1            |  1    |  >=
@@ -45,13 +48,31 @@ namespace rubinius {
      * no arguments are passed). This is handled by the bytecode prologue
      * of the block.
      */
-    if((splat->nil_p() && (required == 0 || required > 1)
-            && (size_t)required != args.total())
-        || (!splat->nil_p() && required > 0 && (size_t)required > args.total())) {
+    bool exception = false;
+    size_t expected = 0;
+    if(splat->nil_p()) {
+      if((!LANGUAGE_18_ENABLED(state) || required != 1)) {
+        if(args.total() > total_args) {
+          exception = true;
+          expected = total_args;
+        }
+        if(args.total() < required) {
+          exception = true;
+          expected = required;
+        }
+      }
+    } else {
+      if(required > args.total()) {
+        exception = true;
+        expected = required;
+      }
+    }
+
+    if(exception) {
       Exception* exc =
-        Exception::make_argument_error(state, required, args.total(), args.name());
+        Exception::make_argument_error(state, expected, args.total(), args.name());
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
       return NULL;
     }
 

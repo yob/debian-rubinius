@@ -11,6 +11,7 @@ namespace rubinius {
   class CompiledMethod;
   class Module;
   struct CallFrame;
+  class Fiber;
 
   /**
    *  Variable information.
@@ -29,6 +30,9 @@ namespace rubinius {
     Tuple*          heap_locals_; // slot
     Object*         last_match_; // slot
 
+    // The Fiber that the scope was created on
+    Fiber*          fiber_; // slot
+
   public:
     Object* self_;    // slot
 
@@ -45,6 +49,7 @@ namespace rubinius {
     attr_accessor(self, Object);
     attr_accessor(heap_locals, Tuple);
     attr_accessor(last_match, Object);
+    attr_accessor(fiber, Fiber);
 
     static void init(STATE);
     static void bootstrap_methods(STATE);
@@ -65,10 +70,6 @@ namespace rubinius {
 
     void set_block_as_method(bool val) {
       block_as_method_ = (val ? 1 : 0);
-    }
-
-    void update_parent(VariableScope* vs) {
-      parent_ = vs;
     }
 
     void set_local(STATE, int pos, Object* val) {
@@ -110,8 +111,14 @@ namespace rubinius {
     // Rubinius.primitive :variable_scope_current
     static VariableScope* current(STATE, CallFrame* calling_environment);
 
+    // Rubinius.primitive :variable_scope_synthesize
+    static VariableScope* synthesize(STATE, CompiledMethod* method, Module* module, Object* parent, Object* self, Object* block, Tuple* locals);
+
     // Rubinius.primitive :variable_scope_locals
     Tuple* locals(STATE);
+
+    // Rubinius.primitive :variable_scope_set_local
+    Object* set_local_prim(STATE, Fixnum* number, Object* object);
 
     // Rubinius.primitive :variable_scope_method_visibility
     Object* method_visibility(STATE);
@@ -121,11 +128,9 @@ namespace rubinius {
     public:
       Info(object_type type) : TypeInfo(type) { }
       virtual void mark(Object* t, ObjectMark& mark);
-      virtual void visit(Object*, ObjectVisitor&);
       virtual void set_field(STATE, Object*, size_t, Object*);
       virtual Object* get_field(STATE, Object*, size_t);
       virtual void auto_mark(Object*, ObjectMark&);
-      virtual void auto_visit(Object*, ObjectVisitor&);
       virtual void populate_slot_locations();
     };
   };

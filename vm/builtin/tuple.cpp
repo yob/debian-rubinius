@@ -63,11 +63,11 @@ namespace rubinius {
     assert(fields >= 0 && fields < INT32_MAX);
 
     // Fast path using GC optimized tuple creation
-    Tuple* tup = state->new_young_tuple_dirty(fields);
+    Tuple* tup = state->vm()->new_young_tuple_dirty(fields);
 
     if(likely(tup)) {
       for(native_int i = 0; i < fields; i++) {
-        tup->field[i] = Qnil;
+        tup->field[i] = cNil;
       }
 
       return tup;
@@ -77,7 +77,7 @@ namespace rubinius {
 
     size_t bytes;
 
-    tup = state->new_object_variable<Tuple>(G(tuple), fields, bytes);
+    tup = state->vm()->new_object_variable<Tuple>(G(tuple), fields, bytes);
     if(unlikely(!tup)) {
       Exception::memory_error(state);
     }
@@ -217,7 +217,7 @@ namespace rubinius {
         // cleanup all the bins after
         i = j;
         while(i < rend) {
-          this->field[i] = Qnil;
+          this->field[i] = cNil;
           ++i;
         }
         return Fixnum::from(rend-j);
@@ -245,7 +245,7 @@ namespace rubinius {
       }
 
       while(i < size) {
-        this->field[i++] = Qnil;
+        this->field[i++] = cNil;
       }
     }
 
@@ -302,7 +302,7 @@ namespace rubinius {
   Tuple* Tuple::tuple_dup(STATE) {
     native_int fields = num_fields();
 
-    Tuple* tup = state->new_young_tuple_dirty(fields);
+    Tuple* tup = state->vm()->new_young_tuple_dirty(fields);
 
     if(likely(tup)) {
       for(native_int i = 0; i < fields; i++) {
@@ -344,14 +344,6 @@ namespace rubinius {
     for(native_int i = 0; i < tup->num_fields(); i++) {
       tmp = mark.call(tup->field[i]);
       if(tmp) mark.set(obj, &tup->field[i], tmp);
-    }
-  }
-
-  void Tuple::Info::visit(Object* obj, ObjectVisitor& visit) {
-    Tuple* tup = as<Tuple>(obj);
-
-    for(native_int i = 0; i < tup->num_fields(); i++) {
-      visit.call(tup->field[i]);
     }
   }
 

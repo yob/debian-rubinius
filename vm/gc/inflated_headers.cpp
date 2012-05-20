@@ -1,7 +1,7 @@
-#include "gc/inflated_headers.hpp"
 #include "oop.hpp"
 #include "vm.hpp"
 #include "objectmemory.hpp"
+#include "gc/inflated_headers.hpp"
 
 #include <iostream>
 
@@ -25,6 +25,8 @@ namespace rubinius {
     if(!free_list_) allocate_chunk();
     InflatedHeader* header = free_list_;
     free_list_ = header->next();
+
+    header->clear();
 
     in_use_++;
     header->set_object(obj);

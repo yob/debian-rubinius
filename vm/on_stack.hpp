@@ -1,3 +1,6 @@
+#ifndef RBX_ON_STACK_HPP
+#define RBX_ON_STACK_HPP
+
 #include "gc/variable_buffer.hpp"
 
 namespace rubinius {
@@ -13,7 +16,7 @@ namespace rubinius {
 
     template <typename T>
     OnStack(STATE, T& o1)
-      : buffer_(state->variable_root_buffers(), objects_, size)
+      : buffer_(state->vm()->current_root_buffers(), objects_, size)
     {
       // Ok, let me explain.
       // We want to get the address of o1 to put into the buffer, so that
@@ -48,7 +51,7 @@ namespace rubinius {
 
     template <typename T1, typename T2>
     OnStack(STATE, T1& o1, T2& o2)
-      : buffer_(state->variable_root_buffers(), objects_, size)
+      : buffer_(state->vm()->current_root_buffers(), objects_, size)
     {
       (void)static_cast<Object*>(o1);
       (void)static_cast<Object*>(o2);
@@ -59,7 +62,7 @@ namespace rubinius {
 
     template <typename T1, typename T2, typename T3>
     OnStack(STATE, T1& o1, T2& o2, T3& o3)
-      : buffer_(state->variable_root_buffers(), objects_, size)
+      : buffer_(state->vm()->current_root_buffers(), objects_, size)
     {
       (void)static_cast<Object*>(o1);
       (void)static_cast<Object*>(o2);
@@ -72,7 +75,7 @@ namespace rubinius {
 
     template <typename T1, typename T2, typename T3, typename T4>
     OnStack(STATE, T1& o1, T2& o2, T3& o3, T4& o4)
-      : buffer_(state->variable_root_buffers(), objects_, size)
+      : buffer_(state->vm()->current_root_buffers(), objects_, size)
     {
       (void)static_cast<Object*>(o1);
       (void)static_cast<Object*>(o2);
@@ -86,3 +89,5 @@ namespace rubinius {
     }
   };
 }
+
+#endif

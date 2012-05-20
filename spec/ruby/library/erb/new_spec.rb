@@ -35,14 +35,14 @@ END
     end
   end
 
-  it 'remove "\n" when trim_mode is 1 or \'>\'' do
+  it "removes '\n' when trim_mode is 1 or '>'" do
     expected = "<ul>\n<li>1</li>\n<li>2</li>\n<li>3</li>\n</ul>\n"
     [1, '>'].each do |trim_mode|
       ERB.new(@eruby_str, nil, trim_mode).result.should == expected
     end
   end
 
-  it 'remove spaces at beginning of line and "\n" when trim_mode is 2 or \'<>\'' do
+  it "removes spaces at beginning of line and '\n' when trim_mode is 2 or '<>'" do
     expected = "<ul>\n<li>1</li>\n<li>2</li>\n<li>3</li>\n</ul>\n"
     [2, '<>'].each do |trim_mode|
       ERB.new(@eruby_str, nil, trim_mode).result.should == expected
@@ -111,10 +111,12 @@ END
     ERB.new(input, nil, '%-').result.should == expected
   end
 
-  it "accepts a safe level as second argument" do
-    input = "<b><%=- 2+2 %>"
-    safe_level = 3
-    lambda { ERB.new(input, safe_level).result }.should_not raise_error
+  not_compliant_on :rubinius do
+    it "accepts a safe level as second argument" do
+      input = "<b><%=- 2+2 %>"
+      safe_level = 3
+      lambda { ERB.new(input, safe_level).result }.should_not raise_error
+    end
   end
 
   it "changes '_erbout' variable name in the produced source" do

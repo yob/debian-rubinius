@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 
 ##
 # Method table associates symbols (names) with methods (executables). Each
@@ -29,7 +31,7 @@ module Rubinius
 
     def initialize(hash=nil)
       return unless hash
-      hash.each do |k,v|
+      hash.each do |k, v|
         self[k] = v
       end
     end
@@ -60,23 +62,6 @@ module Rubinius
       Rubinius.primitive :methodtable_delete
       raise PrimitiveFailure, "MethodTable#delete primitive failed"
     end
-
-    def each_entry
-      raise LocalJumpError, "no block given" unless block_given?
-
-      i = 0
-      while i < @bins
-        if entry = @values.at(i)
-          while entry
-            yield entry
-            entry = entry.next
-          end
-        end
-        i += 1
-      end
-      self
-    end
-
 
     def each
       raise LocalJumpError, "no block given" unless block_given?

@@ -1,4 +1,4 @@
-#include "helpers.hpp"
+
 #include "builtin/object.hpp"
 #include "call_frame.hpp"
 #include "builtin/autoload.hpp"
@@ -24,6 +24,10 @@
 #include "call_frame.hpp"
 #include "lookup_data.hpp"
 
+#include "on_stack.hpp"
+
+#include "helpers.hpp"
+
 namespace rubinius {
   namespace Helpers {
     Object* const_get_under(STATE, Module* mod, Symbol* name, bool* found) {
@@ -40,7 +44,7 @@ namespace rubinius {
         mod = mod->superclass();
       }
 
-      return Qnil;
+      return cNil;
     }
 
     Object* const_get(STATE, CallFrame* call_frame, Symbol* name, bool* found) {
@@ -108,7 +112,7 @@ namespace rubinius {
       result = G(object)->get_const(state, name, found, true);
       if(*found) return result;
 
-      return Qnil;
+      return cNil;
     }
 
     Object* const_missing_under(STATE, Module* under, Symbol* sym, CallFrame* call_frame) {
@@ -136,9 +140,7 @@ namespace rubinius {
 
     /** @todo Remove redundancy between this and sends. --rue */
     Tuple* locate_method_on(STATE, CallFrame* call_frame, Object* recv, Symbol* name, Object* priv) {
-      LookupData lookup(recv, recv->lookup_begin(state));
-      lookup.priv = (priv == Qtrue);
-
+      LookupData lookup(recv, recv->lookup_begin(state), CBOOL(priv) ? G(sym_private) : G(sym_protected));
       Dispatch dis(name);
 
       if(!GlobalCache::resolve(state, dis.name, dis, lookup)) {
@@ -166,12 +168,7 @@ namespace rubinius {
       if(super->nil_p()) super = G(object);
       Class* cls = Class::create(state, as<Class>(super));
 
-      if(under == G(object)) {
-        cls->name(state, name);
-      } else {
-        cls->set_name(state, under, name);
-      }
-
+      cls->set_name(state, name, under);
       under->set_const(state, name, cls);
 
       return cls;
@@ -182,13 +179,13 @@ namespace rubinius {
       if(cls->true_superclass(state) != super) {
         std::ostringstream message;
         message << "Superclass mismatch: given "
-                << as<Module>(super)->name()->c_str(state)
+                << as<Module>(super)->debug_str(state)
                 << " but previously set to "
-                << cls->true_superclass(state)->name()->c_str(state);
+                << cls->true_superclass(state)->debug_str(state);
         Exception* exc =
           Exception::make_type_error(state, Class::type, super, message.str().c_str());
         exc->locations(state, Location::from_call_stack(state, call_frame));
-        state->thread_state()->raise_exception(exc);
+        state->raise_exception(exc);
         return NULL;
       }
 
@@ -205,13 +202,17 @@ namespace rubinius {
         TypedRoot<Object*> sup(state, super);
 
         if(Autoload* autoload = try_as<Autoload>(obj)) {
-          obj = autoload->resolve(state, call_frame);
+          obj = autoload->resolve(state, call_frame, true);
 
           // Check if an exception occurred
           if(!obj) return NULL;
         }
 
-        return check_superclass(state, call_frame, as<Class>(obj), sup.get());
+        // Autoload::resolve will return nil if code loading failed, in which
+        // case we ignore the autoload.
+        if(!obj->nil_p()) {
+          return check_superclass(state, call_frame, as<Class>(obj), sup.get());
+        }
       }
 
       *created = true;
@@ -238,21 +239,28 @@ namespace rubinius {
 
       if(found) {
         if(Autoload* autoload = try_as<Autoload>(obj)) {
-          obj = autoload->resolve(state, call_frame);
+          obj = autoload->resolve(state, call_frame, true);
         }
 
-        return as<Module>(obj);
+        // Check if an exception occurred
+        if(!obj) return NULL;
+
+        // Autoload::resolve will return nil if code loading failed, in which
+        // case we ignore the autoload.
+        if(!obj->nil_p()) {
+          return as<Module>(obj);
+        }
       }
 
       module = Module::create(state);
 
-      module->set_name(state, under, name);
+      module->set_name(state, name, under);
       under->set_const(state, name, module);
 
       return module;
     }
 
-    bool yield_debugger(STATE, CallFrame* call_frame, Object* bp) {
+    bool yield_debugger(STATE, GCToken gct, CallFrame* call_frame, Object* bp) {
       Thread* cur = Thread::current(state);
       Thread* debugger = cur->debugger_thread();
 
@@ -278,7 +286,7 @@ namespace rubinius {
 
       // If we're hitting here, clear any chance that step would be used
       // without being explicitly requested.
-      state->clear_thread_step();
+      state->vm()->clear_thread_step();
 
       state->set_call_frame(call_frame);
 
@@ -292,11 +300,13 @@ namespace rubinius {
 
       Array* locs = Location::from_call_stack(state, call_frame, true, true);
 
-      debugger_chan->send(state,
+      OnStack<1> os(state, my_control);
+
+      debugger_chan->send(state, gct,
           Tuple::from(state, 4, bp, cur, my_control, locs));
 
       // Block until the debugger wakes us back up.
-      Object* ret = my_control->receive(state, call_frame);
+      Object* ret = my_control->receive(state, gct, call_frame);
 
       // Do not access any locals other than ret beyond here unless you add OnStack<>
       // to them! The GC has probably run and moved things.
@@ -307,8 +317,8 @@ namespace rubinius {
 
       // Process a few commands...
       if(ret == state->symbol("step")) {
-        state->get_attention();
-        state->set_thread_step();
+        state->vm()->get_attention();
+        state->vm()->set_thread_step();
       }
 
       // All done!

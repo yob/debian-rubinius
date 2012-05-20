@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Some terminology notes:
 #
@@ -70,7 +72,6 @@ class Module
 
     remove_class_variable verify_class_variable_name(name)
   end
-  private :remove_class_variable
 
   def __class_variables__
     Rubinius.primitive :module_class_variables
@@ -83,21 +84,16 @@ class Module
   end
 
   def name
-    @module_name ? @module_name.to_s : ""
-  end
-
-  alias_method :__name__, :name
-
-  def __path__
-    return @module_name if @module_name
-    inspect
+    Rubinius::Type.module_name self
   end
 
   def to_s
-    @module_name ? @module_name.to_s : super
+    Rubinius::Type.module_inspect self
   end
 
-  alias_method :inspect, :to_s
+  def inspect
+    to_s
+  end
 
   def lookup_method(sym, check_object_too=true, trim_im=true)
     mod = self
@@ -444,68 +440,15 @@ class Module
     static_scope = env.repoint_scope self
     return env.call_under(self, static_scope, *args)
   end
-
   alias_method :class_exec, :module_exec
 
-  def constants
-    tbl = Rubinius::LookupTable.new
-
-    @constant_table.each do |name, val|
-      tbl[name] = true
-    end
-
-    current = self.direct_superclass
-
-    while current and current != Object
-      current.constant_table.each do |name, val|
-        tbl[name] = true unless tbl.has_key? name
-      end
-
-      current = current.direct_superclass
-    end
-
-    # special case: Module.constants returns Object's constants
-    if self.equal? Module
-      Object.constant_table.each do |name, val|
-        tbl[name] = true unless tbl.has_key? name
-      end
-    end
-
-    Rubinius.convert_to_names tbl.keys
-  end
-
-  def const_get(name)
-    name = normalize_const_name(name)
-
-    current, constant = self, undefined
-
-    while current
-      constant = current.constant_table.fetch name, undefined
-      unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
-        return constant
-      end
-
-      current = current.direct_superclass
-    end
-
-    if instance_of?(Module)
-      constant = Object.constant_table.fetch name, undefined
-      unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
-        return constant
-      end
-    end
-
-    const_missing(name)
-  end
-
   def const_set(name, value)
-    if Rubinius::Type.object_kind_of?(value, Module)
-      value.set_name_if_necessary(name, self)
+    name = Rubinius::Type.coerce_to_constant_name name
+
+    if Rubinius::Type.object_kind_of? value, Module
+      Rubinius::Type.set_module_name value, name, self
     end
 
-    name = normalize_const_name(name)
     @constant_table[name] = value
     Rubinius.inc_global_serial
 
@@ -521,7 +464,8 @@ class Module
   # with the name.
 
   def const_missing(name)
-    raise NameError, "Missing or uninitialized constant: #{self.__name__}::#{name}"
+    mod_name = Rubinius::Type.module_name self
+    raise NameError, "Missing or uninitialized constant: #{mod_name}::#{name}"
   end
 
   def <(other)
@@ -579,47 +523,6 @@ class Module
     raise PrimitiveFailure, "Module#=== primitive failed"
   end
 
-  def set_name_if_necessary(name, mod)
-    return if @module_name
-
-    if mod == Object
-      @module_name = name.to_sym
-    else
-      @module_name = "#{mod.__path__}::#{name}".to_sym
-    end
-  end
-
-  # Install a new Autoload object into the constants table
-  # See kernel/common/autoload.rb
-  def autoload(name, path)
-    unless path.kind_of? String
-      raise TypeError, "autoload filename must be a String"
-    end
-
-    raise ArgumentError, "empty file name" if path.empty?
-
-    return if Rubinius::CodeLoader.feature_provided?(path)
-
-    name = normalize_const_name(name)
-
-    if existing = @constant_table[name]
-      if existing.kind_of? Autoload
-        # If there is already an Autoload here, just change the path to
-        # autoload!
-        existing.set_path(path)
-      else
-        # Trying to register an autoload for a constant that already exists,
-        # ignore the request entirely.
-      end
-
-      return
-    end
-
-    constant_table[name] = Autoload.new(name, self, path)
-    Rubinius.inc_global_serial
-    return nil
-  end
-
   # Is an autoload trigger defined for the given path?
   def autoload?(name)
     name = name.to_sym
@@ -640,7 +543,8 @@ class Module
 
     sym = name.to_sym
     unless constant_table.has_key?(sym)
-      raise NameError, "Missing or uninitialized constant: #{self.__name__}::#{name}"
+      mod_name = Rubinius::Type.module_name self
+      raise NameError, "Missing or uninitialized constant: #{mod_name}::#{name}"
     end
 
     val = constant_table.delete(sym)
@@ -662,18 +566,6 @@ class Module
   end
 
   private :method_added
-
-  def normalize_const_name(name)
-    name = Rubinius::Type.coerce_to_symbol(name)
-
-    unless name.is_constant?
-      raise NameError, "wrong constant name #{name}"
-    end
-
-    name
-  end
-
-  private :normalize_const_name
 
   def initialize_copy(other)
     @method_table = other.method_table.dup
@@ -725,7 +617,7 @@ class Module
     end
   end
 
-  def dynamic_method(name, file=:dynamic, line=1)
+  def dynamic_method(name, file="(dynamic)", line=1)
     g = Rubinius::Generator.new
     g.name = name.to_sym
     g.file = file.to_sym
@@ -746,5 +638,10 @@ class Module
     Rubinius.add_method name, cm, self, :public
 
     return cm
+  end
+
+  def freeze
+    @method_table.freeze
+    super
   end
 end

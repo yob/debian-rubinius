@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Array
   # Creates a new Array from the return values of passing
   # each element in self to the supplied block.
@@ -19,15 +21,5 @@ class Array
     end
 
     out
-  end
-
-  def self.coerce_into_array(obj)
-    return [obj] unless obj
-
-    return obj.to_ary if obj.respond_to?(:to_ary)
-
-    # Just call #to_a, which wraps the reciever in an
-    # array if it's not one.
-    return obj.to_a
   end
 end

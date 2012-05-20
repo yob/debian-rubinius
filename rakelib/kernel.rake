@@ -112,14 +112,16 @@ compiler_files = FileList[
   opcodes,
   "lib/compiler/generator_methods.rb",
   "lib/melbourne.rb",
-  "lib/melbourne/**/*.rb"
+  "lib/melbourne/**/*.rb",
+  "vm/marshal.[ch]pp"
 ]
 
 parser_files = FileList[
   "lib/ext/melbourne/**/*.{c,h}pp",
   "lib/ext/melbourne/grammar18.y",
   "lib/ext/melbourne/grammar19.y",
-  "lib/ext/melbourne/lex.c.tab"
+  "lib/ext/melbourne/lex.c.tab",
+  "lib/ext/melbourne/lex.c.blt"
 ]
 
 
@@ -230,7 +232,7 @@ namespace :compiler do
 
     if BUILD_CONFIG[:which_ruby] == :ruby
       require "#{Rubinius::COMPILER_PATH}/mri_bridge"
-    elsif BUILD_CONFIG[:which_ruby] == :rbx && RUBY_VERSION < "1.9"
+    elsif BUILD_CONFIG[:which_ruby] == :rbx && RUBY_VERSION =~ /^1\.8/
       require "#{Rubinius::COMPILER_PATH}/rbx_bridge"
     end
 

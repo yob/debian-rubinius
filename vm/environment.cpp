@@ -13,6 +13,7 @@
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/module.hpp"
+#include "builtin/nativemethod.hpp"
 
 #ifdef ENABLE_LLVM
 #include "llvm/state.hpp"
@@ -21,6 +22,7 @@
 #elif RBX_LLVM_API_VER == 209
 #include <llvm/Support/Threading.h>
 #endif
+#include <llvm/Support/ManagedStatic.h>
 #endif
 
 #ifdef USE_EXECINFO
@@ -52,11 +54,13 @@
 #include <unistd.h>
 #include <sys/param.h>
 
+#include "missing/setproctitle.h"
+
 namespace rubinius {
 
   // Used by the segfault reporter. Calculated up front to avoid
   // crashing inside the crash handler.
-  static utsname machine_info;
+  static struct utsname machine_info;
   static char report_path[1024];
   static const char* report_file_name = ".rubinius_last_error";
 
@@ -82,7 +86,8 @@ namespace rubinius {
     VM::init_stack_size();
 
     shared = new SharedState(this, config, config_parser);
-    state = shared->new_vm();
+    root_vm = shared->new_vm();
+    state = new State(root_vm);
 
     uname(&machine_info);
 
@@ -106,8 +111,11 @@ namespace rubinius {
   }
 
   Environment::~Environment() {
-    VM::discard(state, state);
+    delete sig_handler_;
+
+    VM::discard(state, root_vm);
     SharedState::discard(shared);
+    delete state;
   }
 
   void cpp_exception_bug() {
@@ -185,7 +193,7 @@ namespace rubinius {
     }
 
     // print out all the frames to stderr
-    static const char header[] = 
+    static const char header[] =
       "Rubinius Crash Report #rbxcrashreport\n\n"
       "Error: signal ";
 
@@ -270,10 +278,10 @@ namespace rubinius {
     sigaction(SIGVTALRM, &action, NULL);
 #endif
 
-    state->set_run_signals(true);
-    SignalHandler* handler = new SignalHandler(state);
-    shared->set_signal_handler(handler);
-    handler->run();
+    state->vm()->set_run_signals(true);
+    sig_handler_ = new SignalHandler(state);
+    shared->set_signal_handler(sig_handler_);
+    sig_handler_->run(state);
 
 #ifndef RBX_WINDOWS
     // Ignore sigpipe.
@@ -321,7 +329,7 @@ namespace rubinius {
       char *s = b + strlen(rbxopt);
 
       while(b < s) {
-        while(*b && isspace(*b)) s++;
+        while(*b && isspace(*b)) b++;
 
         e = b;
         while(*e && !isspace(*e)) e++;
@@ -374,7 +382,7 @@ namespace rubinius {
     G(rubinius)->set_const(state, "OS_STARTUP_DIR",
         String::create(state, getcwd(buf, MAXPATHLEN)));
 
-    state->set_const("ARG0", String::create(state, argv[0]));
+    state->vm()->set_const("ARG0", String::create(state, argv[0]));
 
     Array* ary = Array::create(state, argc - 1);
     int which_arg = 0;
@@ -394,7 +402,9 @@ namespace rubinius {
       ary->set(state, which_arg++, String::create(state, arg)->taint(state));
     }
 
-    state->set_const("ARGV", ary);
+    state->vm()->set_const("ARGV", ary);
+
+    ruby_init_setproctitle(argc, argv);
 
     // Now finish up with the config
     if(config.print_config > 1) {
@@ -447,7 +457,7 @@ namespace rubinius {
       stream.get(); // eat newline
 
       // skip empty lines
-      if(line.size() == 0) continue;
+      if(line.empty()) continue;
 
       run_file(dir + "/" + line);
     }
@@ -479,7 +489,7 @@ namespace rubinius {
   }
 
   void Environment::boot_vm() {
-    state->initialize_as_root();
+    state->vm()->initialize_as_root();
   }
 
   void Environment::run_file(std::string file) {
@@ -499,8 +509,8 @@ namespace rubinius {
 
     cf->execute(state);
 
-    if(state->thread_state()->raise_reason() == cException) {
-      Exception* exc = as<Exception>(state->thread_state()->current_exception());
+    if(state->vm()->thread_state()->raise_reason() == cException) {
+      Exception* exc = as<Exception>(state->vm()->thread_state()->current_exception());
       std::ostringstream msg;
 
       msg << "exception detected at toplevel: ";
@@ -516,7 +526,7 @@ namespace rubinius {
             << ", expected "
             << as<Fixnum>(exc->get_ivar(state, state->symbol("@expected")))->to_native();
       }
-      msg << " (" << exc->klass()->name()->c_str(state) << ")";
+      msg << " (" << exc->klass()->debug_str(state) << ")";
       std::cout << msg.str() << "\n";
       exc->print_locations(state);
       Assertion::raise(msg.str().c_str());
@@ -525,29 +535,41 @@ namespace rubinius {
     delete cf;
   }
 
-  void Environment::halt() {
-    state->shared.tool_broker()->shutdown(state);
+  void Environment::halt_and_exit(STATE) {
+    halt(state);
+    int code = exit_code(state);
+#ifdef ENABLE_LLVM
+    llvm::llvm_shutdown();
+#endif
+    exit(code);
+  }
 
-    if(state->shared.config.ic_stats) {
-      state->shared.ic_registry()->print_stats(state);
+  void Environment::halt(STATE) {
+    state->shared().tool_broker()->shutdown(state);
+
+    if(state->shared().config.ic_stats) {
+      state->shared().ic_registry()->print_stats(state);
     }
 
-    state->set_call_frame(0);
+    GCTokenImpl gct;
 
     // Handle an edge case where another thread is waiting to stop the world.
-    if(state->shared.should_stop()) {
-      state->shared.checkpoint(state);
+    if(state->shared().should_stop()) {
+      state->checkpoint(gct, 0);
     }
+
+    NativeMethod::cleanup_thread(state);
 
 #ifdef ENABLE_LLVM
     LLVMState::shutdown(state);
 #endif
 
+    SignalHandler::shutdown();
+
     // Hold everyone.
-    state->shared.stop_the_world(state);
+    while(!state->stop_the_world());
     shared->om->run_all_io_finalizers(state);
 
-    SignalHandler::shutdown();
     // TODO: temporarily disable to sort out finalizing Pointer objects
     // shared->om->run_all_finalizers(state);
   }
@@ -555,7 +577,7 @@ namespace rubinius {
   /**
    * Returns the exit code to use when exiting the rbx process.
    */
-  int Environment::exit_code() {
+  int Environment::exit_code(STATE) {
 
 #ifdef ENABLE_LLVM
     if(LLVMState* ls = shared->llvm_state) {
@@ -566,8 +588,8 @@ namespace rubinius {
     }
 #endif
 
-    if(state->thread_state()->raise_reason() == cExit) {
-      if(Fixnum* fix = try_as<Fixnum>(state->thread_state()->raise_value())) {
+    if(state->vm()->thread_state()->raise_reason() == cExit) {
+      if(Fixnum* fix = try_as<Fixnum>(state->vm()->thread_state()->raise_value())) {
         return fix->to_native();
       } else {
         return -1;
@@ -636,15 +658,15 @@ namespace rubinius {
       stream.get(); // eat newline
 
       // skip empty lines
-      if(line.size() == 0) continue;
+      if(line.empty()) continue;
 
       load_directory(root + "/" + line);
     }
   }
 
   void Environment::load_tool() {
-    if(!state->shared.config.tool_to_load.set_p()) return;
-    std::string path = std::string(state->shared.config.tool_to_load.value) + ".";
+    if(!state->shared().config.tool_to_load.set_p()) return;
+    std::string path = std::string(state->shared().config.tool_to_load.value) + ".";
 
 #ifdef _WIN32
     path += "dll";
@@ -674,7 +696,7 @@ namespace rubinius {
       typedef int (*init_func)(rbxti::Env* env);
       init_func init = (init_func)sym;
 
-      if(!init(state->tooling_env())) {
+      if(!init(state->vm()->tooling_env())) {
         std::cerr << "Tool '" << path << "' reported failure to init.\n";
       }
     }
@@ -689,14 +711,15 @@ namespace rubinius {
    */
   void Environment::run_from_filesystem(std::string root) {
     int i = 0;
-    state->set_stack_start(&i);
+    state->vm()->set_root_stack(reinterpret_cast<uintptr_t>(&i),
+                                VM::cStackDepthMax);
 
     load_platform_conf(root);
     load_vm_options(argc_, argv_);
     boot_vm();
     load_argv(argc_, argv_);
 
-    state->initialize_config();
+    state->vm()->initialize_config();
 
     load_tool();
 
@@ -707,14 +730,14 @@ namespace rubinius {
     } else {
       root += "/18";
     }
-    G(rubinius)->set_const(state, "RUNTIME_PATH", String::create(state, root.c_str()));
+    G(rubinius)->set_const(state, "RUNTIME_PATH", String::create(state, root.c_str(), root.size()));
 
     load_kernel(root);
 
     start_signals();
     run_file(root + "/loader.rbc");
 
-    state->thread_state()->clear();
+    state->vm()->thread_state()->clear();
 
     Object* loader = G(rubinius)->get_const(state, state->symbol("Loader"));
     if(loader->nil_p()) {

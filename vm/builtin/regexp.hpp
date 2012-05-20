@@ -5,7 +5,7 @@
 #include "type_info.hpp"
 
 // HACK gross.
-// Forward declare ONLY if we haven't already included onig.h
+// Forward declare ONLY if we haven't already included oniguruma.h
 // We do this because onigurama seems to have regex_t be a weird
 // typedef. It's easier to just not bother with trying to duplicate
 // what it does and do this.
@@ -14,6 +14,7 @@ struct regex_t;
 #endif
 
 namespace rubinius {
+  class Encoding;
   class String;
   class Tuple;
   class LookupTable;
@@ -26,8 +27,8 @@ namespace rubinius {
     String* source_;     // slot
     LookupTable* names_; // slot
     regex_t* onig_data;
-    bool forced_encoding_;
-    uint32_t lock_;
+    bool fixed_encoding_;
+    thread::SpinLock lock_;
 
   public:
     /* accessors */
@@ -50,6 +51,9 @@ namespace rubinius {
 
     // Rubinius.primitive :regexp_options
     Fixnum* options(STATE);
+
+    // Rubinius.primitive :regexp_fixed_encoding_p
+    Object* fixed_encoding_p(STATE);
 
     // Rubinius.primitive :regexp_search_region
     Object* match_region(STATE, String* string, Fixnum* start, Fixnum* end, Object* forward);
@@ -78,15 +82,18 @@ namespace rubinius {
     // Rubinius.primitive :regexp_set_block_last_match
     static Object* set_block_last_match(STATE, CallFrame* calling_environment);
 
+    // Rubinius.primitive :regexp_encoding
+    Encoding* encoding(STATE);
+
+    Encoding* encoding(STATE, Encoding* enc);
+
     void make_managed(STATE);
 
     class Info : public TypeInfo {
     public:
       Info(object_type type) : TypeInfo(type) { }
       virtual void mark(Object* obj, ObjectMark& mark);
-      virtual void visit(Object* obj, ObjectVisitor& visit);
       virtual void auto_mark(Object* obj, ObjectMark& mark);
-      virtual void auto_visit(Object*, ObjectVisitor&);
       virtual void populate_slot_locations();
       virtual void set_field(STATE, Object*, size_t, Object*);
       virtual Object* get_field(STATE, Object*, size_t);

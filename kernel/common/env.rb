@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Interface to process environment variables.
 
@@ -7,20 +9,10 @@ module Rubinius
     include Rubinius::EnvironmentAccess
 
     def [](key)
-      getenv(StringValue(key)).freeze
+      value = getenv(StringValue(key))
+      set_encoding value
+      value.freeze
     end
-
-    def []=(key, value)
-      key = StringValue(key)
-      if value.nil?
-        unsetenv(key)
-      else
-        setenv key, StringValue(value), 1
-      end
-      value
-    end
-
-    alias_method :store, :[]=
 
     def each_key
       return to_enum(:each_key) unless block_given?
@@ -40,8 +32,6 @@ module Rubinius
       env = environ()
       ptr_size = FFI.type_size FFI.find_type(:pointer)
 
-      i = 0
-
       offset = 0
       cur = env + offset
 
@@ -50,6 +40,9 @@ module Rubinius
         key, value = entry.split '=', 2
         value.taint if value
         key.taint if key
+
+        set_encoding key
+        set_encoding value
 
         yield key, value
 
@@ -64,12 +57,16 @@ module Rubinius
 
     def delete(key)
       existing_value = self[key]
-      self[key] = nil if existing_value
+      if existing_value
+        self[key] = nil
+      elsif block_given?
+        yield key
+      end
       existing_value
     end
 
     def delete_if(&block)
-      return to_enum(:delete_it) unless block_given?
+      return to_enum(:delete_if) unless block_given?
       reject!(&block)
       self
     end
@@ -116,15 +113,14 @@ module Rubinius
     def reject!
       return to_enum(:reject!) unless block_given?
 
-      rejected = false
-      each do |k, v|
-        if yield(k, v)
-          delete k
-          rejected = true
-        end
-      end
+      # Avoid deleting from environ while iterating because the
+      # OS can handle that in a million different bad ways.
 
-      rejected ? self : nil
+      keys = []
+      each { |k, v| keys << k if yield(k, v) }
+      keys.each { |k| delete k }
+
+      keys.empty? ? nil : self
     end
 
     def clear
@@ -132,14 +128,14 @@ module Rubinius
       # OS can handle that in a million different bad ways.
 
       keys = []
-      each { |k,v| keys << k }
+      each { |k, v| keys << k }
       keys.each { |k| delete k }
 
       self
     end
 
     def has_value?(value)
-      each { |k,v| return true if v == value }
+      each { |k, v| return true if v == value }
       return false
     end
 
@@ -160,15 +156,19 @@ module Rubinius
       to_hash.invert
     end
 
+    def key(value)
+      index(value)
+    end
+
     def keys
       keys = []
-      each { |k,v| keys << k }
+      each { |k, v| keys << k }
       keys
     end
 
     def values
       vals = []
-      each { |k,v| vals << v }
+      each { |k, v| vals << v }
       vals
     end
 
@@ -179,7 +179,7 @@ module Rubinius
 
     def length
       sz = 0
-      each { |k,v| sz += 1 }
+      each { |k, v| sz += 1 }
       sz
     end
 
@@ -194,9 +194,13 @@ module Rubinius
       other.each { |k, v| self[k] = v }
     end
 
+    def select(&blk)
+      return to_enum unless block_given?
+      to_hash.select(&blk)
+    end
+
     def shift
       env = environ()
-      ptr_size = FFI.type_size FFI.find_type(:pointer)
 
       offset = 0
       cur = env + offset
@@ -213,17 +217,22 @@ module Rubinius
 
       delete key
 
+      set_encoding key
+      set_encoding value
+
       return [key, value]
     end
 
     def to_a
       ary = []
-      each { |k,v| ary << [k,v] }
+      each { |k, v| ary << [k, v] }
       ary
     end
 
     def to_hash
-      return environ_as_hash()
+      hsh = {}
+      each { |k, v| hsh[k] = v }
+      hsh
     end
 
     def update(other, &block)

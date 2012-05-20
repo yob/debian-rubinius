@@ -14,19 +14,13 @@ namespace rubinius {
   class GlobalCache;
   class StackVariables;
   class ManagedThread;
+  class LLVMState;
 
   namespace capi {
     class Handles;
   }
 
   typedef std::vector<Object*> ObjectArray;
-
-  class ObjectVisitor {
-  public:
-    virtual ~ObjectVisitor() { }
-    virtual Object* call(Object*) = 0;
-  };
-
 
   /**
    * Holds all the root pointers from which garbage collections will commence.
@@ -42,9 +36,15 @@ namespace rubinius {
     GlobalCache* global_cache_;
     std::list<ManagedThread*>* threads_;
     std::list<capi::Handle**>* global_handle_locations_;
+    GCTokenImpl* gc_token_;
+#ifdef ENABLE_LLVM
+    LLVMState* llvm_state_;
+#endif
 
   public:
-    GCData(STATE);
+    GCData(VM*, GCToken gct);
+    GCData(VM*);
+
     GCData(Roots& r,
            capi::Handles* handles = NULL, capi::Handles* cached_handles = NULL,
            GlobalCache *cache = NULL, std::list<ManagedThread*>* ths = NULL,
@@ -55,6 +55,9 @@ namespace rubinius {
       , global_cache_(cache)
       , threads_(ths)
       , global_handle_locations_(global_handle_locations)
+#ifdef ENABLE_LLVM
+      , llvm_state_(0)
+#endif
     {}
 
     Roots& roots() {
@@ -80,6 +83,38 @@ namespace rubinius {
     std::list<capi::Handle**>* global_handle_locations() {
       return global_handle_locations_;
     }
+
+    GCTokenImpl* gc_token() {
+      return gc_token_;
+    }
+
+#ifdef ENABLE_LLVM
+    LLVMState* llvm_state() {
+      return llvm_state_;
+    }
+#endif
+  };
+
+  class AddressDisplacement {
+    intptr_t offset_;
+    intptr_t lower_bound_;
+    intptr_t upper_bound_;
+
+  public:
+    AddressDisplacement(intptr_t o, intptr_t l, intptr_t u)
+      : offset_(o)
+      , lower_bound_(l)
+      , upper_bound_(u)
+    {}
+
+    template <typename T>
+      T displace(T ptr) {
+        intptr_t addr = (intptr_t)ptr;
+        if(addr < lower_bound_) return ptr;
+        if(addr >= upper_bound_) return ptr;
+
+        return (T)((char*)ptr + offset_);
+      }
   };
 
 
@@ -117,7 +152,7 @@ namespace rubinius {
     // Scans the specified Object for references to other Objects.
     void scan_object(Object* obj);
     void delete_object(Object* obj);
-    void walk_call_frame(CallFrame* top_call_frame);
+    void walk_call_frame(CallFrame* top_call_frame, AddressDisplacement* offset=0);
     void saw_variable_scope(CallFrame* call_frame, StackVariables* scope);
 
     /**
@@ -133,7 +168,7 @@ namespace rubinius {
     void clean_weakrefs(bool check_forwards=false);
     // Scans the thread for object references
     void scan(ManagedThread* thr, bool young_only);
-    void scan(VariableRootBuffers& buffers, bool young_only);
+    void scan(VariableRootBuffers& buffers, bool young_only, AddressDisplacement* offset=0);
     void scan(RootBuffers& rb, bool young_only);
 
     VM* state();

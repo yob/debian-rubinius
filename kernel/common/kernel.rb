@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
   def __method__
     scope = Rubinius::VariableScope.of_sender
@@ -8,60 +10,7 @@ module Kernel
     return nil if name == :__block__ or name == :__script__
     return name
   end
-
-  def Float(obj)
-    raise TypeError, "can't convert nil into Float" if obj.nil?
-
-    case obj
-    when Float
-      obj
-    when String
-      valid_re = /^\s*[+-]?((\d+_?)*\d+(\.(\d+_?)*\d+)?|\.(\d+_?)*\d+)(\s*|([eE][+-]?(\d+_?)*\d+)\s*)$/
-
-      m = valid_re.match(obj)
-
-      if !m or !m.pre_match.empty? or !m.post_match.empty?
-        raise ArgumentError, "invalid value for Float(): #{obj.inspect}"
-      end
-      obj.convert_float
-    else
-      coerced_value = Rubinius::Type.coerce_to(obj, Float, :to_f)
-      if coerced_value.nan?
-        raise ArgumentError, "invalid value for Float(): #{coerced_value.inspect}"
-      end
-      coerced_value
-    end
-  end
-  module_function :Float
-
-  def Array(obj)
-    ary = Rubinius::Type.check_convert_type obj, Array, :to_ary
-
-    return ary if ary
-
-    if obj.respond_to? :to_a
-      Rubinius::Type.coerce_to(obj, Array, :to_a)
-    else
-      [obj]
-    end
-  end
-  module_function :Array
-
-  def String(obj)
-    return obj if obj.kind_of? String
-
-    unless obj.respond_to? :to_s
-      raise TypeError, "Unable to convert to a String"
-    end
-
-    str = obj.to_s
-    unless str.kind_of? String
-      raise TypeError, "#to_s did not return a String"
-    end
-
-    return str
-  end
-  module_function :String
+  module_function :__method__
 
   ##
   # MRI uses a macro named StringValue which has essentially the same
@@ -114,6 +63,11 @@ module Kernel
   end
   module_function :warning
 
+  def exec(*args)
+    Process.exec(*args)
+  end
+  module_function :exec
+
   def exit(code=0)
     Process.exit(code)
   end
@@ -125,7 +79,6 @@ module Kernel
   module_function :exit!
 
   def abort(msg=nil)
-    msg = StringValue(msg) if msg
     Process.abort msg
   end
   module_function :abort
@@ -184,40 +137,15 @@ module Kernel
   end
   module_function :print
 
-  def open(path, *rest, &block)
-    path = StringValue(path)
-
-    if path.kind_of? String and path.prefix? '|'
-      return IO.popen(path[1..-1], *rest, &block)
-    end
-
-    File.open(path, *rest, &block)
-  end
-  module_function :open
-
   def srand(seed=undefined)
     if seed.equal? undefined
-      seed = Rubinius::Randomizer.instance.generate_seed
+      seed = Thread.current.randomizer.generate_seed
     end
 
     seed = Rubinius::Type.coerce_to seed, Integer, :to_int
-    Rubinius::Randomizer.instance.swap_seed seed
+    Thread.current.randomizer.swap_seed seed
   end
   module_function :srand
-
-  def rand(limit=0)
-    limit = Integer(limit).abs
-
-    case limit
-    when 0
-      Rubinius::Randomizer.instance.random_float
-    when Integer
-      Rubinius::Randomizer.instance.random_integer(limit - 1)
-    else
-      raise TypeError, "Integer() returned a non-integer"
-    end
-  end
-  module_function :rand
 
   def block_given?
     Rubinius::VariableScope.of_sender.block != nil
@@ -253,33 +181,21 @@ module Kernel
   end
   module_function :global_variables
 
-  def loop
-    raise LocalJumpError, "no block given" unless block_given?
-
-    begin
-      while true
-        yield
-      end
-    rescue StopIteration
-    end
-  end
-  module_function :loop
-
   #
   # Sleeps the current thread for +duration+ seconds.
   #
   def sleep(duration=undefined)
+    Rubinius.primitive :vm_sleep
+
+    # The primitive will fail on arg count if sleep is called
+    # without an argument, so we call it again passing undefined
+    # to mean "sleep forever"
+    #
     if duration.equal? undefined
-      duration = nil
-    elsif !duration.kind_of?(Numeric)
-      raise TypeError, 'time interval must be a numeric value'
+      return sleep(undefined)
     end
 
-    chan = Rubinius::Channel.new
-
-    start = Process.time
-    chan.receive_timeout duration
-    Process.time - start
+    raise TypeError, 'time interval must be a numeric value'
   end
   module_function :sleep
 
@@ -308,8 +224,10 @@ module Kernel
       File.exist? file1
     when ?f
       File.file? file1
+    when ?l
+      File.symlink? file1
     else
-      false
+      raise NotImplementedError, "command ?#{cmd.chr} not implemented"
     end
   end
   module_function :test
@@ -322,18 +240,6 @@ module Kernel
   def tap
     yield self
     self
-  end
-
-  alias_method :object_id, :__id__
-
-  def id
-    Kernel.warn "Object#id IS deprecated; use Object#object_id OR ELSE."
-    __id__
-  end
-
-  def type
-    Kernel.warn "Object#type IS fully deprecated; use Object#class OR ELSE."
-    self.class
   end
 
   # The "sorta" operator, also known as the case equality operator.
@@ -393,7 +299,7 @@ module Kernel
   def inspect
     # The protocol here seems odd, but it's to match MRI.
 
-    ivars = instance_variables
+    ivars = __instance_variables__
 
     # If this object has no ivars, then we call to_s and return that.
     # NOTE MRI has an additional check for when to call to_s. It also does:
@@ -413,7 +319,7 @@ module Kernel
 
     Thread.recursion_guard self do
       ivars.each do |var|
-        parts << "#{var}=#{instance_variable_get(var).inspect}"
+        parts << "#{var}=#{__instance_variable_get__(var).inspect}"
       end
     end
 
@@ -423,7 +329,7 @@ module Kernel
       str = "#{prefix} #{parts.join(' ')}>"
     end
 
-    str.taint if tainted?
+    Rubinius::Type.infect(str, self)
 
     return str
   end
@@ -489,10 +395,10 @@ module Kernel
   def instance_variables
     ary = []
     all_instance_variables.each do |sym|
-      ary << sym.to_s if sym.is_ivar?
+      ary << sym if sym.is_ivar?
     end
 
-    return ary
+    Rubinius.convert_to_names ary
   end
 
   alias_method :__instance_variables__, :instance_variables
@@ -521,17 +427,6 @@ module Kernel
   private :singleton_method_undefined
 
   alias_method :is_a?, :kind_of?
-
-  def method(name)
-    name = Rubinius::Type.coerce_to_symbol name
-    cm = Rubinius.find_method(self, name)
-
-    if cm
-      return Method.new(self, cm[1], cm[0], name)
-    else
-      raise NameError, "undefined method `#{name}' for #{self.inspect}"
-    end
-  end
 
   def nil?
     false
@@ -633,9 +528,7 @@ module Kernel
   end
 
   def to_s
-    str = "#<#{self.class}:0x#{self.__id__.to_s(16)}>"
-    str.taint if tainted?
-    return str
+    Rubinius::Type.infect("#<#{self.class}:0x#{self.__id__.to_s(16)}>", self)
   end
 
   ##

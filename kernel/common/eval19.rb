@@ -1,8 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 class BasicObject
   ##
   # :call-seq:
   #   obj.instance_eval(string [, filename [, lineno]] )   => obj
-  #   obj.instance_eval {| | block }                       => obj
+  #   obj.instance_eval { | | block }                      => obj
   #
   # Evaluates a string containing Ruby source code, or the given block, within
   # the context of the receiver +obj+. In order to set the context, the
@@ -82,11 +84,15 @@ class BasicObject
   #   end
   #
   #   k = Klass.new
-  #   k.instance_exec(5) {|x| @secret+x }   #=> 104
+  #   k.instance_exec(5) { |x| @secret+x }   #=> 104
 
   def instance_exec(*args, &prc)
     raise LocalJumpError, "Missing block" unless block_given?
     env = prc.block
+
+    if prc.kind_of? Proc::Method
+      return prc.bound_method.call(*args)
+    end
 
     static_scope = env.static_scope
     if ImmediateValue === self

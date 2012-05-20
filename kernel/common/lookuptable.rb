@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # A simplified Hash that only works with symbols as keys.
 
@@ -9,7 +11,7 @@ class Rubinius::LookupTable
   end
 
   def inspect
-    ents = collect { |k,v| " #{k.inspect}=>#{v.inspect}" }.join(",")
+    ents = collect { |k, v| " #{k.inspect}=>#{v.inspect}" }.join(",")
     "#<#{self.class}#{ents}>"
   end
 end

@@ -139,13 +139,16 @@ module Daedalus
   end
 
   class Compiler
-    def initialize(path, logger, blueprint)
-      @path = path
+    def initialize(compiler, linker, logger, blueprint)
+      @compiler = compiler
+      @linker = linker
       @cflags = []
       @ldflags = []
       @libraries = []
       @log = logger
       @blueprint = blueprint
+
+      set_ldshared
 
       @mod_times = Hash.new do |h,k|
         h[k] = (File.exists?(k) ? File.mtime(k) : Time.at(0))
@@ -160,6 +163,64 @@ module Daedalus
         else
           h[k] = ""
         end
+      end
+
+      @mtime_only = false
+    end
+
+    attr_accessor :mtime_only
+
+    def set_ldshared
+      # TODO: This should flow from the configure step.
+      #
+      # Extracted from rakelib/ext_helper.rb
+      # (Adapted from EventMachine. Thank you EventMachine and tmm1 !)
+      #
+      case RUBY_PLATFORM
+      when /mswin/, /mingw/, /bccwin32/
+        # TODO: discovery helpers
+        #check_heads(%w[windows.h winsock.h], true)
+        #check_libs(%w[kernel32 rpcrt4 gdi32], true)
+
+        if RUBY_PLATFORM =~ /mingw/
+          @ldshared = "#{@linker} -shared -lstdc++"
+        else
+          @cflags << "-EHs" << "-GR"
+        end
+
+      when /solaris/
+        @cflags << "-DOS_SOLARIS8" << "-fPIC"
+
+        if $CC == "cc" and `cc -flags 2>&1` =~ /Sun/ # detect SUNWspro compiler
+          # SUN CHAIN
+          @cflags << "-DCC_SUNWspro" << "-KPIC"
+          @ldshared = "#{@compiler} -G -KPIC -lCstd"
+        else
+          # GNU CHAIN
+          # on Unix we need a g++ link, not gcc.
+          @ldshared = "#{@linker} -shared -G -fPIC"
+        end
+
+      when /openbsd/
+        # OpenBSD branch contributed by Guillaume Sellier.
+
+        # on Unix we need a g++ link, not gcc. On OpenBSD, linking against
+        # libstdc++ have to be explicitly done for shared libs
+        @ldshared = "#{@linker} -shared -lstdc++ -fPIC"
+        @cflags << "-fPIC"
+
+      when /darwin/
+        # on Unix we need a g++ link, not gcc.
+        # Ff line contributed by Daniel Harple.
+        @ldshared = "#{@linker} -bundle -undefined suppress -flat_namespace -lstdc++"
+
+      when /aix/
+        @ldshared = "#{@linker} -shared -Wl,-G -Wl,-brtl"
+
+      else
+        # on Unix we need a g++ link, not gcc.
+        @ldshared = "#{@linker} -shared -lstdc++"
+        @cflags << "-fPIC"
       end
     end
 
@@ -202,13 +263,24 @@ module Daedalus
     end
 
     def compile(source, object)
-      @log.show "CC" , source
-      @log.command "#{@path} #{@cflags.join(' ')} -c -o #{object} #{source}"
+      @log.show "CC", source
+      @log.command "#{@compiler} #{@cflags.join(' ')} -c -o #{object} #{source}"
     end
 
     def link(path, files)
       @log.show "LD", path
-      @log.command "#{@path} -o #{path} #{files.join(' ')} #{@libraries.join(' ')} #{@ldflags.join(' ')}"
+      @log.command "#{@linker} -o #{path} #{files.join(' ')} #{@libraries.join(' ')} #{@ldflags.join(' ')}"
+    end
+
+    def ar(library, objects)
+      @log.show "AR", library
+      @log.command "ar rv #{library} #{objects.join(' ')}"
+      @log.command "ranlib #{library}"
+    end
+
+    def ldshared(library, objects)
+      @log.show "LDSHARED", library
+      @log.command "#{@ldshared} #{objects.join(' ')} -o #{library}"
     end
 
     def calculate_deps(path)
@@ -327,14 +399,14 @@ module Daedalus
         end
       rescue StandardError
         recalc_depedencies(ctx)
-      
+
         sha1 = Digest::SHA1.new
         sha1 << ctx.sha1(@path)
 
         dependencies(ctx).each do |d|
           begin
             sha1 << ctx.sha1(d)
-          rescue StandardError => e
+          rescue StandardError
             raise "Unable to find dependency '#{d}' from #{@path}"
           end
         end
@@ -356,6 +428,9 @@ module Daedalus
       end
 
       return true unless File.exists?(object_path)
+
+      return true if ctx.mtime_only and ctx.mtime(@path) > ctx.mtime(object_path)
+
       return true unless @data[:sha1] == sha1(ctx)
       return false
     end
@@ -508,6 +583,161 @@ module Daedalus
     end
 
     def describe(ctx)
+    end
+  end
+
+  class Library
+    attr_reader :sources
+
+    def initialize(path, base, compiler)
+      @base = base
+      @compiler = compiler
+
+      @directory = File.dirname path
+      @library = File.basename path
+      @sources = []
+
+      yield self if block_given?
+
+      source_files "#{path}.c" if @sources.empty?
+    end
+
+    def path
+      File.join @base, @directory, library
+    end
+
+    def name
+      File.join @directory, library
+    end
+
+    def source_files(*patterns)
+      Dir.chdir @base do
+        patterns.each do |t|
+          Dir[t].each do |f|
+            @sources << SourceFile.new(f)
+          end
+        end
+      end
+    end
+
+    def object_files
+      @sources.map { |s| s.object_path }
+    end
+
+    def out_of_date?(compiler)
+      Dir.chdir @base do
+        return true unless File.exists? name
+        @sources.each do |s|
+          return true if File.mtime(s.object_path) > File.mtime(name)
+        end
+        @sources.any? { |s| s.out_of_date? compiler }
+      end
+    end
+
+    def consider(compiler, tasks)
+      tasks.pre << self if out_of_date? compiler
+    end
+
+    def clean
+      Dir.chdir @base do
+        @sources.each { |s| s.clean }
+        File.delete name if File.exists? name
+      end
+    end
+  end
+
+  class StaticLibrary < Library
+    def library
+      "#{@library}.a"
+    end
+
+    def build(compiler)
+      Dir.chdir @base do
+        # TODO: out of date checking should be subsumed in building
+        @sources.each { |s| s.build @compiler if s.out_of_date? @compiler }
+        @compiler.ar name, object_files
+      end
+    end
+  end
+
+  class SharedLibrary < Library
+    def library
+      "#{@library}.#{RbConfig::CONFIG["DLEXT"]}"
+    end
+
+    def build(compiler)
+      Dir.chdir @base do
+        # TODO: out of date checking should be subsumed in building
+        @sources.each { |s| s.build @compiler if s.out_of_date? @compiler }
+        @compiler.ldshared name, object_files
+      end
+    end
+  end
+
+  # The purpose of a LibraryGroup is to combine multiple static and shared
+  # libraries into a unit. Static libraries are used to statically link a
+  # program, while shared libraries may be dynamically loaded by that program
+  # or another program.
+  #
+  # NOTE: The current protocol for getting a list of static libraries is the
+  # #objects method. This should be changed when reworking Daedalus.
+  class LibraryGroup
+    attr_accessor :cflags, :ldflags
+
+    def initialize(base, compiler)
+      @base = base
+      @static_libraries = []
+      @shared_libraries = []
+      @compiler = Compiler.new(ENV['CC'] || "gcc",
+                               ENV['CXX'] || "g++",
+                               compiler.log, nil)
+
+      yield self
+
+      compiler.add_library self
+
+      @compiler.cflags.concat cflags if cflags
+      @compiler.ldflags.concat ldflags if ldflags
+    end
+
+    def depends_on(file, command)
+      # TODO: HACK, the agony, this should be implicit
+      unless File.exists? File.join(@base, file)
+        raise "library group #{@base} depends on #{file}, please run #{command}"
+      end
+    end
+
+    # TODO: change the way files are sorted
+    def path
+      @base
+    end
+
+    def static_library(path, &block)
+      @static_libraries << StaticLibrary.new(path, @base, @compiler, &block)
+    end
+
+    def shared_library(path, &block)
+      @shared_libraries << SharedLibrary.new(path, @base, @compiler, &block)
+    end
+
+    # TODO: Fix this protocol
+    def objects
+      @static_libraries.map { |l| l.path }
+    end
+
+    def libraries
+      @static_libraries + @shared_libraries
+    end
+
+    def consider(compiler, tasks)
+      # TODO: Note we are using @compiler, not compiler. There should not be a
+      # global compiler. There should be a global configuration object that is
+      # specialized by specific libraries as needed.
+      libraries.each { |l| l.consider @compiler, tasks }
+    end
+
+    def clean
+      libraries.each { |l| l.clean }
     end
   end
 
@@ -725,8 +955,14 @@ module Daedalus
       ex
     end
 
+    def library_group(path, &block)
+      LibraryGroup.new(path, @compiler, &block)
+    end
+
     def gcc!
-      @compiler = Compiler.new(ENV['CC'] || "gcc", Logger.new, self)
+      @compiler = Compiler.new(ENV['CC'] || "gcc",
+                               ENV['CXX'] || "g++",
+                               Logger.new, self)
     end
 
     def source_files(*patterns)

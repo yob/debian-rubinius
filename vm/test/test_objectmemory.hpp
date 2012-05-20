@@ -28,7 +28,7 @@ public:
     create();
     roots = &state->globals().roots;
     gc_data = new GCData(*roots,
-                         &handles, &cached_handles, state->global_cache());
+                         &handles, &cached_handles, state->vm()->global_cache());
   }
 
   void tearDown() {
@@ -41,7 +41,7 @@ public:
   }
 
   void test_new_object() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     Tuple* obj;
 
@@ -52,7 +52,7 @@ public:
   }
 
   void test_write_barrier() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     Object* obj2;
 
@@ -74,21 +74,21 @@ public:
 
   /* Causes a segfault when fails. */
   void test_write_barrier_not_called_for_immediates() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     Object* obj2;
 
     obj = util_new_object(om);
     obj->set_zone(MatureObjectZone);
 
-    obj2 = Qnil;
+    obj2 = cNil;
 
     om.write_barrier(obj, obj2);
     TS_ASSERT_EQUALS(obj->remembered_p(), 0U);
   }
 
   void test_collect_young() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     size_t start = om.young_->bytes_used();
 
@@ -118,14 +118,14 @@ public:
   }
 
   void test_collect_young_through_references() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2, *obj3;
 
     obj =  (Tuple*)util_new_object(om);
     obj2 = (Tuple*)util_new_object(om);
 
     obj->field[0] = obj2;
-    obj2->field[0] = Qtrue;
+    obj2->field[0] = cTrue;
 
     om.write_barrier(obj, obj2);
 
@@ -144,12 +144,12 @@ public:
     obj3 = (Tuple*)obj->field[0];
     TS_ASSERT(obj2 != obj3);
 
-    TS_ASSERT_EQUALS(obj2->field[0], Qtrue);
+    TS_ASSERT_EQUALS(obj2->field[0], cTrue);
   }
 
   /* Could crash on failure */
   void test_collect_young_skips_byte_storage() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     //ByteArray *obj, *obj2;
 
@@ -170,7 +170,7 @@ public:
   }
 
   void test_new_large_object() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple* obj;
 
     om.large_object_threshold = 10;
@@ -185,7 +185,7 @@ public:
   }
 
   void test_collect_young_doesnt_move_mature_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
 
     om.large_object_threshold = 10;
@@ -200,7 +200,7 @@ public:
   }
 
   void test_collect_young_uses_remember_set() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
     om.large_object_threshold = 50 * 8 * sizeof(void *) / 32;
@@ -210,7 +210,7 @@ public:
     mature = (Tuple*)util_new_object(om,20);
     TS_ASSERT_EQUALS(mature->zone(), MatureObjectZone);
 
-    young->field[0] = Qtrue;
+    young->field[0] = cTrue;
     mature->field[0] = young;
 
     om.write_barrier(mature, young);
@@ -219,11 +219,11 @@ public:
     om.collect_young(*gc_data);
 
     TS_ASSERT(mature->field[0] != young);
-    TS_ASSERT_EQUALS(((Tuple*)mature->field[0])->field[0], Qtrue);
+    TS_ASSERT_EQUALS(((Tuple*)mature->field[0])->field[0], cTrue);
   }
 
   void test_collect_young_promotes_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* young;
 
     young = util_new_object(om);
@@ -243,7 +243,7 @@ public:
   }
 
   void test_collect_young_resets_remember_set() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
     om.large_object_threshold = 50 * 8 * sizeof(void *) / 32;
@@ -268,7 +268,7 @@ public:
   }
 
   void test_collect_young_uses_forwarding_pointers() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2;
 
     obj =  (Tuple*)util_new_object(om);
@@ -292,7 +292,7 @@ public:
   }
 
   void test_collect_young_copies_byte_bodies() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     ByteArray* obj;
 
@@ -307,24 +307,8 @@ public:
     TS_ASSERT_EQUALS(obj->raw_bytes()[0], static_cast<char>(47));
   }
 
-  void test_collect_young_copies_chararray_bodies() {
-    ObjectMemory& om = *state->om;
-
-    CharArray* obj;
-
-    obj = CharArray::create(state, 3);
-    obj->raw_bytes()[0] = 48;
-
-    Root r(roots, obj);
-
-    om.collect_young(*gc_data);
-
-    obj = (CharArray*)roots->front()->get();
-    TS_ASSERT_EQUALS(obj->raw_bytes()[0], static_cast<char>(48));
-  }
-
   void test_collect_mature() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* mature;
 
     om.debug_marksweep(true);
@@ -343,7 +327,7 @@ public:
   }
 
   void test_collect_mature_marks_young_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple* young;
     Object* mature;
 
@@ -362,7 +346,7 @@ public:
 
   /* Could segfault on failure due to infinite loop. */
   void test_collect_mature_stops_at_already_marked_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
     om.large_object_threshold = 50;
@@ -387,13 +371,13 @@ public:
   }
 
   void test_collect_young_stops_at_already_marked_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2;
 
     obj =  (Tuple*)util_new_object(om);
     obj2 = (Tuple*)util_new_object(om);
 
-    obj2->field[1] = Qtrue;
+    obj2->field[1] = cTrue;
     obj->field[0] = obj2;
     obj2->field[0] = obj;
 
@@ -408,11 +392,11 @@ public:
     obj2 = (Tuple*)obj->field[0];
 
     TS_ASSERT_EQUALS(obj2->field[0], obj);
-    TS_ASSERT_EQUALS(obj2->field[1], Qtrue);
+    TS_ASSERT_EQUALS(obj2->field[1], cTrue);
   }
 
   void test_valid_object_p() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
 
     obj = util_new_object(om);
@@ -424,14 +408,16 @@ public:
 
   void test_xmalloc_causes_gc() {
     // Knows that the threshold is 10M
-    state->interrupts.check = false;
+    state->shared().check_gc_p();
+
     int bytes = 1024 * 1024;
     int total = 110 * bytes;
     while(total >= 0) {
       XFREE(XMALLOC(bytes));
       total -= bytes;
     }
-    TS_ASSERT_EQUALS(state->interrupts.check, true);
+
+    TS_ASSERT_EQUALS(state->shared().check_gc_p(), true);
   }
 
 };

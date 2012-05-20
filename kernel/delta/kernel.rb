@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
 
   def raise(exc=undefined, msg=undefined, ctx=nil)
@@ -106,38 +108,27 @@ module Kernel
     io
   end
 
+  get = proc { |key| Thread.current[:$_] }
+  set = proc { |key, val| Thread.current[:$_] = val }
+  Rubinius::Globals.set_hook(:$_, get, set)
+
   Rubinius::Globals.add_alias :$stdout, :$>
   Rubinius::Globals.set_filter(:$stdout, write_filter)
   Rubinius::Globals.set_filter(:$stderr, write_filter)
-
-  get = proc do
-    warn "$defout is obsolete; it will be removed any day now"
-    $stdout
-  end
-
-  set = proc do |key, io|
-    warn "$defout is obsolete; it will be removed any day now"
-    $stdout = io
-  end
-
-  Rubinius::Globals.set_hook(:$defout, get, set)
-
-  get = proc do
-    warn "$deferr is obsolete; it will be removed any day now"
-    $stderr
-  end
-
-  set = proc do |key, io|
-    warn "$deferr is obsolete; it will be removed any day now"
-    $stderr = io
-  end
-
-  Rubinius::Globals.set_hook(:$deferr, get, set)
 
   # Proper kcode support
   get = proc { |key| Rubinius.kcode.to_s }
   set = proc { |key, val| Rubinius.kcode = val }
   Rubinius::Globals.set_hook(:$KCODE, get, set)
+
+  set = proc do |key, val|
+    val = Rubinius::Type.coerce_to val, String, :to_str
+    Rubinius.invoke_primitive :vm_set_process_title, val
+  end
+  Rubinius::Globals.set_hook(:$0, :[], set)
+
+  set = proc { |key, val| STDERR.puts("WARNING: $SAFE is not supported on Rubinius."); val }
+  Rubinius::Globals.set_hook(:$SAFE, :[], set)
 
   # Alias $0 $PROGRAM_NAME
   Rubinius::Globals.add_alias(:$0, :$PROGRAM_NAME)
@@ -145,5 +136,20 @@ module Kernel
   Rubinius::Globals.read_only :$:, :$LOAD_PATH, :$-I
   Rubinius::Globals.read_only :$", :$LOADED_FEATURES
   Rubinius::Globals.read_only :$<
-  Rubinius::Globals.read_only :$?
+
+  Rubinius::Globals[:$-a] = false
+  Rubinius::Globals[:$-l] = false
+  Rubinius::Globals[:$-p] = false
+  Rubinius::Globals.read_only :$-a, :$-l, :$-p
+
+  Rubinius::Globals.add_alias :$DEBUG,   :$-d
+  Rubinius::Globals.add_alias :$VERBOSE, :$-v
+  Rubinius::Globals.add_alias :$VERBOSE, :$-w
+
+  set = proc do |key, sep|
+    raise ::TypeError, "value of $, must be String" unless sep.nil? or sep.kind_of?(String)
+    sep
+  end
+
+  Rubinius::Globals.set_filter :$,, set
 end

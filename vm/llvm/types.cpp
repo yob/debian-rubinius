@@ -1,3 +1,5 @@
+#ifdef ENABLE_LLVM
+
 #include "llvm/jit_operations.hpp"
 #include "llvm/types.hpp"
 
@@ -15,14 +17,14 @@ namespace type {
         ls->cint(source_id_)
       };
 
-      node = llvm::MDNode::get(ls->ctx(), impMD, 4);
+      node = llvm::MDNode::get(ls->ctx(), impMD);
     } else {
       llvm::Value *impMD[] = {
         ls->cint(kind_),
         ls->cint(value_)
       };
 
-      node = llvm::MDNode::get(ls->ctx(), impMD, 2);
+      node = llvm::MDNode::get(ls->ctx(), impMD);
     }
 
     I->setMetadata(ls->metadata_id(), node);
@@ -107,6 +109,8 @@ namespace type {
       return "<type: static fixnum>";
     case eInstance:
       return "<type: instance>";
+    case eSingletonInstance:
+      return "<type: singleton instance>";
     case eSymbol:
       return "<type: symbol>";
     case eType:
@@ -119,3 +123,5 @@ namespace type {
   }
 }
 }
+
+#endif

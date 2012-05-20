@@ -18,6 +18,8 @@
 
 #include "builtin/system.hpp"
 
+#include "on_stack.hpp"
+
 #include "object_utils.hpp"
 
 namespace rubinius {
@@ -103,7 +105,7 @@ namespace rubinius {
         Object* obj = reinterpret_cast<Object*>(id >> 1);
 
         // Be sure to not leak a bad reference leak out here.
-        if(obj->reference_p()) return Qnil;
+        if(obj->reference_p()) return cNil;
         return obj;
       }
 
@@ -137,7 +139,7 @@ namespace rubinius {
     {}
 
     virtual bool perform(STATE, Object* obj) {
-      return obj->respond_to(state, name_, Qtrue)->true_p();
+      return obj->respond_to(state, name_, cTrue)->true_p();
     }
   };
 
@@ -157,7 +159,7 @@ namespace rubinius {
       if(obj->ivars() == target_) return true;
 
       // Check slots.
-      TypeInfo* ti = state->om->type_info[obj->type_id()];
+      TypeInfo* ti = state->memory()->type_info[obj->type_id()];
       for(TypeInfo::Slots::iterator i = ti->slots.begin();
           i != ti->slots.end();
           ++i) {
@@ -254,14 +256,16 @@ namespace rubinius {
     return 0;
   }
 
-  Object* System::vm_find_object(STATE, Array* arg, Object* callable,
+  Object* System::vm_find_object(STATE, GCToken gct,
+                                 Array* arg, Object* callable,
                                  CallFrame* calling_environment)
   {
-    ObjectMemory::GCInhibit inhibitor(state->om);
+    ObjectMemory::GCInhibit inhibitor(state->memory());
 
     // Support an aux mode, where callable is an array and we just append
     // objects to it rather than #call it.
     Array* ary = try_as<Array>(callable);
+    if(!ary) ary = nil<Array>();
 
     Array* args = Array::create(state, 1);
 
@@ -270,17 +274,17 @@ namespace rubinius {
     QueryCondition* condition = create_condition(state, arg);
     if(!condition) return Fixnum::from(0);
 
-    Object* ret = Qnil;
+    Object* ret = cNil;
 
     // Special case for looking for an object_id of an immediate
     if(ObjectIdCondition* oic = dynamic_cast<ObjectIdCondition*>(condition)) {
       if(Object* obj = oic->immediate()) {
-        if(ary) {
+        if(!ary->nil_p()) {
           ary->append(state, obj);
         } else {
           args->set(state, 0, obj);
           ret = callable->send(state, calling_environment, G(sym_call),
-                               args, Qnil, false);
+                               args, cNil, false);
         }
 
         delete condition;
@@ -289,12 +293,17 @@ namespace rubinius {
       }
     }
 
-    state->set_call_frame(calling_environment);
-    ObjectWalker walker(state->om);
-    GCData gc_data(state);
+    OnStack<2> os(state, ary, args);
 
-    // Seed it with the root objects.
-    walker.seed(gc_data);
+    state->set_call_frame(calling_environment);
+    ObjectWalker walker(state->memory());
+    GCData gc_data(state->vm());
+
+    {
+      StopTheWorld stw(state, gct, calling_environment);
+      // Seed it with the root objects.
+      walker.seed(gc_data);
+    }
 
     Object* obj = walker.next();
 
@@ -302,12 +311,12 @@ namespace rubinius {
       if(condition->perform(state, obj)) {
         total++;
 
-        if(ary) {
+        if(!ary->nil_p()) {
           ary->append(state, obj);
         } else {
           args->set(state, 0, obj);
           ret = callable->send(state, calling_environment, G(sym_call),
-                               args, Qnil, false);
+                               args, cNil, false);
           if(!ret) break;
         }
       }

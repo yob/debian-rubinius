@@ -1,8 +1,3 @@
-// HACK constants so that we use the 64bit version of stat
-#define _DARWIN_USE_64_BIT_INODE 1
-#define _LARGEFILE_SOURCE 1
-#define _FILE_OFFSET_BITS 64
-
 #include "config.h"
 
 #include <stdint.h>
@@ -19,6 +14,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <time.h>
+#include <math.h>
 
 #include "windows_compat.h"
 #include "ffi_util.hpp"
@@ -34,37 +30,6 @@ char** ffi_environ() { return environ; }
 void ffi_set_errno(int n) {
   errno = n;
 }
-
-#ifdef timezone
-time_t ffi_timezone() {
-  return timezone;
-}
-#else
-// try FreeBSD extensions to struct tm
-time_t ffi_timezone() {
-  struct tm *lt;
-  time_t t;
-
-  t = time(NULL);
-  lt = localtime(&t);
-
-  return lt->tm_gmtoff;
-}
-#endif
-
-char* ffi_tzname(int dst) {
-  if(dst) {
-    return tzname[1];
-  } else {
-    return tzname[0];
-  }
-}
-
-/*
-int ffi_daylight() {
-  return daylight;
-}
-*/
 
 uintptr_t ffi_address(void *ptr) {
   return (uintptr_t)ptr;
@@ -105,8 +70,8 @@ void *ffi_read_pointer(void **ptr) {
   return *ptr;
 }
 
-void *ffi_add_ptr(char *ptr, int offset) { 
-  return (void*)(ptr + offset); 
+void *ffi_add_ptr(char *ptr, int offset) {
+  return (void*)(ptr + offset);
 }
 
 int ffi_type_size(int type) {
@@ -143,6 +108,8 @@ int ffi_type_size(int type) {
     case RBX_FFI_TYPE_STATE:
     case RBX_FFI_TYPE_STRPTR:
     case RBX_FFI_TYPE_OBJECT:
+    case RBX_FFI_TYPE_CALLBACK:
+    case RBX_FFI_TYPE_ENUM:
     return sizeof(void*);
 
     default:
@@ -193,5 +160,9 @@ int ffi_lstat(const char *path, struct stat *buf) {
   return lstat(path, buf);
 }
 #endif
+
+int ffi_signbit(double x) {
+  return signbit(x);
+}
 
 }

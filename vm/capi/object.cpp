@@ -7,18 +7,24 @@
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
 
+#include "configuration.hpp"
+
 using namespace rubinius;
 using namespace rubinius::capi;
 
 extern "C" {
 
   void rb_error_frozen(const char* what) {
-    rb_raise(rb_eTypeError, "can't modify frozen %s", what);
+    if(LANGUAGE_18_ENABLED(NativeMethodEnvironment::get()->state())){
+      rb_raise(rb_eTypeError, "can't modify frozen %s", what);
+    } else {
+      rb_raise(rb_eRuntimeError, "can't modify frozen %s", what);
+    }
   }
 
   VALUE rb_obj_frozen_p(VALUE obj) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    if(env->get_object(obj)->frozen_p(env->state()) == RBX_Qtrue) {
+    if(CBOOL(env->get_object(obj)->frozen_p(env->state()))) {
       return Qtrue;
     }
 
@@ -66,6 +72,8 @@ extern "C" {
     {T_SCOPE,   "Scope"},     /* internal use: variable scope */
     {T_NODE,    "Node"},      /* internal use: syntax tree node */
     {T_UNDEF,   "undef"},     /* internal use: #undef; should not happen */
+    {T_RATIONAL, "Rational" },
+    {T_COMPLEX,  "Complex" },
     {-1,  0}
   };
 
@@ -105,11 +113,13 @@ extern "C" {
   }
 
   VALUE rb_check_array_type(VALUE object_handle) {
-    return rb_check_convert_type(object_handle, 0, "Array", "to_ary");
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    return rb_funcall(env->get_handle(env->state()->globals().type.get()), rb_intern("try_convert"), 3, object_handle, rb_cArray, rb_intern("to_ary"));
   }
 
   VALUE rb_check_string_type(VALUE object_handle) {
-    return rb_check_convert_type(object_handle, 0, "String", "to_str");
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    return rb_funcall(env->get_handle(env->state()->globals().type.get()), rb_intern("try_convert"), 3, object_handle, rb_cString, rb_intern("to_str"));
   }
 
   VALUE rb_check_convert_type(VALUE object_handle, int /*type*/,
@@ -145,9 +155,9 @@ extern "C" {
 
     if(NIL_P(return_handle)) {
       rb_raise(rb_eTypeError, "can't convert %s into %s",
-               RBX_NIL_P(object_handle) ? "nil" :
-                RBX_TRUE_P(object_handle) ? "true" :
-                  RBX_FALSE_P(object_handle) ? "false" :
+               NIL_P(object_handle) ? "nil" :
+                TRUE_P(object_handle) ? "true" :
+                  FALSE_P(object_handle) ? "false" :
                     rb_obj_classname(object_handle),
                type_name);
     }
@@ -198,6 +208,11 @@ extern "C" {
       if(rb_obj_is_kind_of(obj, rb_cStruct)) return T_STRUCT;
       if(rb_obj_is_kind_of(obj, rb_cIO)) return T_FILE;
       if(rb_obj_is_kind_of(obj, rb_cMatch)) return T_MATCH;
+      if(!LANGUAGE_18_ENABLED(env->state())) {
+        if(rb_obj_is_kind_of(obj, rb_cRational)) return T_RATIONAL;
+        if(rb_obj_is_kind_of(obj, rb_cComplex)) return T_COMPLEX;
+        if(rb_obj_is_kind_of(obj, rb_cEncoding)) return T_ENCODING;
+      }
     }
 
     return T_OBJECT;

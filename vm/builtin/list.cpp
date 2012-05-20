@@ -6,6 +6,8 @@
 #include "builtin/class.hpp"
 #include "builtin/fixnum.hpp"
 
+#include "ontology.hpp"
+
 namespace rubinius {
 
   /* Returns true if the List is empty, contains no elements. */
@@ -21,13 +23,13 @@ namespace rubinius {
   /* Register the List and List::Node classes as globals */
   void List::init(STATE) {
     Class* cls;
-    cls = state->new_class_under("List", G(rubinius));
+    cls = ontology::new_class_under(state, "List", G(rubinius));
 
     GO(list).set(cls);
     cls->set_object_type(state, ListType);
-    G(list)->name(state, state->symbol("Rubinius::List"));
 
-    GO(list_node).set(state->new_class("Node", G(object), cls));
+    GO(list_node).set(ontology::new_class_under(state,
+          "Node", cls));
 
     G(list_node)->set_object_type(state, ListNodeType);
   }
@@ -64,20 +66,20 @@ namespace rubinius {
     ListNode* cur = first_;
 
     while(index > 0) {
-      if(cur->nil_p()) return Qnil;
+      if(cur->nil_p()) return cNil;
 
       cur = cur->next();
       index--;
     }
 
-    if(cur->nil_p()) return Qnil;
+    if(cur->nil_p()) return cNil;
     return cur->object();
   }
 
   /* Return the first element in the list and remove it, moving all
    * other elements forward. */
   Object* List::shift(STATE) {
-    if(empty_p()) return Qnil;
+    if(empty_p()) return cNil;
 
     count(state, Integer::from(state, count_->to_native() - 1));
     ListNode* n = first_;

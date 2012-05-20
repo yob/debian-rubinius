@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Proc
 
   def self.__from_block__(env)
@@ -37,7 +39,7 @@ class Proc
 
     block = __from_block__(env)
 
-    Rubinius.asm(block, args) do |b,a|
+    Rubinius.asm(block, args) do |b, a|
       run b
       run a
       run b
@@ -55,12 +57,6 @@ class Proc
     bind.proc_environment = @block
     bind
   end
-
-  def inspect
-    "#<#{self.class}:0x#{self.object_id.to_s(16)}@#{@block.file}:#{@block.line}>"
-  end
-
-  alias_method :to_s, :inspect
 
   def ==(other)
     return false unless other.kind_of? self.class
@@ -90,15 +86,17 @@ class Proc
     p = o + code.post_args
     p += 1 if code.splat
 
+    required_status = self.lambda? ? :req : :opt
+
     code.local_names.each_with_index.map do |name, i|
       if i < m
-        [:req, name]
+        [required_status, name]
       elsif i < o
         [:opt, name]
       elsif code.splat == i
-        [:rest, name]
+        name == :@unnamed_splat ? [:rest] : [:rest, name]
       elsif i < p
-        [:req, name]
+        [required_status, name]
       else
         [:block, name]
       end
@@ -115,13 +113,6 @@ class Proc
 
   class Method < Proc
     attr_accessor :bound_method
-
-    def self.__from_method__(meth)
-      obj = allocate()
-      obj.bound_method = meth
-
-      return obj
-    end
 
     def __yield__(*args, &block)
       # do a block style unwrap..

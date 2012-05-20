@@ -18,11 +18,12 @@
 #include "builtin/string.hpp"
 #include "builtin/system.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/capi_handle.hpp"
 #include "builtin/location.hpp"
 #include "builtin/ffi_pointer.hpp"
 
 #include "instruments/tooling.hpp"
+
+#include "ontology.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/handle.hpp"
@@ -61,7 +62,7 @@ namespace rubinius {
   }
 
   VALUE NativeMethodFrame::get_handle(STATE, Object* obj) {
-    InflatedHeader* ih = state->om->inflate_header(state, obj);
+    InflatedHeader* ih = state->memory()->inflate_header(state, obj);
 
     capi::Handle* handle = ih->handle();
 
@@ -75,7 +76,7 @@ namespace rubinius {
       handle = new capi::Handle(state, obj);
       ih->set_handle(handle);
 
-      state->shared.add_global_handle(state, handle);
+      state->shared().add_global_handle(state, handle);
 
       handles_.add_if_absent(handle);
     }
@@ -94,8 +95,8 @@ namespace rubinius {
       handles_.flush_all(env);
     }
 
-    if(env->state()->shared.config.capi_global_flush) {
-      capi::Handles* handles = env->state()->shared.cached_handles();
+    if(env->state()->vm()->shared.config.capi_global_flush) {
+      capi::Handles* handles = env->state()->vm()->shared.cached_handles();
 
       if(handles->size() > 0) {
         for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
@@ -112,8 +113,8 @@ namespace rubinius {
       handles_.update_all(env);
     }
 
-    if(env->state()->shared.config.capi_global_flush) {
-      capi::Handles* handles = env->state()->shared.cached_handles();
+    if(env->state()->vm()->shared.config.capi_global_flush) {
+      capi::Handles* handles = env->state()->vm()->shared.cached_handles();
 
       if(handles->size() > 0) {
         for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
@@ -133,13 +134,13 @@ namespace rubinius {
     } else if(obj->fixnum_p() || obj->symbol_p()) {
       return reinterpret_cast<VALUE>(obj);
     } else if(obj->nil_p()) {
-      return cCApiHandleQnil;
+      return Qnil;
     } else if(obj->false_p()) {
-      return cCApiHandleQfalse;
+      return Qfalse;
     } else if(obj->true_p()) {
-      return cCApiHandleQtrue;
-    } else if(obj == Qundef) {
-      return cCApiHandleQundef;
+      return Qtrue;
+    } else if(obj == cUndef) {
+      return Qundef;
     }
 
     capi::capi_raise_runtime_error("NativeMethod handle requested for unknown object type");
@@ -151,7 +152,7 @@ namespace rubinius {
   }
 
   Object* NativeMethodEnvironment::block() {
-    if(!current_native_frame_) return Qnil;
+    if(!current_native_frame_) return cNil;
     return get_object(current_native_frame_->block());
   }
 
@@ -181,7 +182,8 @@ namespace rubinius {
   }
 
   void NativeMethod::init(STATE) {
-    GO(nmethod).set(state->new_class("NativeMethod", G(executable), G(rubinius)));
+    GO(nmethod).set(ontology::new_class(state, "NativeMethod",
+          G(executable), G(rubinius)));
     G(nmethod)->set_object_type(state, NativeMethodType);
 
     init_thread(state);
@@ -540,17 +542,23 @@ namespace rubinius {
       case INIT_FUNCTION: {
         nm->func_as<InitFunction>()();
 
-        return Qnil;
+        return cNil;
       }
 
         /* A C function being used as a block */
       case ITERATE_BLOCK: {
         VALUE cb = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
+
+        Object* ob = nm->get_ivar(state, state->symbol("original_block"));
+        if(!ob->nil_p()) {
+          env->current_native_frame()->set_block(env->get_handle(ob));
+        }
+
         VALUE val;
 
         switch(args.total()) {
         case 0:
-          val = env->get_handle(Qnil);
+          val = env->get_handle(cNil);
           break;
         case 1:
           val = env->get_handle(args.get_argument(0));
@@ -576,12 +584,12 @@ namespace rubinius {
 
         nm->func()(cb);
 
-        return Qnil;
+        return cNil;
       }
 
       default:
         capi::capi_raise_runtime_error("unrecognized arity for NativeMethod call");
-        return Qnil;
+        return cNil;
       }
 
     }
@@ -599,7 +607,7 @@ namespace rubinius {
       Exception* exc = Exception::make_argument_error(
           state, arity, args.total(), args.name());
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
 
       return NULL;
     }
@@ -607,8 +615,8 @@ namespace rubinius {
     NativeMethodEnvironment* env = native_method_environment.get();
 
     // Optionally get the handles back to the proper state.
-    if(state->shared.config.capi_global_flush) {
-      capi::Handles* handles = state->shared.cached_handles();
+    if(state->shared().config.capi_global_flush) {
+      capi::Handles* handles = state->shared().cached_handles();
 
       if(handles->size() > 0) {
         for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
@@ -642,33 +650,49 @@ namespace rubinius {
 
     // We've got things setup (they can be GC'd properly), so we need to
     // wait before entering the extension code.
-    state->shared.enter_capi(state);
+    ENTER_CAPI(state);
 
     Object* ret;
     ExceptionPoint ep(env);
 
+#ifdef RBX_PROFILER
+    // This is organized like this so that we don't jump past the destructor of
+    // MethodEntry. It's duplicated, but it's much easier to understand than
+    // trying to de-dup it.
+
+    if(unlikely(state->vm()->tooling())) {
+      tooling::MethodEntry method(state, exec, mod, args);
+      PLACE_EXCEPTION_POINT(ep);
+
+      if(unlikely(ep.jumped_to())) {
+        ret = NULL;
+      } else {
+        ret = ArgumentHandler::invoke(state, nm, env, args);
+      }
+    } else {
+      PLACE_EXCEPTION_POINT(ep);
+
+      if(unlikely(ep.jumped_to())) {
+        ret = NULL;
+      } else {
+        ret = ArgumentHandler::invoke(state, nm, env, args);
+      }
+    }
+#else
     PLACE_EXCEPTION_POINT(ep);
 
     if(unlikely(ep.jumped_to())) {
       ret = NULL;
     } else {
-#ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
-        tooling::MethodEntry method(state, exec, mod, args);
-        ret = ArgumentHandler::invoke(state, nm, env, args);
-      } else {
-        ret = ArgumentHandler::invoke(state, nm, env, args);
-      }
-#else
       ret = ArgumentHandler::invoke(state, nm, env, args);
-#endif
     }
+#endif
 
     env->set_current_call_frame(saved_frame);
     env->set_current_native_frame(nmf.previous());
     ep.pop(env);
 
-    state->shared.leave_capi(state);
+    LEAVE_CAPI(state);
 
     // Handle any signals that occurred while the native method
     // was running.
@@ -677,15 +701,16 @@ namespace rubinius {
     return ret;
   }
 
-  NativeMethod* NativeMethod::load_extension_entry_point(STATE, Pointer* ptr) {
+  NativeMethod* NativeMethod::load_extension_entry_point(STATE,
+      String* library, Symbol* name, Pointer* ptr) {
     void* func = ptr->pointer;
 
-    return NativeMethod::create(state, nil<String>(), G(rubinius),
-                                state->symbol("__init__"), func,
+    return NativeMethod::create(state, library, G(rubinius),
+                                name, func,
                                 Fixnum::from(INIT_FUNCTION));
   }
 
-  NativeMethod* NativeMethod::create(VM* state, String* file_name,
+  NativeMethod* NativeMethod::create(State* state, String* file_name,
                                      Module* module, Symbol* method_name,
                                      void* func, Fixnum* arity)
   {
@@ -722,6 +747,7 @@ namespace rubinius {
 
     nmethod->primitive(state, state->symbol("nativemethod_call"));
     nmethod->serial(state, Fixnum::from(0));
+    nmethod->inliners_ = 0;
 
     return nmethod;
   }

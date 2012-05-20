@@ -31,9 +31,23 @@ extern "C" {
     return &mri_ruby_verbose;
   }
 
+  VALUE mri_global_rb_rs() {
+    return rb_gv_get("$/");
+  }
+
+  VALUE mri_global_rb_default_rs() {
+    VALUE rs = rb_str_new2("\n");
+    OBJ_FREEZE(rs);
+    return rs;
+  }
+
+  void rb_lastline_set(VALUE obj) {
+    rb_thread_local_aset(rb_thread_current(), rb_intern("$_"), obj);
+  }
+
   void rb_free_global(VALUE global_handle) {
     capi::Handle* handle = capi::Handle::from(global_handle);
-    if(CAPI_REFERENCE_P(handle) && handle->object()->reference_p()) {
+    if(REFERENCE_P(handle) && handle->object()->reference_p()) {
       handle->deref();
     }
   }
@@ -41,7 +55,7 @@ extern "C" {
   void rb_global_variable(VALUE* address) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     capi::Handle** loc = reinterpret_cast<capi::Handle**>(address);
-    env->state()->shared.add_global_handle_location(loc);
+    env->state()->vm()->shared.add_global_handle_location(loc);
   }
 
   void rb_gc_register_address(VALUE* address) {
@@ -51,7 +65,7 @@ extern "C" {
   void rb_gc_unregister_address(VALUE* address) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     capi::Handle** loc = reinterpret_cast<capi::Handle**>(address);
-    env->state()->shared.del_global_handle_location(loc);
+    env->state()->vm()->shared.del_global_handle_location(loc);
   }
 
   VALUE rb_gv_get(const char* name) {

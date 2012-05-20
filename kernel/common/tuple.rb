@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # The tuple data type.
 # A simple storage class. Created to contain a fixed number of elements.
@@ -48,8 +50,8 @@ module Rubinius
 
     def +(o)
       t = Tuple.new(size + o.size)
-      t.copy_from(self,0,size,0)
-      t.copy_from(o,0,o.size,size)
+      t.copy_from(self, 0, size, 0)
+      t.copy_from(o, 0, o.size, size)
       t
     end
 
@@ -95,10 +97,9 @@ module Rubinius
     end
 
     def to_a
-      ary = []
+      ary = Array.allocate
       ary.tuple = dup
       ary.total = fields
-      ary.start = 0
       return ary
     end
 

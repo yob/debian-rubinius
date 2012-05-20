@@ -35,6 +35,7 @@ namespace rubinius {
   class ObjectMemory;
   class GlobalCache;
   class ConfigParser;
+  class State;
   class VM;
   class Configuration;
   class LLVMState;
@@ -43,28 +44,6 @@ namespace rubinius {
   class ManagedThread;
   class QueryAgent;
   class Environment;
-
-  struct Interrupts {
-    bool check;
-    bool perform_gc;
-    bool enable_preempt;
-
-    Interrupts()
-      : check(false)
-      , perform_gc(false)
-      , enable_preempt(false)
-    {}
-
-    void checked() {
-      check = false;
-    }
-
-    void set_perform_gc() {
-      perform_gc = true;
-      check = true;
-    }
-  };
-
 
   /**
    * SharedState represents the global shared state that needs to be shared
@@ -112,16 +91,18 @@ namespace rubinius {
 
     Mutex capi_lock_;
 
+    bool check_gc_;
+
   public:
     Globals globals;
     ObjectMemory* om;
     GlobalCache* global_cache;
     Configuration& config;
     ConfigParser& user_variables;
-    Interrupts interrupts;
     SymbolTable symbols;
     LLVMState* llvm_state;
     Stats stats;
+    uint32_t hash_seed;
 
   public:
     SharedState(Environment* env, Configuration& config, ConfigParser& cp);
@@ -151,6 +132,8 @@ namespace rubinius {
       return &threads_;
     }
 
+    Array* vm_threads(STATE);
+
     void add_managed_thread(ManagedThread* thr);
     void remove_managed_thread(ManagedThread* thr);
 
@@ -158,8 +141,8 @@ namespace rubinius {
       return global_handles_;
     }
 
-    void add_global_handle(VM*, capi::Handle* handle);
-    void make_handle_cached(VM*, capi::Handle* handle);
+    void add_global_handle(State*, capi::Handle* handle);
+    void make_handle_cached(State*, capi::Handle* handle);
 
     capi::Handles* cached_handles() {
       return cached_handles_;
@@ -181,12 +164,12 @@ namespace rubinius {
       return global_serial_;
     }
 
-    int inc_global_serial(THREAD) {
+    int inc_global_serial(STATE) {
       SYNC(state);
       return ++global_serial_;
     }
 
-    uint32_t new_thread_id(THREAD);
+    uint32_t new_thread_id();
 
     int* global_serial_address() {
       return &global_serial_;
@@ -196,12 +179,12 @@ namespace rubinius {
       return ic_registry_;
     }
 
-    unsigned int inc_class_count(THREAD) {
+    unsigned int inc_class_count(STATE) {
       SYNC(state);
       return ++class_count_;
     }
 
-    uint64_t inc_method_count(THREAD) {
+    uint64_t inc_method_count(STATE) {
       SYNC(state);
       return ++method_count_;
     }
@@ -237,6 +220,8 @@ namespace rubinius {
 
     QueryAgent* autostart_agent(STATE);
 
+    void stop_agent(STATE);
+
     Environment* env() {
       return env_;
     }
@@ -253,26 +238,46 @@ namespace rubinius {
       return tool_broker_;
     }
 
+    ObjectMemory* memory() {
+      return om;
+    }
+
+    bool check_gc_p() {
+      bool c = check_gc_;
+      if (unlikely(c)) {
+        check_gc_ = false;
+      }
+      return c;
+    }
+
+    void gc_soon() {
+      check_gc_ = true;
+    }
+
     void scheduler_loop();
-    void enable_preemption();
 
     void pre_exec();
     void reinit(STATE);
 
-    void ask_for_stopage();
     bool should_stop();
 
-    void stop_the_world(THREAD);
+    bool stop_the_world(THREAD) WARN_UNUSED;
     void restart_world(THREAD);
 
+    void stop_threads_externally();
+    void restart_threads_externally();
+
     bool checkpoint(THREAD);
+    void gc_dependent(STATE);
+    void gc_independent(STATE);
+
     void gc_dependent(THREAD);
     void gc_independent(THREAD);
 
     void set_critical(STATE);
     void clear_critical(STATE);
 
-    void enter_capi(STATE);
+    void enter_capi(STATE, const char* file, int line);
     void leave_capi(STATE);
   };
 }

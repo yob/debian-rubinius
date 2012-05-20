@@ -58,13 +58,13 @@ namespace rubinius {
     Root()
       : LinkedList::Node()
       , roots_(NULL)
-      , object_(Qundef)
+      , object_(cUndef)
     {}
 
     Root(Roots* roots)
       : LinkedList::Node()
       , roots_(roots)
-      , object_(Qundef)
+      , object_(cUndef)
     {}
 
     Root(Roots* roots, Object* obj)
@@ -78,11 +78,14 @@ namespace rubinius {
     Root(STATE);
     Root(STATE, Object* obj);
 
+    Root(VM*);
+    Root(VM*, Object* obj);
+
     /** Copy construction uses set() semantics. */
     Root(const Root& other)
       : LinkedList::Node()
       , roots_(NULL)
-      , object_(Qundef)
+      , object_(cUndef)
     {
       set(other.object_, other.roots_);
     }
@@ -144,8 +147,15 @@ namespace rubinius {
         : Root(state)
       {}
 
+      TypedRoot(VM* state)
+        : Root(state)
+      {}
       /** As Root::Root(STATE, Object*), but retains object's type. */
       TypedRoot(STATE, ObjType obj)
+        : Root(state, (Object*)obj)
+      {}
+
+      TypedRoot(VM* state, ObjType obj)
         : Root(state, (Object*)obj)
       {}
 

@@ -1,9 +1,6 @@
-module Rubinius
-  # Ruby 1.8 returns strings for method and constant names
-  def self.convert_to_names(list)
-    list.map! { |x| x.to_s }
-  end
+# -*- encoding: us-ascii -*-
 
+module Rubinius
   def self.watch_signal(sig, ignored)
     Rubinius.primitive :vm_watch_signal
     watch_signal(sig.to_signal, ignored)
@@ -12,6 +9,11 @@ module Rubinius
   def self.find_method(obj, name)
     Rubinius.primitive :vm_find_method
     raise PrimitiveFailure, "Rubinius.find_method failed"
+  end
+
+  def self.find_public_method(obj, name)
+    Rubinius.primitive :vm_find_public_method
+    raise PrimitiveFailure, "Rubinius.find_public_method failed"
   end
 
   def self.extended_modules(obj)

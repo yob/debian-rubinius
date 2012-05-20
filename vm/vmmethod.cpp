@@ -16,6 +16,8 @@
 #include "builtin/tuple.hpp"
 #include "builtin/class.hpp"
 #include "builtin/location.hpp"
+#include "builtin/global_cache_entry.hpp"
+
 #include "instructions.hpp"
 
 #include "instruments/tooling.hpp"
@@ -59,7 +61,7 @@ namespace rubinius {
     , caches(0)
     , execute_status_(eInterpret)
     , name_(meth->name())
-    , method_id_(state->shared.inc_method_count(state))
+    , method_id_(state->shared().inc_method_count(state))
     , debugging(false)
     , flags(0)
   {
@@ -84,21 +86,23 @@ namespace rubinius {
 
     // Disable JIT for large methods
     if(meth->primitive()->nil_p() &&
-        !state->shared.config.jit_disabled &&
-        total < (size_t)state->shared.config.jit_max_method_size) {
+        !state->shared().config.jit_disabled &&
+        total < (size_t)state->shared().config.jit_max_method_size) {
       call_count = 0;
     } else {
       call_count = -1;
     }
 
     unspecialized = 0;
+    fallback = 0;
+
     for(int i = 0; i < cMaxSpecializations; i++) {
       specializations[i].class_id = 0;
       specializations[i].execute = 0;
       specializations[i].jit_data = 0;
     }
 
-    state->shared.om->add_code_resource(this);
+    state->shared().om->add_code_resource(this);
   }
 
   VMMethod::~VMMethod() {
@@ -205,6 +209,9 @@ namespace rubinius {
       case InstructionSequence::insn_allow_private:
         allow_private = true;
         break;
+      case InstructionSequence::insn_push_const_fast:
+        original->literals()->put(state, opcodes[ip + 2], GlobalCacheEntry::empty(state));
+        break;
       case InstructionSequence::insn_send_super_stack_with_block:
       case InstructionSequence::insn_send_super_stack_with_splat:
       case InstructionSequence::insn_zsuper:
@@ -248,7 +255,7 @@ namespace rubinius {
           }
         }
 
-        state->shared.ic_registry()->add_cache(state, name, cache);
+        state->shared().ic_registry()->add_cache(state, name, cache);
 
         opcodes[ip + 1] = reinterpret_cast<intptr_t>(cache);
         update_addresses(ip, 1);
@@ -502,41 +509,41 @@ namespace rubinius {
   }
 
   void VMMethod::setup_argument_handler(CompiledMethod* meth) {
+    // Firstly, use the generic case that handles all cases
+    fallback = &VMMethod::execute_specialized<GenericArguments>;
+
     // If there are no optionals, only a fixed number of positional arguments.
     if(total_args == required_args) {
       // if no arguments are expected
       if(total_args == 0) {
         // and there is no splat, use the fastest case.
         if(splat_position == -1) {
-          meth->set_executor(&VMMethod::execute_specialized<NoArguments>);
+          fallback = &VMMethod::execute_specialized<NoArguments>;
 
         // otherwise use the splat only case.
         } else {
-          meth->set_executor(&VMMethod::execute_specialized<SplatOnlyArgument>);
+          fallback = &VMMethod::execute_specialized<SplatOnlyArgument>;
         }
-        return;
-
       // Otherwise use the few specialized cases iff there is no splat
       } else if(splat_position == -1) {
         switch(total_args) {
         case 1:
-          meth->set_executor(&VMMethod::execute_specialized<OneArgument>);
-          return;
+          fallback= &VMMethod::execute_specialized<OneArgument>;
+          break;
         case 2:
-          meth->set_executor(&VMMethod::execute_specialized<TwoArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<TwoArguments>;
+          break;
         case 3:
-          meth->set_executor(&VMMethod::execute_specialized<ThreeArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<ThreeArguments>;
+          break;
         default:
-          meth->set_executor(&VMMethod::execute_specialized<FixedArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<FixedArguments>;
+          break;
         }
       }
     }
 
-    // Lastly, use the generic case that handles all cases
-    meth->set_executor(&VMMethod::execute_specialized<GenericArguments>);
+    meth->set_executor(fallback);
   }
 
   /* This is the execute implementation used by normal Ruby code,
@@ -555,10 +562,7 @@ namespace rubinius {
       CompiledMethod* cm = as<CompiledMethod>(exec);
       VMMethod* vmm = cm->backend_method();
 
-      size_t scope_size = sizeof(StackVariables) +
-        (vmm->number_of_locals * sizeof(Object*));
-      StackVariables* scope =
-        reinterpret_cast<StackVariables*>(alloca(scope_size));
+      StackVariables* scope = ALLOCA_STACKVARIABLES(vmm->number_of_locals);
       // Originally, I tried using msg.module directly, but what happens is if
       // super is used, that field is read. If you combine that with the method
       // being called recursively, msg.module can change, causing super() to
@@ -574,7 +578,7 @@ namespace rubinius {
         Exception* exc =
           Exception::make_argument_error(state, vmm->total_args, args.total(), args.name());
         exc->locations(state, Location::from_call_stack(state, previous));
-        state->thread_state()->raise_exception(exc);
+        state->raise_exception(exc);
 
         return NULL;
       }
@@ -592,7 +596,7 @@ namespace rubinius {
       // A negative call_count means we've disabled usage based JIT
       // for this method.
       if(vmm->call_count >= 0) {
-        if(vmm->call_count >= state->shared.config.jit_call_til_compile) {
+        if(vmm->call_count >= state->shared().config.jit_call_til_compile) {
           LLVMState* ls = LLVMState::get(state);
           ls->compile_callframe(state, cm, frame);
         } else {
@@ -604,23 +608,16 @@ namespace rubinius {
       // Check the stack and interrupts here rather than in the interpreter
       // loop itself.
 
+      GCTokenImpl gct;
+
       if(state->detect_stack_condition(frame)) {
-        if(!state->check_interrupts(frame, frame)) return NULL;
+        if(!state->check_interrupts(gct, frame, frame)) return NULL;
       }
 
-      if(unlikely(state->interrupts.check)) {
-        state->interrupts.checked();
-        if(state->interrupts.perform_gc) {
-          state->interrupts.perform_gc = false;
-          state->collect_maybe(frame);
-        }
-      }
-
-      state->set_call_frame(frame);
-      state->shared.checkpoint(state);
+      state->checkpoint(gct, frame);
 
 #ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
+      if(unlikely(state->vm()->tooling())) {
         tooling::MethodEntry method(state, exec, mod, args, cm);
         return (*vmm->run)(state, vmm, frame);
       } else {
@@ -639,23 +636,20 @@ namespace rubinius {
   Object* VMMethod::execute_as_script(STATE, CompiledMethod* cm, CallFrame* previous) {
     VMMethod* vmm = cm->backend_method();
 
-    size_t scope_size = sizeof(StackVariables) +
-      (vmm->number_of_locals * sizeof(Object*));
-    StackVariables* scope =
-      reinterpret_cast<StackVariables*>(alloca(scope_size));
+    StackVariables* scope = ALLOCA_STACKVARIABLES(vmm->number_of_locals);
     // Originally, I tried using msg.module directly, but what happens is if
     // super is used, that field is read. If you combine that with the method
     // being called recursively, msg.module can change, causing super() to
     // look in the wrong place.
     //
     // Thus, we have to cache the value in the StackVariables.
-    scope->initialize(G(main), Qnil, G(object), vmm->number_of_locals);
+    scope->initialize(G(main), cNil, G(object), vmm->number_of_locals);
 
     InterpreterCallFrame* frame = ALLOCA_CALLFRAME(vmm->stack_size);
 
     frame->prepare(vmm->stack_size);
 
-    Arguments args(state->symbol("__script__"), G(main), Qnil, 0, 0);
+    Arguments args(state->symbol("__script__"), G(main), cNil, 0, 0);
 
     frame->previous = previous;
     frame->flags =    0;
@@ -669,20 +663,13 @@ namespace rubinius {
     // Check the stack and interrupts here rather than in the interpreter
     // loop itself.
 
+    GCTokenImpl gct;
+
     if(state->detect_stack_condition(frame)) {
-      if(!state->check_interrupts(frame, frame)) return NULL;
+      if(!state->check_interrupts(gct, frame, frame)) return NULL;
     }
 
-    if(unlikely(state->interrupts.check)) {
-      state->interrupts.checked();
-      if(state->interrupts.perform_gc) {
-        state->interrupts.perform_gc = false;
-        state->collect_maybe(frame);
-      }
-    }
-
-    state->set_call_frame(frame);
-    state->shared.checkpoint(state);
+    state->checkpoint(gct, frame);
 
     // Don't generate profiling info here, it's expected
     // to be done by the caller.
@@ -696,9 +683,13 @@ namespace rubinius {
   // If +disable+ is set, then the method is tagged as not being
   // available for JIT.
   void VMMethod::deoptimize(STATE, CompiledMethod* original,
-                            jit::RuntimeDataHolder* rd, 
+                            jit::RuntimeDataHolder* rd,
                             bool disable)
   {
+#ifdef ENABLE_LLVM
+    LLVMState* ls = LLVMState::get(state);
+    ls->start_method_update();
+
     bool still_others = false;
 
     for(int i = 0; i < cMaxSpecializations; i++) {
@@ -716,20 +707,40 @@ namespace rubinius {
     }
 
     if(!rd || original->jit_data() == rd) {
+      unspecialized = 0;
       original->set_jit_data(0);
     }
 
+    if(original->jit_data()) still_others = true;
+
     if(!still_others) {
       execute_status_ = eInterpret;
+
       // This resets execute to use the interpreter
-      setup_argument_handler(original);
+      original->set_executor(fallback);
     }
 
     if(disable) {
       execute_status_ = eJITDisable;
+      original->set_executor(fallback);
     } else if(execute_status_ == eJITDisable && still_others) {
       execute_status_ = eJIT;
     }
+
+    if(original->execute == CompiledMethod::specialized_executor) {
+      bool found = false;
+
+      for(int i = 0; i < cMaxSpecializations; i++) {
+        if(specializations[i].execute) found = true;
+      }
+
+      if(unspecialized) found = true;
+
+      if(!found) rubinius::bug("no specializations!");
+    }
+
+    ls->end_method_update();
+#endif
   }
 
   /*

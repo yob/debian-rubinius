@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 
 #ifdef RBX_WINDOWS
 #include <winsock2.h>
@@ -38,12 +39,15 @@
 #include <mach-o/dyld.h>
 #endif
 
+#ifdef __FreeBSD__
+#include <sys/sysctl.h>
+#endif
 
 namespace rubinius {
-  QueryAgent::QueryAgent(SharedState& shared, VM* state)
+  QueryAgent::QueryAgent(SharedState& shared, STATE)
     : Thread()
     , shared_(shared)
-    , state_(state)
+    , state_(shared.new_vm())
     , running_(false)
     , port_(0)
     , server_fd_(-1)
@@ -51,9 +55,12 @@ namespace rubinius {
     , max_fd_(0)
     , exit_(false)
     , vars_(0)
+    , local_only_(true)
+    , tmp_key_(0)
   {
     FD_ZERO(&fds_);
-    vars_ = new agent::VariableAccess(state, shared);
+
+    vars_ = new agent::VariableAccess(this->state(), shared);
 
     if(pipe(control_) != 0) {
       perror("pipe");
@@ -79,17 +86,24 @@ namespace rubinius {
 
     // This class is always created with the GIL locked, so it's ok
     // to access ruby stuff here.
-    IO* from = IO::create(state_, a2r_ruby());
-    from->sync(state, Qtrue);
+    IO* from = IO::create(state, a2r_ruby());
+    from->sync(state, cTrue);
 
-    IO* to = IO::create(state_, r2a_ruby());
-    to->sync(state, Qtrue);
+    IO* to = IO::create(state, r2a_ruby());
+    to->sync(state, cTrue);
 
-    shared_.globals.rubinius.get()->set_const(state_, "FROM_AGENT", from);
-    shared_.globals.rubinius.get()->set_const(state_, "TO_AGENT", to);
+    shared_.globals.rubinius.get()->set_const(state, "FROM_AGENT", from);
+    shared_.globals.rubinius.get()->set_const(state, "TO_AGENT", to);
+
+    if(shared_.config.agent_password.set_p()) {
+      local_only_ = false;
+      use_password_ = true;
+      password_ = std::string(shared_.config.agent_password);
+    }
   }
 
   QueryAgent::~QueryAgent() {
+    VM::discard(&state_, state_.vm());
     delete vars_;
   }
 
@@ -213,14 +227,139 @@ namespace rubinius {
 
       delete val;
     }
+
+    void write_welcome(int client) {
+      bert::IOWriter writer(client);
+      bert::Encoder<bert::IOWriter> encoder(writer);
+      encoder.write_version();
+
+      encoder.write_tuple(2);
+      encoder.write_atom("hello_query_agent");
+      encoder.write_binary(RBX_HOST);
+    }
+
+    void request_auth(int client, std::string name) {
+      bert::IOWriter writer(client);
+      bert::Encoder<bert::IOWriter> encoder(writer);
+      encoder.write_version();
+
+      encoder.write_tuple(2);
+      encoder.write_atom("file_auth");
+      encoder.write_binary(name.c_str());
+    }
+
+    void request_password(int client) {
+      bert::IOWriter writer(client);
+      bert::Encoder<bert::IOWriter> encoder(writer);
+      encoder.write_version();
+
+      encoder.write_tuple(1);
+      encoder.write_atom("password_auth");
+    }
   }
 
-
-  bool QueryAgent::process_commands(int client) {
-    bert::IOReader reader(client);
+  bool QueryAgent::check_password(Client& client) {
+    bert::IOReader reader(client.socket);
     bert::Decoder<bert::IOReader> decoder(reader);
 
-    bert::IOWriter writer(client);
+    bert::IOWriter writer(client.socket);
+    bert::Encoder<bert::IOWriter> encoder(writer);
+    bert::Value* val = 0;
+
+    int ver = decoder.read_version();
+    if(ver != 131) return false;
+
+    val = decoder.next_value();
+    if(!val) return false;
+
+    if(reader.eof_p()) {
+      delete val;
+      return false;
+    }
+
+    if(val->type() == bert::Tuple) {
+      bert::Value* cmd = val->get_element(0);
+      if(cmd->equal_atom("password")) {
+        bert::Value* pass = val->get_element(1);
+
+        if(pass->type() == bert::Binary) {
+          if(password_ == std::string(pass->string())) return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  bool QueryAgent::check_file_auth(Client& client) {
+    bert::IOReader reader(client.socket);
+    bert::Decoder<bert::IOReader> decoder(reader);
+
+    bert::IOWriter writer(client.socket);
+    bert::Encoder<bert::IOWriter> encoder(writer);
+
+    std::stringstream name;
+    std::ifstream file;
+    bert::Value* val = 0;
+
+    name << "/tmp/agent-auth." << getuid() << "-" << getpid() << "." << client.auth_key;
+
+    int ver = decoder.read_version();
+    if(ver != 131) goto auth_error;
+
+    val = decoder.next_value();
+    if(!val) goto auth_error;
+
+    if(reader.eof_p()) {
+      delete val;
+      goto auth_error;
+    }
+
+    if(!val->equal_atom("ok")) goto auth_error;
+
+    file.open(name.str().c_str());
+
+    char key[PATH_MAX];
+    file.getline(key, PATH_MAX);
+
+    if(strcmp(key, "agent start") != 0) goto auth_error;
+
+    unlink(name.str().c_str());
+    return true;
+
+auth_error:
+    unlink(name.str().c_str());
+    return false;
+  }
+
+  bool QueryAgent::process_commands(Client& client) {
+    if(client.needs_auth_p()) {
+      if(local_only_) {
+        if(!check_file_auth(client)) return false;
+      } else if(use_password_) {
+        if(!check_password(client)) return false;
+      } else {
+        return false;
+      }
+
+      if(verbose_) {
+        struct sockaddr_in sin;
+        socklen_t len = sizeof(sin);
+
+        getpeername(client.socket, (struct sockaddr*)&sin, &len);
+        std::cerr << "[QA: Authenticated " << inet_ntoa(sin.sin_addr)
+          << ":" << ntohs(sin.sin_port) << "]\n";
+      }
+
+      client.set_running();
+      write_welcome(client.socket);
+      return true;
+    }
+
+    bert::IOReader reader(client.socket);
+    bert::Decoder<bert::IOReader> decoder(reader);
+
+    bert::IOWriter writer(client.socket);
     bert::Encoder<bert::IOWriter> encoder(writer);
 
     int ver = decoder.read_version();
@@ -246,7 +385,7 @@ namespace rubinius {
           if(key->type() == bert::Binary) {
             agent::Output output(writer);
             if(!vars_->set_path(output, key->string(), value)) {
-              set_ruby(this, client, key->string(), value);
+              set_ruby(this, client.socket, key->string(), value);
             }
             delete val;
             return true;
@@ -263,7 +402,7 @@ namespace rubinius {
             agent::Output output(writer);
 
             if(!vars_->read_path(output, key->string())) {
-              get_ruby(this, client, key->string());
+              get_ruby(this, client.socket, key->string());
             }
 
             delete val;
@@ -277,7 +416,7 @@ namespace rubinius {
 
       // If the client ask is the loopback client, give it some extra
       // commands.
-      } else if(client == loopback_[0]) {
+      } else if(client.socket == loopback_[0]) {
         if(cmd->equal_atom("bind")) {
           if(val->elements()->size() == 2) {
             bert::Value* port = val->get_element(1);
@@ -317,9 +456,11 @@ namespace rubinius {
   void QueryAgent::perform() {
     running_ = true;
 
+    State state_obj(state_), *state = &state_obj;
+
     // It's possible we call code that wants this to thread
     // to be setup as a fully managed thread, so lets just make it one.
-    NativeMethod::init_thread(state_);
+    NativeMethod::init_thread(state);
     set_delete_on_exit();
 
     while(1) {
@@ -353,40 +494,93 @@ namespace rubinius {
         socklen_t addr_size = sizeof(sin);
         int client = accept(server_fd_, (struct sockaddr *)&sin, &addr_size);
 
+        if(local_only_) {
+          if(sin.sin_addr.s_addr != inet_addr("127.0.0.1")) {
+            std::cerr << "[QA: Reject connection from " << inet_ntoa(sin.sin_addr)
+                      << ":" << ntohs(sin.sin_port) << "]\n";
+            close(client);
+            continue;
+          }
+
+          Client cl(client);
+
+          cl.begin_auth(tmp_key_++);
+
+          std::stringstream name;
+          name << "/tmp/agent-auth." << getuid() << "-" << getpid() << "." << cl.auth_key;
+
+          int file = open(name.str().c_str(), O_CREAT | O_WRONLY | O_EXCL, 0600);
+          if(file == -1) {
+            std::cerr << "[QA: Unable to open '" << name.str() << "' to begin local auth]\n";
+            close(client);
+            continue;
+          }
+
+          close(file);
+
+          if(verbose_) {
+            std::cerr << "[QA: Requesting file auth from " << inet_ntoa(sin.sin_addr)
+                      << ":" << ntohs(sin.sin_port) << "]\n";
+          }
+
+          request_auth(client, name.str());
+
+          add_fd(client);
+
+          sockets_.push_back(cl);
+
+          continue;
+        } else if(use_password_) {
+          Client cl(client);
+          cl.begin_auth(0);
+
+          if(verbose_) {
+            std::cerr << "[QA: Requesting password auth from " << inet_ntoa(sin.sin_addr)
+                      << ":" << ntohs(sin.sin_port) << "]\n";
+          }
+
+          request_password(client);
+
+          add_fd(client);
+
+          sockets_.push_back(cl);
+
+          continue;
+        }
+
         if(verbose_) {
           std::cerr << "[QA: Connection from " << inet_ntoa(sin.sin_addr)
                     << ":" << ntohs(sin.sin_port) << "]\n";
         }
 
-        bert::IOWriter writer(client);
-        bert::Encoder<bert::IOWriter> encoder(writer);
-        encoder.write_version();
-
-        encoder.write_tuple(2);
-        encoder.write_atom("hello_query_agent");
-        encoder.write_binary(RBX_HOST);
+        write_welcome(client);
 
         add_fd(client);
 
-        sockets_.push_back(client);
+        Client cl(client);
+        cl.set_running();
+
+        sockets_.push_back(cl);
       } else {
         bool found = false;
-        for(std::vector<int>::iterator i = sockets_.begin();
+        for(std::vector<Client>::iterator i = sockets_.begin();
             i != sockets_.end(); /* nothing */) {
-          int client = *i;
-          if(FD_ISSET(client, &read_fds)) {
+          Client& client = *i;
+
+          if(FD_ISSET(client.socket, &read_fds)) {
             found = true;
             if(!process_commands(client)) {
               if(verbose_) {
                 struct sockaddr_in sin;
                 socklen_t len = sizeof(sin);
 
-                getpeername(*i, (struct sockaddr*)&sin, &len);
+                getpeername(client.socket, (struct sockaddr*)&sin, &len);
                 std::cerr << "[QA: Disconnected " << inet_ntoa(sin.sin_addr)
                           << ":" << ntohs(sin.sin_port) << "]\n";
               }
-              remove_fd(client);
-              close(client);
+
+              remove_fd(client.socket);
+              close(client.socket);
 
               i = sockets_.erase(i);
               continue;
@@ -403,7 +597,7 @@ namespace rubinius {
       }
     }
 
-    NativeMethod::cleanup_thread(state_);
+    NativeMethod::cleanup_thread(state);
   }
 
   static char tmp_path[PATH_MAX];
@@ -422,9 +616,10 @@ namespace rubinius {
     remove_tmp_path();
   }
 
-  void QueryAgent::shutdown(STATE) {
-    if(!state->shared.agent()) return;
-    state->shared.agent()->shutdown_i();
+  bool QueryAgent::shutdown(STATE) {
+    if(!state->shared().agent()) return false;
+    state->shared().stop_agent(state);
+    return true;
   }
 
   void QueryAgent::shutdown_i() {
@@ -484,6 +679,22 @@ namespace rubinius {
 #ifdef __APPLE__
       uint32_t size = PATH_MAX;
       if(_NSGetExecutablePath(buf, &size) == 0) {
+        stream << buf << "\n";
+      } else if(realpath(argv[0], buf)) {
+        stream << buf << "\n";
+      } else {
+        stream << argv[0] << "\n";
+      }
+#elif defined(__FreeBSD__)
+      int oid[4];
+      size_t len;
+
+      oid[0] = CTL_KERN;
+      oid[1] = KERN_PROC;
+      oid[2] = KERN_PROC_PATHNAME;
+      oid[3] = getpid();
+      len = PATH_MAX;
+      if(sysctl(oid, 4, buf, &len, 0, 0) == 0) {
         stream << buf << "\n";
       } else if(realpath(argv[0], buf)) {
         stream << buf << "\n";

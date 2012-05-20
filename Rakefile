@@ -33,7 +33,7 @@ end
 require config_rb
 BUILD_CONFIG = Rubinius::BUILD_CONFIG
 
-unless BUILD_CONFIG[:config_version] == 138
+unless BUILD_CONFIG[:config_version] == 156
   STDERR.puts "Your configuration is outdated, please run ./configure first"
   exit 1
 end
@@ -88,16 +88,43 @@ ENV['CXX'] = BUILD_CONFIG[:cxx] unless ENV['CXX']
 $dlext = RbConfig::CONFIG["DLEXT"]
 $CC = ENV['CC']
 
-def run_specs(flags=nil)
-  unless File.directory? BUILD_CONFIG[:runtime]
-    # Setting these enables the specs to run when rbx has been configured
-    # to be installed, but rake install has not been run yet.
-    ENV["RBX_RUNTIME"] = File.expand_path "../runtime", __FILE__
-    ENV["RBX_LIB"]     = File.expand_path "../lib", __FILE__
-    ENV["CFLAGS"]      = "-Ivm/capi"
+class SpecRunner
+
+  @at_exit_handler_set = false
+  @at_exit_status = 0
+
+  def self.set_at_exit_handler
+    return if @at_exit_handler_set
+
+    at_exit { exit @at_exit_status }
+    @at_exit_handler_set = true
   end
 
-  sh "bin/mspec ci #{ENV['CI_MODE_FLAG'] || flags} --background --agent"
+  def self.set_at_exit_status(status)
+    @at_exit_status = status
+  end
+
+  def initialize
+    unless File.directory? BUILD_CONFIG[:runtime]
+      # Setting these enables the specs to run when rbx has been configured
+      # to be installed, but rake install has not been run yet.
+      ENV["RBX_RUNTIME"] = File.expand_path "../runtime", __FILE__
+      ENV["RBX_LIB"]     = File.expand_path "../lib", __FILE__
+      ENV["CFLAGS"]      = "-Ivm/capi"
+    end
+
+    ENV.delete("RUBYOPT")
+
+    @handler = lambda do |ok, status|
+      self.class.set_at_exit_status(status.exitstatus) unless ok
+    end
+  end
+
+  def run(flags=nil)
+    self.class.set_at_exit_handler
+
+    sh("bin/mspec ci #{ENV['CI_MODE_FLAG'] || flags} -d --background", &@handler)
+  end
 end
 
 task :default => :spec
@@ -163,15 +190,10 @@ task :clean => %w[
 ]
 
 desc 'Remove rubinius build files and external library build files'
-task(:distclean => %w[ clean vm:distclean ]) do
-  rm_f 'configure.log'
-  rm_f FileList['vm/capi/*/include/rbx_config.h']
-  rm_f FileList['vm/capi/*/include/config.h']
-  rm_f 'lib/readline.rb'
-  rm_f 'lib/rubinius/build_config.rb'
-  rm_f 'lib/ext/melbourne/.build_ruby'
-  rm_f 'config.rb'
-end
+task :distclean => %w[
+  clean
+  vm:distclean
+]
 
 namespace :clean do
   desc "Cleans up editor files and other misc crap"
@@ -182,15 +204,26 @@ namespace :clean do
   end
 end
 
-desc 'Move the preinstalled gem setup into place'
+desc 'Install the pre-installed gems'
 task :gem_bootstrap do
-  pre_gems = Dir["preinstalled-gems/data/specifications/*.gemspec"].sort
-  ins_gems = Dir["gems/rubinius/specifications/*.gemspec"].sort
-  unless pre_gems == ins_gems
-    FileUtils.rm_rf "gems/rubinius"
-    FileUtils.mkdir_p "gems/rubinius"
-    FileUtils.cp_r "preinstalled-gems/bin", "gems/bin"
-    FileUtils.cp_r "preinstalled-gems/data", "gems/rubinius/preinstalled"
+  STDOUT.puts "Installing pre-installed gems..."
+
+  rbx = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
+  gems = Dir["preinstalled-gems/*.gem"]
+  options = "--local --conservative --ignore-dependencies --no-rdoc --no-ri"
+
+  BUILD_CONFIG[:version_list].each do |ver|
+    gems.each do |gem|
+      parts = File.basename(gem, ".gem").split "-"
+      gem_name = parts[0..-2].join "-"
+      gem_version = parts[-1]
+
+      system "#{rbx} -X#{ver} -S gem query --name-matches #{gem_name} --installed --version #{gem_version} > #{DEV_NULL}"
+
+      unless $?.success?
+        sh "#{rbx} -X#{ver} -S gem install #{options} #{gem}"
+      end
+    end
   end
 end
 
@@ -204,23 +237,25 @@ task :docs do
   Rubinius::Documentation.main
 end
 
+spec_runner = SpecRunner.new
+
 desc "Run the CI specs in 1.8 mode but do not rebuild on failure"
 task :spec18 => %w[build vm:test] do
-  run_specs "-T -X18"
+  spec_runner.run "-T -X18"
 end
 
 desc "Run the CI specs in 1.9 mode but do not rebuild on failure"
 task :spec19 => %w[build vm:test] do
-  run_specs "-T -X19"
+  spec_runner.run "-T -X19"
 end
 
 desc "Run the CI specs in 2.0 mode but do not rebuild on failure"
 task :spec20 => %w[build vm:test] do
-  run_specs "-T -X20"
+  spec_runner.run "-T -X20"
 end
 
 desc "Run CI in default (configured) mode but do not rebuild on failure"
-task :spec => %w[spec18 spec19]
+task :spec => BUILD_CONFIG[:version_list].map { |v| "spec#{v}" }
 
 desc "Print list of items marked to-do in kernel/ (@todo|TODO)"
 task :todos do
@@ -233,68 +268,6 @@ task :todos do
     File.open(filename) do |file|
       file.each do |line|
         puts "#{filename} #{file.lineno.to_s}:\t#{line.strip}" if line.include?("@todo") or line.include?("TODO")
-      end
-    end
-  end
-end
-
-
-# shell command for quarterly list of committers
-def quarterly_committers(start_month, year=Time.now.year)
-  "git log --since='#{start_month}/1/#{year}' --until='#{start_month + 2}/31/#{year}' | git shortlog -n -s"
-end
-
-def future?(start_month, year=Time.now.year)
-  require "date"
-
-  if Date.parse("#{start_month}/1/#{year}") > Date.today
-    puts
-    puts "ERROR: That's the future!"
-    puts
-    true
-  elsif year < Time.now.year
-    false
-  else Date.parse("#{start_month + 2}/28/#{year}") > Date.today
-    puts
-    puts "WARNING: That's the current quarter."
-    puts
-  end
-end
-
-namespace :committers do
-  desc "Prints list of committers from first calendar quarter of this year"
-  task :q1 do
-    unless future?(1)
-      sh quarterly_committers(1)
-    end
-  end
-
-  desc "Prints list of committers from second calendar quarter of this year"
-  task :q2 do
-    unless future?(4)
-      sh quarterly_committers(4)
-    end
-  end
-
-  desc "Prints list of committers from third calendar quarter of this year"
-  task :q3 do
-    unless future?(7)
-      sh quarterly_committers(7)
-    end
-  end
-
-  desc "Prints list of committers from fourth calendar quarter of this year"
-  task :q4 do
-    unless future?(10)
-      sh quarterly_committers(10)
-    end
-  end
-
-  namespace :q4 do
-    desc "Prints list of committers from fourth calendar quarter of LAST year"
-    task :last_year do
-      unless future?(10, Time.now.year - 1)
-        sh quarterly_committers(10, Time.now.year - 1)
       end
     end
   end

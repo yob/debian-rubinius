@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class CompiledMethod < Executable
 
@@ -317,6 +319,10 @@ module Rubinius
       get_metadata(:for_block)
     end
 
+    def for_eval?
+      get_metadata(:for_eval)
+    end
+
     def describe
       str = "method #{@name}: #{@total_args} arg(s), #{@required_args} required"
       if @splat
@@ -331,7 +337,7 @@ module Rubinius
     #
     # @return [Tuple]
     def child_methods
-      literals.select {|lit| lit.kind_of? CompiledMethod }
+      literals.select { |lit| lit.kind_of? CompiledMethod }
     end
 
     def change_name(name)
@@ -479,6 +485,29 @@ module Rubinius
     end
 
     ##
+    # For Method#parameters
+    def parameters
+      m = required_args - post_args
+      o = m + total_args - required_args
+      p = o + post_args
+      p += 1 if splat
+
+      local_names.each_with_index.map do |name, i|
+        if i < m
+          [:req, name]
+        elsif i < o
+          [:opt, name]
+        elsif splat == i
+          [:rest, name]
+        elsif i < p
+          [:req, name]
+        else
+          [:block, name]
+        end
+      end
+    end
+
+    ##
     # Represents virtual machine's CPU instruction.
     # Instructions are organized into instruction
     # sequences known as iSeq, forming body
@@ -548,7 +577,7 @@ module Rubinius
       # A nice human readable interpretation of this set of instructions
       def to_s
         str = "%04d:  %-27s" % [@ip, opcode]
-        str << @args.map{|a| a.inspect}.join(', ')
+        str << @args.map{ |a| a.inspect }.join(', ')
         if @comment
           str << "    # #{@comment}"
         end

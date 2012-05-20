@@ -1,15 +1,17 @@
 #include "oniguruma.h" // Must be first.
+#include "transcoder.h"
 
 #include "builtin/regexp.hpp"
+#include "builtin/block_environment.hpp"
+#include "builtin/bytearray.hpp"
 #include "builtin/class.hpp"
+#include "builtin/encoding.hpp"
 #include "builtin/integer.hpp"
 #include "builtin/lookuptable.hpp"
+#include "builtin/proc.hpp"
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/bytearray.hpp"
-#include "builtin/block_environment.hpp"
-#include "builtin/proc.hpp"
 
 #include "vm.hpp"
 #include "vm/object_utils.hpp"
@@ -17,9 +19,13 @@
 #include "call_frame.hpp"
 #include "arguments.hpp"
 
+#include "configuration.hpp"
+
 #include "gc/gc.hpp"
 
 #include "util/atomic.hpp"
+
+#include "ontology.hpp"
 
 #define OPTION_IGNORECASE         ONIG_OPTION_IGNORECASE
 #define OPTION_EXTENDED           ONIG_OPTION_EXTEND
@@ -39,15 +45,24 @@ namespace rubinius {
 
   void Regexp::init(STATE) {
     onig_init();
-    GO(regexp).set(state->new_class("Regexp", G(object), 0));
+    GO(regexp).set(ontology::new_class(state, "Regexp", G(object), 0));
     G(regexp)->set_object_type(state, RegexpType);
 
-    GO(matchdata).set(state->new_class("MatchData", G(object), 0));
+    GO(matchdata).set(ontology::new_class(state, "MatchData", G(object), 0));
     G(matchdata)->set_object_type(state, MatchDataType);
   }
 
   char *Regexp::version(STATE) {
     return (char*)onig_version();
+  }
+
+  Encoding* Regexp::encoding(STATE) {
+    return source_->encoding(state);
+  }
+
+  Encoding* Regexp::encoding(STATE, Encoding* enc) {
+    source_->encoding(state, enc);
+    return enc;
   }
 
   static OnigEncoding get_enc_from_kcode(int kcode) {
@@ -62,26 +77,53 @@ namespace rubinius {
         r = ONIG_ENCODING_EUC_JP;
         break;
       case KCODE_SJIS:
-        r = ONIG_ENCODING_SJIS;
+        r = ONIG_ENCODING_Shift_JIS;
         break;
       case KCODE_UTF8:
-        r = ONIG_ENCODING_UTF8;
+        r = ONIG_ENCODING_UTF_8;
         break;
     }
     return r;
   }
 
+  static int encoding_to_kcode(STATE, Encoding* enc) {
+    // TODO: Remove 1.8 kcode/options and add flags struct
+    if(enc == Encoding::usascii_encoding(state)) return KCODE_NONE;
+    if(enc == Encoding::utf8_encoding(state)) return KCODE_UTF8;
+    if(enc == Encoding::find(state, "EUC-JP")) return KCODE_EUC;
+    if(enc == Encoding::find(state, "Windows-31J")) return KCODE_SJIS;
+
+    return KCODE_NONE;
+  }
+
+  static Encoding* kcode_to_encoding(STATE, int kcode, Encoding* enc) {
+    switch(kcode & KCODE_MASK) {
+    case KCODE_NONE:
+      return 0;
+    case KCODE_EUC:
+      return Encoding::find(state, "EUC-JP");
+    case KCODE_SJIS:
+      return Encoding::find(state, "Windows-31J");
+    case KCODE_UTF8:
+      return Encoding::utf8_encoding(state);
+    case KCODE_ASCII:
+    default:
+      return enc;
+    }
+    return enc;
+  }
+
   static OnigEncoding current_encoding(STATE) {
-    switch(state->shared.kcode_page()) {
+    switch(state->shared().kcode_page()) {
     default:
     case kcode::eAscii:
       return ONIG_ENCODING_ASCII;
     case kcode::eEUC:
       return ONIG_ENCODING_EUC_JP;
     case kcode::eSJIS:
-      return ONIG_ENCODING_SJIS;
+      return ONIG_ENCODING_Shift_JIS;
     case kcode::eUTF8:
-      return ONIG_ENCODING_UTF8;
+      return ONIG_ENCODING_UTF_8;
     }
   }
 
@@ -89,10 +131,10 @@ namespace rubinius {
     int r;
 
     r = KCODE_ASCII;
-    if (enc == ONIG_ENCODING_ASCII)  r = KCODE_NONE;
-    if (enc == ONIG_ENCODING_EUC_JP) r = KCODE_EUC;
-    if (enc == ONIG_ENCODING_SJIS)   r = KCODE_SJIS;
-    if (enc == ONIG_ENCODING_UTF8)   r = KCODE_UTF8;
+    if (enc == ONIG_ENCODING_ASCII)       r = KCODE_NONE;
+    if (enc == ONIG_ENCODING_EUC_JP)      r = KCODE_EUC;
+    if (enc == ONIG_ENCODING_Shift_JIS)   r = KCODE_SJIS;
+    if (enc == ONIG_ENCODING_UTF_8)       r = KCODE_UTF8;
     return r;
   }
 
@@ -103,15 +145,14 @@ namespace rubinius {
 
   static int _gather_names(const UChar *name, const UChar *name_end,
       int ngroup_num, int *group_nums, regex_t *reg, struct _gather_data *gd) {
+    STATE = gd->state;
+    Array* ary = Array::create(state, ngroup_num);
 
-    int gn;
-    STATE;
-    LookupTable* tbl = gd->tbl;
+    for(int i = 0; i < ngroup_num; i++) {
+      ary->set(state, i, Fixnum::from(group_nums[i]));
+    }
 
-    state = gd->state;
-
-    gn = group_nums[0];
-    tbl->store(state, state->symbol((char*)name), Fixnum::from(gn - 1));
+    gd->tbl->store(state, state->symbol((char*)name), ary);
     return 0;
   }
 
@@ -123,8 +164,8 @@ namespace rubinius {
     Regexp* o_reg = state->new_object<Regexp>(G(regexp));
 
     o_reg->onig_data = NULL;
-    o_reg->forced_encoding_ = false;
-    o_reg->lock_ = 0;
+    o_reg->fixed_encoding_ = false;
+    o_reg->lock_.init();
 
     return o_reg;
   }
@@ -205,13 +246,13 @@ namespace rubinius {
     OnigErrorInfo err_info;
     int err;
 
-    if(forced_encoding_) return;
+    if(fixed_encoding_) return;
 
     enc = current_encoding(state);
     if(enc == onig_data->enc) return;
 
     pat = (UChar*)source()->byte_address();
-    end = pat + source()->size();
+    end = pat + source()->byte_size();
 
     int options = onig_data->options;
     OnigEncoding orig_enc = onig_data->enc;
@@ -234,7 +275,7 @@ namespace rubinius {
         assert(err == ONIG_NORMAL);
       }
 
-      forced_encoding_ = true;
+      fixed_encoding_ = true;
     }
 
     make_managed(state);
@@ -251,23 +292,37 @@ namespace rubinius {
     OnigEncoding enc;
     int err, num_names, kcode;
 
-    pat = (UChar*)pattern->byte_address();
-    end = pat + pattern->size();
-
     opts  = options->to_native();
     kcode = opts & KCODE_MASK;
     opts &= OPTION_MASK;
 
-    if(kcode == 0) {
-      enc = current_encoding(state);
+    if(LANGUAGE_18_ENABLED(state)) {
+      pat = (UChar*)pattern->byte_address();
+      end = pat + pattern->byte_size();
+
+      if(kcode == 0) {
+          enc = current_encoding(state);
+      } else {
+        // Don't attempt to fix the encoding later, it's been specified by the
+        // user.
+        enc = get_enc_from_kcode(kcode);
+        fixed_encoding_ = true;
+      }
     } else {
-      // Don't attempt to fix the encoding later, it's been specified by the
-      // user.
-      enc = get_enc_from_kcode(kcode);
-      forced_encoding_ = true;
+      Encoding* source_enc = kcode_to_encoding(state, kcode, pattern->encoding(state));
+
+      fixed_encoding_ = kcode && kcode != KCODE_NONE;
+      String* converted = pattern->convert_escaped(state, source_enc, fixed_encoding_);
+
+      pat = (UChar*)converted->byte_address();
+      end = pat + converted->byte_size();
+      enc = source_enc->get_encoding();
+
+      pattern = pattern->string_dup(state);
+      pattern->encoding(state, source_enc);
     }
 
-    thread::Mutex::LockGuard lg(state->shared.onig_lock());
+    thread::Mutex::LockGuard lg(state->shared().onig_lock());
 
     err = onig_new(&this->onig_data, pat, end, opts, enc, ONIG_SYNTAX_RUBY, &err_info);
 
@@ -316,11 +371,20 @@ namespace rubinius {
 
     int result = ((int)onig_get_options(onig_data) & OPTION_MASK);
 
-    if(forced_encoding_) {
-      result |= get_kcode_from_enc(onig_get_encoding(onig_data));
+    if(fixed_encoding_) {
+      // TODO: unify after removing 1.8 kcode
+      if(LANGUAGE_18_ENABLED(state)) {
+        result |= get_kcode_from_enc(onig_get_encoding(onig_data));
+      } else {
+        result |= encoding_to_kcode(state, encoding(state));
+      }
     }
 
     return Fixnum::from(result);
+  }
+
+  Object* Regexp::fixed_encoding_p(STATE) {
+    return RBOOL(fixed_encoding_);
   }
 
   static Tuple* _md_region_to_tuple(STATE, OnigRegion *region, int pos) {
@@ -383,9 +447,7 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    // thread::Mutex::LockGuard lg(state->shared.onig_lock());
-
-    max = string->size();
+    max = string->byte_size();
     str = (UChar*)string->byte_address();
 
     native_int i_start = start->to_native();
@@ -393,10 +455,10 @@ namespace rubinius {
 
     // Bounds check.
     if(i_start < 0 || i_end < 0 || i_start > max || i_end > max) {
-      return Qnil;
+      return cNil;
     }
 
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
+    lock_.lock();
 
     maybe_recompile(state);
 
@@ -415,7 +477,7 @@ namespace rubinius {
 
     int* back_match = onig_data->int_map_backward;
 
-    if(!RTEST(forward)) {
+    if(!CBOOL(forward)) {
       beg = onig_search(onig_data, str, str + max,
                         str + i_end,
                         str + i_start,
@@ -442,11 +504,11 @@ namespace rubinius {
       write_barrier(state, ba);
     }
 
-    lock_ = 0;
+    lock_.unlock();
 
     if(beg == ONIG_MISMATCH) {
       onig_region_free(&region, 0);
-      return Qnil;
+      return cNil;
     }
 
     md = get_match_data(state, &region, string, this, 0);
@@ -458,25 +520,25 @@ namespace rubinius {
     int beg, max;
     const UChar *str;
     const UChar *fin;
-    Object* md = Qnil;
+    Object* md = cNil;
 
     if(unlikely(!onig_data)) {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    // thread::Mutex::LockGuard lg(state->shared.onig_lock());
+    // thread::Mutex::LockGuard lg(state->shared().onig_lock());
 
-    max = string->size();
+    max = string->byte_size();
     native_int pos = start->to_native();
 
     str = (UChar*)string->byte_address();
     fin = str + max;
 
     // Bounds check.
-    if(pos > max) return Qnil;
+    if(pos > max) return cNil;
     str += pos;
 
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
+    lock_.lock();
 
     maybe_recompile(state);
 
@@ -513,7 +575,7 @@ namespace rubinius {
       write_barrier(state, ba);
     }
 
-    lock_ = 0;
+    lock_.unlock();
 
     if(beg != ONIG_MISMATCH) {
       md = get_match_data(state, &region, string, this, pos);
@@ -527,17 +589,17 @@ namespace rubinius {
     int beg, max;
     const UChar *str;
     const UChar *fin;
-    Object* md = Qnil;
+    Object* md = cNil;
 
     if(unlikely(!onig_data)) {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
+    lock_.lock();
 
     maybe_recompile(state);
 
-    max = string->size();
+    max = string->byte_size();
     native_int pos = start->to_native();
 
     str = (UChar*)string->byte_address();
@@ -578,7 +640,7 @@ namespace rubinius {
       write_barrier(state, ba);
     }
 
-    lock_ = 0;
+    lock_.unlock();
 
     if(beg != ONIG_MISMATCH) {
       md = get_match_data(state, &region, string, this, pos);
@@ -592,7 +654,7 @@ namespace rubinius {
     Fixnum* beg = try_as<Fixnum>(full_->at(state, 0));
     Fixnum* fin = try_as<Fixnum>(full_->at(state, 1));
 
-    native_int max = source_->size();
+    native_int max = source_->byte_size();
     native_int f = fin->to_native();
     native_int b = beg->to_native();
 
@@ -610,7 +672,7 @@ namespace rubinius {
   String* MatchData::pre_matched(STATE) {
     Fixnum* beg = try_as<Fixnum>(full_->at(state, 0));
 
-    native_int max = source_->size();
+    native_int max = source_->byte_size();
     native_int sz = beg->to_native();
 
     if(!beg || sz <= 0) {
@@ -628,7 +690,7 @@ namespace rubinius {
     Fixnum* fin = try_as<Fixnum>(full_->at(state, 1));
 
     native_int f = fin->to_native();
-    native_int max = source_->size();
+    native_int max = source_->byte_size();
 
     if(!fin || f >= max) {
       return String::create(state, 0, 0);
@@ -643,22 +705,22 @@ namespace rubinius {
   }
 
   Object* MatchData::nth_capture(STATE, native_int which) {
-    if(region_->num_fields() <= which) return Qnil;
+    if(region_->num_fields() <= which) return cNil;
 
     Tuple* sub = try_as<Tuple>(region_->at(state, which));
-    if(!sub) return Qnil;
+    if(!sub) return cNil;
 
     Fixnum* beg = try_as<Fixnum>(sub->at(state, 0));
     Fixnum* fin = try_as<Fixnum>(sub->at(state, 1));
 
     native_int b = beg->to_native();
     native_int f = fin->to_native();
-    native_int max = source_->size();
+    native_int max = source_->byte_size();
 
     if(!beg || !fin ||
         f > max ||
         b < 0) {
-      return Qnil;
+      return cNil;
     }
 
     const char* str = (char*)source_->byte_address();
@@ -670,7 +732,7 @@ namespace rubinius {
   }
 
   Object* MatchData::last_capture(STATE) {
-    if(region_->num_fields() == 0) return Qnil;
+    if(region_->num_fields() == 0) return cNil;
     return nth_capture(state, region_->num_fields() - 1);
   }
 
@@ -695,12 +757,12 @@ namespace rubinius {
         return match->nth_capture(state, which->to_native());
       }
     }
-    return Qnil;
+    return cNil;
   }
 
   Object* Regexp::last_match(STATE, Arguments& args, CallFrame* call_frame) {
     MatchData* match = try_as<MatchData>(call_frame->last_match(state));
-    if(!match) return Qnil;
+    if(!match) return cNil;
 
     if(args.total() == 0) return match;
     if(args.total() > 1) return Primitives::failure();
@@ -728,7 +790,7 @@ namespace rubinius {
 
   Object* Regexp::propagate_last_match(STATE, CallFrame* call_frame) {
     Object* obj = call_frame->last_match(state);
-    if(RTEST(obj)) {
+    if(CBOOL(obj)) {
       Regexp::set_last_match(state, obj, call_frame);
     }
     return obj;
@@ -737,7 +799,7 @@ namespace rubinius {
   Object* Regexp::set_block_last_match(STATE, CallFrame* call_frame) {
     Object* blk = call_frame->scope->block();
     MatchData* match = try_as<MatchData>(call_frame->last_match(state));
-    if(!match) return Qnil;
+    if(!match) return cNil;
 
     if(BlockEnvironment* env = try_as<BlockEnvironment>(blk)) {
       env->top_scope()->last_match(state, match);
@@ -816,43 +878,6 @@ namespace rubinius {
         reg->repeat_range = reinterpret_cast<OnigRepeatRange*>(tmp->raw_bytes());
         mark.just_set(obj, tmp);
       }
-    }
-  }
-
-  void Regexp::Info::visit(Object* obj, ObjectVisitor& visit) {
-    auto_visit(obj, visit);
-
-    Regexp* reg_o = force_as<Regexp>(obj);
-    regex_t* reg = reg_o->onig_data;
-
-    if(!reg) return;
-
-    ByteArray* reg_ba = ByteArray::from_body(reg);
-    visit.call(reg_ba);
-
-    if(reg->p) {
-      ByteArray* ba = ByteArray::from_body(reg->p);
-      visit.call(ba);
-    }
-
-    if(reg->exact) {
-      ByteArray* ba = ByteArray::from_body(reg->exact);
-      visit.call(ba);
-    }
-
-    if(reg->int_map) {
-      ByteArray* ba = ByteArray::from_body(reg->int_map);
-      visit.call(ba);
-    }
-
-    if(reg->int_map_backward) {
-      ByteArray* ba = ByteArray::from_body(reg->int_map_backward);
-      visit.call(ba);
-    }
-
-    if(reg->repeat_range) {
-      ByteArray* ba = ByteArray::from_body(reg->repeat_range);
-      visit.call(ba);
     }
   }
 }

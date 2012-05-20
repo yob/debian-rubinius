@@ -1,22 +1,23 @@
+# -*- encoding: us-ascii -*-
+
 class Time
   def self.now
     Rubinius.primitive :time_s_now
     raise PrimitiveFailure, "Time.now primitive failed"
   end
 
-  def self.specific(sec, usec, from_gmt)
+  def self.duplicate(other)
+    Rubinius.primitive :time_s_dup
+    raise ArgumentError, "descriptors reference invalid time"
+  end
+
+  def self.specific(sec, nsec, from_gmt, offset)
     Rubinius.primitive :time_s_specific
     raise ArgumentError, "descriptors reference invalid time"
   end
 
-  def self.from_array(sec, min, hour, mday, month, year, usec, is_dst, from_gmt)
-    Rubinius.primitive :time_s_from_array
-    raise ArgumentError, "descriptors reference invalid time"
-  end
-
   def dup
-    Rubinius.primitive :time_dup
-    raise PrimitiveFailure, "Time#dup failed"
+    self.class.duplicate(self)
   end
 
   def seconds
@@ -29,9 +30,9 @@ class Time
     raise PrimitiveFailure, "Time#usec failed"
   end
 
-  def decomposed(gmt)
+  def to_a
     Rubinius.primitive :time_decompose
-    raise PrimitiveFailure, "Time#decompose primitive failed"
+    raise PrimitiveFailure, "Time#to_a primitive failed"
   end
 
   def strftime(format)

@@ -2,6 +2,8 @@
 
 #include "builtin/regexp.hpp"
 
+#include "ontology.hpp"
+
 class TestRegexp : public CxxTest::TestSuite, public VMTest {
 public:
 
@@ -30,12 +32,12 @@ public:
     Regexp* re = Regexp::create(state);
     re->initialize(state, pat, Fixnum::from(0));
 
-    TS_ASSERT_EQUALS(re->source(), pat);
-    TS_ASSERT_EQUALS(re->names(),  Qnil);
+    TS_ASSERT_EQUALS(re->source()->c_str(state), pat->c_str(state));
+    TS_ASSERT_EQUALS(re->names(),  cNil);
   }
 
   void test_allocate() {
-    Class* sub = state->new_class("RegexpSub", G(regexp), 0);
+    Class* sub = ontology::new_class(state, "RegexpSub", G(regexp), 0);
     Regexp* re = Regexp::allocate(state, sub);
 
     TS_ASSERT_EQUALS(re->klass(), sub);
@@ -46,7 +48,7 @@ public:
     Regexp* re = Regexp::create(state);
     re->initialize(state, pat, Fixnum::from(0));
 
-    TS_ASSERT_EQUALS(re->source(), pat);
+    TS_ASSERT_EQUALS(re->source()->c_str(state), pat->c_str(state));
     TS_ASSERT(re->names()->kind_of_p(state, G(lookuptable)));
   }
 
@@ -77,7 +79,7 @@ public:
 
     Fixnum* start = Fixnum::from(0);
     Fixnum* end =   Fixnum::from(3);
-    Object* forward = Qtrue;
+    Object* forward = cTrue;
 
     MatchData* matches = (MatchData*)re->match_region(state, input, start, end, forward);
     TS_ASSERT(!matches->nil_p());
@@ -95,7 +97,7 @@ public:
 
     Fixnum* start = Fixnum::from(0);
     Fixnum* end =   Fixnum::from(3);
-    Object* forward = Qtrue;
+    Object* forward = cTrue;
 
     MatchData* matches = (MatchData*)re->match_region(state, input, start, end, forward);
     TS_ASSERT(matches->nil_p());
@@ -110,7 +112,7 @@ public:
 
     Fixnum* start = Fixnum::from(0);
     Fixnum* end =   Fixnum::from(3);
-    Object* forward = Qtrue;
+    Object* forward = cTrue;
 
     MatchData* matches = (MatchData*)re->match_region(state, input, start, end, forward);
     TS_ASSERT(!matches->nil_p());
@@ -131,7 +133,7 @@ public:
 
     Fixnum* start = Fixnum::from(0);
     Fixnum* end =   Fixnum::from(3);
-    Object* forward = Qfalse;
+    Object* forward = cFalse;
 
     MatchData* matches = (MatchData*)re->match_region(state, input, start, end, forward);
     TS_ASSERT(!matches->nil_p());

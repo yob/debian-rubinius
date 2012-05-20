@@ -37,11 +37,17 @@ namespace rubinius {
     // Rubinius.primitive :pointer_add
     Pointer* add(STATE, Integer* amount);
 
+    // Rubinius.primitive :pointer_write_char
+    Integer* write_char(STATE, Integer* val);
+
+    // Rubinius.primitive :pointer_read_char
+    Integer* read_char(STATE, Object* sign);
+
     // Rubinius.primitive :pointer_write_short
     Integer* write_short(STATE, Integer* val);
 
     // Rubinius.primitive :pointer_read_short
-    Integer* read_short(STATE);
+    Integer* read_short(STATE, Object* sign);
 
     // Rubinius.primitive :pointer_write_int
     Integer* write_int(STATE, Integer* val);
@@ -53,13 +59,13 @@ namespace rubinius {
     Integer* write_long(STATE, Integer* val);
 
     // Rubinius.primitive :pointer_read_long
-    Integer* read_long(STATE);
+    Integer* read_long(STATE, Object* sign);
 
     // Rubinius.primitive :pointer_write_long_long
     Integer* write_long_long(STATE, Integer* val);
 
     // Rubinius.primitive :pointer_read_long_long
-    Integer* read_long_long(STATE);
+    Integer* read_long_long(STATE, Object* sign);
 
     // Rubinius.primitive :pointer_write_float
     Float* write_float(STATE, Float* val);
@@ -72,6 +78,9 @@ namespace rubinius {
 
     // Rubinius.primitive :pointer_read_double
     Float* read_double(STATE);
+
+    // Rubinius.primitive :pointer_write_pointer
+    Pointer* write_pointer(STATE, Pointer* ptr);
 
     // Rubinius.primitive :pointer_read_pointer
     Pointer* read_pointer(STATE);

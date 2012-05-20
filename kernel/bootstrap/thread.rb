@@ -1,8 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 class Thread
 
   def self.current
     Rubinius.primitive :thread_current
-    Kernel.raise PrimitiveFailure, "Threadcurrent primitive failed"
+    Kernel.raise PrimitiveFailure, "Thread.current primitive failed"
   end
 
   def self.allocate
@@ -11,7 +13,12 @@ class Thread
 
   def self.pass
     Rubinius.primitive :thread_pass
-    Kernel.raise PrimitiveFailure, "Thread#pass primitive failed"
+    Kernel.raise PrimitiveFailure, "Thread.pass primitive failed"
+  end
+
+  def self.list
+    Rubinius.primitive :thread_list
+    Kernel.raise PrimitiveFailure, "Thread.list primitive failed"
   end
 
   def fork
@@ -49,9 +56,9 @@ class Thread
     Kernel.raise PrimitiveFailure, "Thread#native_join failed"
   end
 
-  def self.set_critical(obj)
-    Rubinius.primitive :thread_set_critical
-    Kernel.raise PrimitiveFailure, "Thread.set_critical failed"
+  def mri_backtrace
+    Rubinius.primitive :thread_mri_backtrace
+    Kernel.raise PrimitiveFailure, "Thread#mri_backtrace primitive failed"
   end
 
   def unlock_locks
@@ -114,31 +121,6 @@ class Thread
     return thr
   end
 
-  def self.start(*args)
-    thr = Rubinius.invoke_primitive :thread_allocate, self
-
-    Rubinius.asm(args, thr) do |args, obj|
-      run obj
-      dup
-
-      push_false
-      send :setup, 1, true
-      pop
-
-      run args
-      push_block
-      send_with_splat :__thread_initialize__, 0, true
-      # no pop here, as .asm blocks imply a pop as they're not
-      # allowed to leak a stack value
-    end
-
-    return thr
-  end
-
-  class << self
-    alias_method :fork, :start
-  end
-
   def initialize(*args, &block)
     unless block
       Kernel.raise ThreadError, "no block passed to Thread#initialize"
@@ -163,51 +145,6 @@ class Thread
 
   def thread_is_setup?
     @block != nil
-  end
-
-  # Called by Thread#fork in the new thread
-  #
-  def __run__()
-    begin
-      begin
-        @lock.send nil
-        @result = @block.call(*@args)
-      ensure
-        @lock.receive
-        unlock_locks
-        @joins.each { |join| join.send self }
-      end
-    rescue Die
-      @exception = nil
-    rescue Exception => e
-      # I don't really get this, but this is MRI's behavior. If we're dying
-      # by request, ignore any raised exception.
-      @exception = e # unless @dying
-    ensure
-      @alive = false
-      @lock.send nil
-    end
-
-    if @exception
-      if abort_on_exception or Thread.abort_on_exception
-        Thread.main.raise @exception
-      elsif $DEBUG
-        STDERR.puts "Exception in thread: #{@exception.message} (#{@exception.class})"
-      end
-    end
-  end
-
-  def setup(prime_lock)
-    @group = nil
-    @alive = true
-    @result = false
-    @exception = nil
-    @critical = false
-    @dying = false
-    @locals = Rubinius::LookupTable.new
-    @lock = Rubinius::Channel.new
-    @lock.send nil if prime_lock
-    @joins = []
   end
 
   def alive?
@@ -253,23 +190,6 @@ class Thread
     end
   end
 
-  def self.stop
-    # Make sure that if we're stopping the current Thread,
-    # others can run, so reset critical.
-    Thread.critical = false
-    sleep
-    nil
-  end
-
-  def self.critical
-    @critical
-  end
-
-  def self.critical=(value)
-    set_critical value
-    @critical = !!value
-  end
-
   def join(timeout = undefined)
     join_inner(timeout) { @alive ? nil : self }
   end
@@ -280,10 +200,6 @@ class Thread
 
   def add_to_group(group)
     @group = group
-  end
-
-  def value
-    join_inner { @result }
   end
 
   def join_inner(timeout = undefined)
@@ -359,20 +275,39 @@ class Thread
   private :raise_prim
 
   def [](key)
-    @locals[Rubinius::Type.coerce_to_symbol(key)]
+    locals_aref(Rubinius::Type.coerce_to_symbol(key))
   end
+
+  def locals_aref(key)
+    Rubinius.primitive :thread_locals_aref
+    raise PrimitiveFailure, "Thread#locals_aref primitive failed"
+  end
+  private :locals_aref
 
   def []=(key, value)
-    @locals[Rubinius::Type.coerce_to_symbol(key)] = value
+    locals_store(Rubinius::Type.coerce_to_symbol(key), value)
   end
 
+  def locals_store(key, value)
+    Rubinius.primitive :thread_locals_store
+    raise PrimitiveFailure, "Thread#locals_store primitive failed"
+  end
+  private :locals_store
+
   def keys
-    @locals.keys
+    Rubinius.primitive :thread_locals_keys
+    raise PrimitiveFailure, "Thread#keys primitive failed"
   end
 
   def key?(key)
-    @locals.key?(Rubinius::Type.coerce_to_symbol(key))
+    locals_key?(Rubinius::Type.coerce_to_symbol(key))
   end
+
+  def locals_key?(key)
+    Rubinius.primitive :thread_locals_has_key
+    raise PrimitiveFailure, "Thread#locals_key? primitive failed"
+  end
+  private :locals_key?
 
   # Register another Thread object +thr+ as the Thread where the debugger
   # is running. When the current thread hits a breakpoint, it uses this
@@ -411,8 +346,12 @@ class Thread
     @main_thread = thread
   end
 
-  def self.list
-    Thread.current.group.list
+  def self.exit
+    Thread.current.kill
+  end
+
+  def self.kill(thread)
+    thread.kill
   end
 
   alias_method :run, :wakeup

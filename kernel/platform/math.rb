@@ -1,9 +1,12 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Platform specific behavior for Math.
 
 module FFI::Platform::Math
   extend FFI::Library
 
+  attach_function :fabs,  [:double], :double
   attach_function :atan2, [:double, :double], :double
   attach_function :cos,   [:double], :double
   attach_function :sin,   [:double], :double
@@ -26,6 +29,7 @@ module FFI::Platform::Math
   attach_function :hypot, [:double, :double], :double
   attach_function :erf,   [:double], :double
   attach_function :erfc,  [:double], :double
+  attach_function :signbit, :ffi_signbit, [:double], :int
 
   # Rubinius-specific, used in Marshal
   attach_function :modf,  [:double, :pointer], :double

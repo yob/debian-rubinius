@@ -8,6 +8,7 @@
 #include "builtin/system.hpp"
 #include "builtin/location.hpp"
 #include "builtin/nativemethod.hpp"
+#include "builtin/nativefunction.hpp"
 
 #include "arguments.hpp"
 
@@ -17,10 +18,12 @@
 #include "call_frame.hpp"
 #include "configuration.hpp"
 
+#include "ontology.hpp"
+
 namespace rubinius {
 
   void Proc::init(STATE) {
-    GO(proc).set(state->new_class("Proc", G(object)));
+    GO(proc).set(ontology::new_class(state, "Proc", G(object)));
     G(proc)->set_object_type(state, ProcType);
   }
 
@@ -43,11 +46,11 @@ namespace rubinius {
   }
 
   Object* Proc::call(STATE, CallFrame* call_frame, Arguments& args) {
-    bool lambda_style = RTEST(lambda_);
+    bool lambda_style = CBOOL(lambda_);
     int flags = 0;
 
     // Check the arity in lambda mode
-    if(lambda_style) {
+    if(lambda_style && !block_->nil_p()) {
       flags = CallFrame::cIsLambda;
       int total = block_->code()->total_args()->to_native();
       int required = block_->code()->required_args()->to_native();
@@ -65,7 +68,7 @@ namespace rubinius {
             Object* obj = args.get_argument(0);
 
             if(!(ary = try_as<Array>(obj))) {
-              if(RTEST(obj->respond_to(state, state->symbol("to_ary"), Qfalse))) {
+              if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
                 obj = obj->send(state, call_frame, state->symbol("to_ary"));
                 if(!(ary = try_as<Array>(obj))) {
                   Exception::type_error(state, "to_ary must return an Array", call_frame);
@@ -104,7 +107,7 @@ namespace rubinius {
           Exception::make_argument_error(state, required, args.total(),
               state->symbol("__block__"));
         exc->locations(state, Location::from_call_stack(state, call_frame));
-        state->thread_state()->raise_exception(exc);
+        state->raise_exception(exc);
         return NULL;
       }
     }
@@ -114,6 +117,8 @@ namespace rubinius {
       ret = block_->call(state, call_frame, args, flags);
     } else if(NativeMethod* nm = try_as<NativeMethod>(bound_method_)) {
       ret = nm->execute(state, call_frame, nm, G(object), args);
+    } else if(NativeFunction* nf = try_as<NativeFunction>(bound_method_)) {
+      ret = nf->call(state, args, call_frame);
     } else {
       Dispatch dis(state->symbol("__yield__"));
       ret = dis.send(state, call_frame, args);
@@ -128,6 +133,8 @@ namespace rubinius {
       return block_->call(state, call_frame, args, 0);
     } else if(NativeMethod* nm = try_as<NativeMethod>(bound_method_)) {
       return nm->execute(state, call_frame, nm, G(object), args);
+    } else if(NativeFunction* nf = try_as<NativeFunction>(bound_method_)) {
+      return nf->call(state, args, call_frame);
     } else {
       return call_prim(state, call_frame, NULL, NULL, args);
     }
@@ -152,7 +159,7 @@ namespace rubinius {
         Exception* exc =
           Exception::make_argument_error(state, required, args.total(), state->symbol("__block__"));
         exc->locations(state, Location::from_call_stack(state, call_frame));
-        state->thread_state()->raise_exception(exc);
+        state->raise_exception(exc);
         return NULL;
       }
     }
@@ -163,7 +170,7 @@ namespace rubinius {
       Exception* exc =
         Exception::make_type_error(state, BlockEnvironment::type, block_, "Invalid proc style");
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
       return NULL;
     }
 

@@ -5,9 +5,9 @@
 #include "type_info.hpp"
 
 namespace rubinius {
-  class CharArray;
-  class Channel;
+  class ByteArray;
   class String;
+  class Encoding;
 
   class IO : public Object {
   public:
@@ -20,7 +20,9 @@ namespace rubinius {
     Object* eof_;        // slot
     Integer* lineno_;    // slot
     Object* sync_;       // slot
-
+    Encoding* external_; // slot
+    Encoding* internal_; // slot
+    Object* autoclose_;  // slot
 
   public:
     /* accessors */
@@ -31,6 +33,9 @@ namespace rubinius {
     attr_accessor(eof, Object);
     attr_accessor(lineno, Integer);
     attr_accessor(sync, Object);
+    attr_accessor(external, Encoding);
+    attr_accessor(internal, Encoding);
+    attr_accessor(autoclose, Object);
 
     /* interface */
 
@@ -39,7 +44,6 @@ namespace rubinius {
 
     native_int to_fd();
     void set_mode(STATE);
-    void unsafe_set_descriptor(native_int fd);
     void force_read_only(STATE);
     void force_write_only(STATE);
     static void finalize(STATE, IO* io);
@@ -74,7 +78,7 @@ namespace rubinius {
     /**
      *  Directly read up to number of bytes from descriptor.
      *
-     *  Returns Qnil at EOF.
+     *  Returns cNil at EOF.
      */
     // Rubinius.primitive :io_sysread
     Object* sysread(STATE, Fixnum* number_of_bytes, CallFrame* calling_environment);
@@ -119,14 +123,14 @@ namespace rubinius {
     // Rubinius.primitive :io_shutdown
     Object* shutdown(STATE, Fixnum* how);
 
-    // Rubinius.primitive :io_blocking_read
-    Object* blocking_read(STATE, Fixnum* count);
-
     // Rubinius.primitive :io_query
     Object* query(STATE, Symbol* op);
 
     // Rubinius.primitive :io_write_nonblock
     Object* write_nonblock(STATE, String* buf);
+
+    // Rubinius.primitive :io_advise
+    Object* advise(STATE, Symbol* advice_name, Integer* offset, Integer* len);
 
     void set_nonblock(STATE);
 
@@ -145,8 +149,7 @@ namespace rubinius {
     const static object_type type = IOBufferType;
 
   private:
-    CharArray* storage_;   // slot
-    Channel* channel_;     // slot
+    ByteArray* storage_;   // slot
     Integer* total_;       // slot
     Integer* used_;        // slot
     Integer* start_;       // slot
@@ -156,8 +159,7 @@ namespace rubinius {
   public:
     /* accessors */
 
-    attr_accessor(storage, CharArray);
-    attr_accessor(channel, Channel);
+    attr_accessor(storage, ByteArray);
     attr_accessor(total, Integer);
     attr_accessor(used, Integer);
     attr_accessor(start, Integer);

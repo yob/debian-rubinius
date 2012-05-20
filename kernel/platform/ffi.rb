@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # A Foreign Function Interface used to bind C libraries to ruby.
 
@@ -69,10 +71,14 @@ module FFI
     def config_hash(name)
       vals = {}
       section = "rbx.platform.#{name}."
-      Rubinius::Config.section section do |key,value|
+      Rubinius::Config.section section do |key, value|
         vals[key.substring(section.size, key.length)] = value
       end
       vals
+    end
+
+    def errno
+      FFI::Platform::POSIX.errno
     end
 
   end
@@ -182,6 +188,16 @@ module FFI
       attr_reader :size
       attr_reader :implementation
     end
+
+    class StructByValue
+      def initialize(struct)
+        @implementation = struct
+      end
+
+      attr_reader :implementation
+    end
+
+    Struct = StructByValue
   end
 end
 
@@ -197,4 +213,8 @@ module FFI::Platform
   else
     LIBSUFFIX = "so"
   end
+
+  # ruby-ffi compatible
+  LONG_SIZE = Rubinius::SIZEOF_LONG * 8
+  ADDRESS_SIZE = Rubinius::WORDSIZE
 end

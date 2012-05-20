@@ -28,21 +28,23 @@ namespace rubinius {
 
 namespace rbxti {
   class EnvPrivate {
-    VM* state_;
+    State state_obj_;
+    State* state_;
     void* tool_data[rubinius::tooling::cTotalToolDatas];
     rubinius::tooling::ToolBroker* broker_;
 
   public:
-    EnvPrivate(STATE)
-      : state_(state)
-      , broker_(state->shared.tool_broker())
+    EnvPrivate(VM* vm)
+      : state_obj_(vm)
+      , state_(&state_obj_)
+      , broker_(vm->shared.tool_broker())
     {
       for(int i = 0; i < rubinius::tooling::cTotalToolDatas; i++) {
         tool_data[i] = 0;
       }
     }
 
-    VM* state() { return state_; }
+    State* state() { return state_; }
 
     void* get_tool_data(int i) {
       return tool_data[i];
@@ -58,7 +60,7 @@ namespace rbxti {
   };
 
   long Env::config_get_int(const char* name) {
-    config::ConfigItem* item = private_->state()->shared.config.find(name);
+    config::ConfigItem* item = private_->state()->vm()->shared.config.find(name);
     if(config::Integer* cint = dynamic_cast<config::Integer*>(item)) {
       return cint->value;
     }
@@ -66,9 +68,9 @@ namespace rbxti {
   }
 
   void Env::config_set(const char* name, const char* val) {
-    if(private_->state()->shared.config.import(name, val)) return;
+    if(private_->state()->vm()->shared.config.import(name, val)) return;
 
-    private_->state()->shared.user_variables.set(name, val);
+    private_->state()->vm()->shared.user_variables.set(name, val);
   }
 
   rsymbol Env::cast_to_rsymbol(robject obj) {
@@ -148,15 +150,15 @@ namespace rbxti {
   }
 
   void Env::enable_thread_tooling() {
-    private_->state()->enable_tooling();
+    private_->state()->vm()->enable_tooling();
   }
 
   void Env::disable_thread_tooling() {
-    private_->state()->disable_tooling();
+    private_->state()->vm()->disable_tooling();
   }
 
   int Env::current_thread_id() {
-    return private_->state()->thread_id();
+    return private_->state()->vm()->thread_id();
   }
 
   rinteger Env::integer_new(r_mint val) {
@@ -173,12 +175,12 @@ namespace rbxti {
 
   void Env::symbol_cstr(rsymbol rsym, char* data, int size) {
     Symbol* sym = i(rsym);
-    const char* cur = sym->c_str(private_->state());
+    std::string cur = sym->debug_str(private_->state());
 
-    int out = strlen(cur);
+    int out = cur.size();
     if(out > size - 1) out = size - 1;
 
-    memcpy(data, cur, out);
+    memcpy(data, cur.c_str(), out);
     data[out] = 0;
   }
 
@@ -207,7 +209,7 @@ namespace rbxti {
   }
 
   robject Env::nil() {
-    return s(Qnil);
+    return s(cNil);
   }
 
   rsymbol Env::method_file(rmethod cm) {
@@ -258,11 +260,18 @@ namespace rbxti {
 
   rsymbol Env::module_name(rmodule mod) {
     Module* module = i(mod);
+    Symbol* name;
 
     if(IncludedModule* im = try_as<IncludedModule>(module)) {
-      return o(im->module()->name());
+      name = im->module()->module_name();
     } else {
-      return o(module->name());
+      name = module->module_name();
+    }
+
+    if(name->nil_p()) {
+      return o(private_->state()->symbol("<anonymous module>"));
+    } else {
+      return o(name);
     }
   }
 
@@ -334,10 +343,19 @@ namespace rbxti {
     private_->global()->set_tool_thread_stop(func);
   }
 
-  Env* create_env(STATE) {
+  void Env::set_tool_at_gc(at_gc_func func) {
+    private_->global()->set_tool_at_gc(func);
+  }
+
+  Env* create_env(VM* state) {
     Env* env = new Env;
     env->private_ = new EnvPrivate(state);
 
     return env;
+  }
+
+  void destroy_env(Env* env) {
+    delete env->private_;
+    delete env;
   }
 }

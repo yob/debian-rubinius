@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Exception
 
   attr_accessor :locations
@@ -12,11 +14,11 @@ class Exception
 
   # This is here rather than in yaml.rb because it contains "private"
   # information, ie, the list of ivars. Putting it over in the yaml
-  # sounce means it's easy to forget about.
+  # source means it's easy to forget about.
   def to_yaml_properties
     list = super
-    list.delete "@backtrace"
-    list.delete "@custom_backtrace"
+    list.delete Rubinius.convert_to_name(:@backtrace)
+    list.delete Rubinius.convert_to_name(:@custom_backtrace)
     return list
   end
 
@@ -48,8 +50,14 @@ class Exception
   end
 
   def render(header="An exception occurred", io=STDERR, color=true)
+    message_lines = message.to_s.split("\n")
+
     io.puts header
-    io.puts "    #{message} (#{self.class})"
+    io.puts "    #{message_lines.shift} (#{self.class})"
+
+    message_lines.each do |line|
+      io.puts "    #{line}"
+    end
 
     if @custom_backtrace
       io.puts "\nUser defined backtrace:"
@@ -101,20 +109,19 @@ class Exception
     end
   end
 
-  def to_s
-    @reason_message || self.class.to_s
-  end
-
   # This is important, because I subclass can just override #to_s and calling
   # #message will call it. Using an alias doesn't achieve that.
   def message
     to_s
   end
 
-  alias_method :to_str, :message
-
   def inspect
-    "#<#{self.class.name}: #{self.to_s}>"
+    s = self.to_s
+    if s.empty?
+      self.class.name
+    else
+      "#<#{self.class.name}: #{s}>"
+    end
   end
 
   class << self
@@ -212,9 +219,6 @@ end
 class SecurityError < StandardError
 end
 
-class SystemStackError < StandardError
-end
-
 class ThreadError < StandardError
 end
 
@@ -256,6 +260,10 @@ end
 class NotImplementedError < ScriptError
 end
 
+# For libraries that Rubinius does not support
+class UnsupportedLibraryError < StandardError
+end
+
 class SyntaxError < ScriptError
   attr_accessor :column
   attr_accessor :line
@@ -269,7 +277,7 @@ class SyntaxError < ScriptError
     exc
   end
 
-  def import_position(c,l, code)
+  def import_position(c, l, code)
     @column = c
     @line = l
     @code = code

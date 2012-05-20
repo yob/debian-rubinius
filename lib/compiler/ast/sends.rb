@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Send < Node
@@ -16,7 +18,7 @@ module Rubinius
 
       def check_local_reference(g)
         if @receiver.kind_of? Self and (@check_for_local or g.state.eval?)
-          reference = g.state.scope.search_local(@name)
+          g.state.scope.search_local(@name)
         end
       end
 
@@ -77,7 +79,7 @@ module Rubinius
 
         g.push_literal @name
 
-        if @vcall_style
+        if @vcall_style or @privately
           g.push :true
           g.send :__respond_to_p__, 2
         else
@@ -246,6 +248,43 @@ module Rubinius
       end
     end
 
+    class PreExe < Node
+      attr_accessor :block
+
+      def initialize(line)
+        @line = line
+      end
+
+      def pre_bytecode(g)
+        pos(g)
+
+        g.push_state ClosedScope.new(@line)
+        g.state.push_name :BEGIN
+
+        g.push_literal Rubinius::Compiler::Runtime
+        @block.bytecode(g)
+        g.send_with_block :pre_exe, 0, false
+
+        g.state.pop_name
+        g.pop_state
+      end
+
+      def to_sexp
+      end
+
+      def pre_sexp
+        @block.to_sexp.insert 1, :pre_exe
+      end
+    end
+
+    class PreExe19 < PreExe
+      def pre_bytecode(g)
+        pos(g)
+
+        @block.body.bytecode(g)
+      end
+    end
+
     class PushActualArguments
       def initialize(pa)
         @arguments = pa.arguments
@@ -321,22 +360,49 @@ module Rubinius
     class CollectSplat < Node
       def initialize(line, *parts)
         @line = line
-        @parts = parts
+        @splat = parts.shift
+        @last = parts.pop
+        @array = parts
       end
 
       def bytecode(g)
-        collect = false
+        @splat.bytecode(g)
+        g.cast_array
 
-        @parts.each do |x|
+        @array.each do |x|
           x.bytecode(g)
           g.cast_array
-
-          if collect
-            g.send :+, 1
-          else
-            collect = true
-          end
+          g.send :+, 1
         end
+
+        return unless @last
+
+        not_hash = g.new_label
+        done = g.new_label
+
+        @last.bytecode(g)
+        g.dup
+
+        g.push_const :Hash
+
+        g.push_rubinius
+        g.find_const :Type
+        g.move_down 2
+        g.send :object_kind_of?, 2
+        g.gif not_hash
+
+        g.make_array 1
+        g.goto done
+
+        not_hash.set!
+        g.cast_array
+
+        done.set!
+        g.send :+, 1
+      end
+
+      def to_sexp
+        [:collect_splat] + @parts.map { |x| x.to_sexp }
       end
     end
 
@@ -352,9 +418,14 @@ module Rubinius
           @splat = arguments
           @array = []
         when ConcatArgs
-          if arguments.array.kind_of? ArrayLiteral
+          case arguments.array
+          when ArrayLiteral
             @array = arguments.array.body
             @splat = SplatValue.new line, arguments.rest
+          when PushArgs
+            @array = []
+            node = SplatValue.new line, arguments.rest
+            @splat = CollectSplat.new line, arguments.array, node
           else
             @array = []
             @splat = CollectSplat.new line, arguments.array, arguments.rest
@@ -487,6 +558,7 @@ module Rubinius
         blk = new_block_generator g, @arguments
 
         blk.push_state self
+        blk.definition_line @line
         blk.state.push_super state.super
         blk.state.push_eval state.eval
 
@@ -531,7 +603,7 @@ module Rubinius
     class Iter19 < Iter
       def initialize(line, arguments, body)
         @line = line
-        @arguments = arguments
+        @arguments = arguments || IterArguments.new(line, nil)
         @body = body || NilLiteral.new(line)
 
         if @body.kind_of?(Block) and @body.locals
@@ -561,7 +633,6 @@ module Rubinius
         @block = nil
         @prelude = nil
 
-        array = []
         case arguments
         when Fixnum
           @splat_index = nil
@@ -731,6 +802,60 @@ module Rubinius
 
       def sexp_name
         :for
+      end
+    end
+
+    class For19Arguments < Node
+      def initialize(line, arguments)
+        @line = line
+        @arguments = arguments
+
+        if @arguments.kind_of? MultipleAssignment
+          @args = 0
+          @splat = 0
+        else
+          @args = 1
+          @splat = nil
+        end
+      end
+
+      def bytecode(g)
+        if @splat
+          g.push_literal Rubinius::Compiler::Runtime
+          g.push_local 0
+          g.send :unwrap_block_arg, 1
+        else
+          g.push_local 0
+        end
+
+        @arguments.bytecode(g)
+        g.pop
+      end
+
+      def required_args
+        @args
+      end
+
+      def total_args
+        @args
+      end
+
+      def post_args
+        0
+      end
+
+      def splat_index
+        @splat
+      end
+    end
+
+    class For19 < For
+      def initialize(line, arguments, body)
+        @line = line
+        @arguments = For19Arguments.new line, arguments
+        @body = body || NilLiteral.new(line)
+
+        new_local :"$for_args"
       end
     end
 

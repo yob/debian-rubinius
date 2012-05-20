@@ -14,9 +14,15 @@ namespace rubinius {
   class Class;
   class Object;
   class ObjectMark;
-  class ObjectVisitor;
   class ObjectMemory;
   class ObjectHeader;
+
+  class GCTokenImpl {
+  private:
+    int dummy;
+  };
+
+  typedef GCTokenImpl& GCToken;
 
   /**
    *  Static type information for the VM.
@@ -58,7 +64,6 @@ namespace rubinius {
     static void auto_init(ObjectMemory* om);
     static void auto_learn_fields(STATE);
     virtual void auto_mark(Object* obj, ObjectMark& mark) = 0;
-    virtual void auto_visit(Object* obj, ObjectVisitor& visit);
 
   public:   /* Ctors */
 
@@ -76,16 +81,13 @@ namespace rubinius {
 
   public:   /* Interface */
 
-    void set_state(STATE) {
-      state_ = state;
-    }
+    void set_state(STATE);
 
     VM* state() {
       return state_;
     }
 
     virtual void mark(Object* obj, ObjectMark& mark);
-    virtual void visit(Object* obj, ObjectVisitor& visit);
 
     virtual void set_field(STATE, Object* target, size_t index, Object* val);
     virtual Object* get_field(STATE, Object* target, size_t index);
@@ -159,7 +161,6 @@ namespace rubinius {
 #define BASIC_TYPEINFO(super) \
   Info(object_type type) : super(type) { } \
   virtual void auto_mark(Object* obj, ObjectMark& mark); \
-  virtual void auto_visit(Object* obj, ObjectVisitor& visit); \
   virtual void set_field(STATE, Object* target, size_t index, Object* val); \
   virtual Object* get_field(STATE, Object* target, size_t index); \
   virtual void populate_slot_locations();

@@ -14,7 +14,6 @@ namespace rubinius {
   class List;
   class IO;
   class IOBuffer;
-  class Message;
   class Executable;
 
   class Channel : public Object {
@@ -42,21 +41,22 @@ namespace rubinius {
 
     // Rubinius.primitive :channel_new
     static Channel* create(STATE);
+    static Channel* create_primed(STATE);
 
     /** Remove Thread from waiting list, if it is there. */
     void    cancel_waiter(STATE, const Thread* waiter);
 
     // Rubinius.primitive :channel_send
-    Object* send(STATE, Object*);
+    Object* send(STATE, GCToken gct, Object*);
 
     // Rubinius.primitive :channel_receive
-    Object* receive(STATE, CallFrame* calling_environment);
+    Object* receive(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :channel_try_receive
-    Object* try_receive(STATE);
+    Object* try_receive(STATE, GCToken gct);
 
     // Rubinius.primitive :channel_receive_timeout
-    Object* receive_timeout(STATE, Object* duration, CallFrame* calling_environment);
+    Object* receive_timeout(STATE, GCToken gct, Object* duration, CallFrame* calling_environment);
 
     bool has_readers_p();
 

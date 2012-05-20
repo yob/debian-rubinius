@@ -1,4 +1,11 @@
+# -*- encoding: us-ascii -*-
+
 class BasicObject
+  def initialize
+    # do nothing
+  end
+  private :initialize
+
   def equal?(other)
     Rubinius.primitive :object_equal
     raise PrimitiveFailure, "BasicObject#equal? primitive failed"
@@ -24,19 +31,11 @@ class BasicObject
   #
   def __send__(message, *args)
     Rubinius.primitive :object_send
+    raise PrimitiveFailure, "#__send__ primitive failed"
+  end
 
-    # MRI checks for Fixnum explicitly and raises ArgumentError
-    # instead of TypeError. Seems silly, so we don't bother.
-    #
-    case message
-    when String
-      message = Rubinius::Type.coerce_to message, Symbol, :to_sym
-    when Symbol
-      # nothing!
-    else
-      raise TypeError, "#{message.inspect} is not a symbol"
-    end
-
-    __send__ message, *args
+  def __id__
+    Rubinius.primitive :object_id
+    raise PrimitiveFailure, "#__id__ primitive failed"
   end
 end

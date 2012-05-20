@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   ##
   # A decode for the .rbc file format.
@@ -97,15 +99,15 @@ module Rubinius
       def unmarshal_data
         kind = next_type
         case kind
-        when ?t
+        when 116 # ?t
           return true
-        when ?f
+        when 102 # ?f
           return false
-        when ?n
+        when 110 # ?n
           return nil
-        when ?I
+        when 73  # ?I
           return next_string.to_i(16)
-        when ?d
+        when 100 # ?d
           str = next_string.chop
 
           # handle the special NaN, Infinity and -Infinity differently
@@ -131,17 +133,21 @@ module Rubinius
               raise TypeError, "Invalid Float format: #{str}"
             end
           end
-        when ?s
+        when 115 # ?s
+          enc = unmarshal_data
           count = next_string.to_i
           str = next_bytes count
-          discard # remove the \n
+          str.force_encoding enc if enc and defined?(Encoding)
           return str
-        when ?x
+        when 120 # ?x
           count = next_string.to_i
           str = next_bytes count
-          discard # remove the \n
           return str.to_sym
-        when ?p
+        when 99  # ?c
+          count = next_string.to_i
+          str = next_bytes count
+          return str.split("::").inject(Object) { |a,n| a.const_get(n) }
+        when 112 # ?p
           count = next_string.to_i
           obj = Tuple.new(count)
           i = 0
@@ -150,7 +156,7 @@ module Rubinius
             i += 1
           end
           return obj
-        when ?i
+        when 105 # ?i
           count = next_string.to_i
           seq = InstructionSequence.new(count)
           i = 0
@@ -159,7 +165,11 @@ module Rubinius
             i += 1
           end
           return seq
-        when ?M
+        when 69  # ?E
+          count = next_string.to_i
+          name = next_bytes count
+          return Encoding.find(name) if defined?(Encoding)
+        when 77  # ?M
           version = next_string.to_i
           if version != 1
             raise "Unknown CompiledMethod version #{version}"
@@ -206,9 +216,9 @@ module Rubinius
       # Returns the next string in _@data_ including the trailing
       # "\n" character.
       def next_string
-        count = @data.locate "\n", @start
+        count = @data.locate "\n", @start, @size
         count = @size unless count
-        str = String.from_chararray @data, @start, count - @start
+        str = String.from_bytearray @data, @start, count - @start
         @start = count
         str
       end
@@ -216,32 +226,15 @@ module Rubinius
       private :next_string
 
       ##
-      # Returns the next _count_ bytes in _@data_.
+      # Returns the next _count_ bytes in _@data_, skipping the
+      # trailing "\n" character.
       def next_bytes(count)
-        str = String.from_chararray @data, @start, count
-        @start += count
+        str = String.from_bytearray @data, @start, count
+        @start += count + 1
         str
       end
 
       private :next_bytes
-
-      ##
-      # Returns the next byte in _@data_.
-      def next_byte
-        byte = @data[@start]
-        @start += 1
-        byte
-      end
-
-      private :next_byte
-
-      ##
-      # Moves the next read pointer ahead by one character.
-      def discard
-        @start += 1
-      end
-
-      private :discard
 
       ##
       # For object +val+, return a String represetation.
@@ -257,10 +250,19 @@ module Rubinius
         when Fixnum, Bignum
           "I\n#{val.to_s(16)}\n"
         when String
-          "s\n#{val.size}\n#{val}\n"
+          if defined?(Encoding)
+            # We manually construct the Encoding data to avoid recursion
+            # marshaling an Encoding name as a String.
+            name = val.encoding.name
+            enc_name = "E\n#{name.bytesize}\n#{name}\n"
+          end
+
+          enc_name ||= "E\n0\n\n"
+
+          "s\n#{enc_name}#{val.bytesize}\n#{val}\n"
         when Symbol
           s = val.to_s
-          "x\n#{s.size}\n#{s}\n"
+          "x\n#{s.bytesize}\n#{s}\n"
         when Tuple
           str = "p\n#{val.size}\n"
           val.each do |ele|
@@ -305,7 +307,12 @@ module Rubinius
           str.append marshal(val.local_names)
           str
         else
-          raise ArgumentError, "Unknown type #{val.class}: #{val.inspect}"
+          if val.respond_to? :rbx_marshal_constant
+            name = StringValue(val.rbx_marshal_constant)
+            "c\n#{name.size}\n#{name}\n"
+          else
+            raise ArgumentError, "Unknown type #{val.class}: #{val.inspect}"
+          end
         end
       end
     end

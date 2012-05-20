@@ -1,1 +1,2 @@
-fails:BasicObject subclass contains Kernel methods when including Kernel
+fails:BasicObject raises NameError when referencing built-in constants
+fails:BasicObject does not define built-in constants (according to defined?)

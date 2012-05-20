@@ -9,8 +9,8 @@
 #include "lock.hpp"
 #include "object_utils.hpp"
 
-#include <vector>
 #include <tr1/unordered_map>
+#include <tr1/unordered_set>
 
 // #define TRACK_IC_LOCATION
 
@@ -69,7 +69,7 @@ namespace rubinius {
 
     int seen_classes_overflow_;
     InlineCacheHit seen_classes_[cTrackedICHits];
-    int private_lock_;
+    thread::SpinLock private_lock_;
 
   public:
 
@@ -108,6 +108,12 @@ namespace rubinius {
     static Object* check_cache_custom(STATE, InlineCache* cache, CallFrame* call_frame,
                                Arguments& args);
 
+    static Object* check_cache_super(STATE, InlineCache* cache, CallFrame* call_frame,
+                               Arguments& args);
+
+    static Object* check_cache_super_mm(STATE, InlineCache* cache, CallFrame* call_frame,
+                                  Arguments& args);
+
     static Object* disabled_cache(STATE, InlineCache* cache, CallFrame* call_frame,
                                   Arguments& args);
     static Object* disabled_cache_private(STATE, InlineCache* cache, CallFrame* call_frame,
@@ -131,7 +137,6 @@ namespace rubinius {
       , initial_backend_(empty_cache)
       , execute_backend_(empty_cache)
       , seen_classes_overflow_(0)
-      , private_lock_(0)
     {}
 
 #ifdef TRACK_IC_LOCATION
@@ -274,9 +279,9 @@ namespace rubinius {
   };
 
   // Registry, used to clear ICs by method name
-  class InlineCacheRegistry : Lockable {
-    typedef std::list<InlineCache*> CacheVector;
-    typedef std::tr1::unordered_map<native_int, CacheVector> CacheHash;
+  class InlineCacheRegistry : public Lockable {
+    typedef std::tr1::unordered_set<InlineCache*> CacheSet;
+    typedef std::tr1::unordered_map<native_int, CacheSet> CacheHash;
 
     CacheHash caches_;
 

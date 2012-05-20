@@ -31,6 +31,8 @@ namespace rubinius {
     double to_double(STATE) { return val; }
     void into_string(STATE, char* buf, size_t sz);
 
+    static Float* from_cstr(STATE, const char* str, Object* strict);
+
     // Rubinius.primitive! :float_add
     Float* add(STATE, Float* other);
     // Rubinius.primitive! :float_add
@@ -47,7 +49,7 @@ namespace rubinius {
     Float* mul(STATE, Integer* other);
 
     // Rubinius.primitive! :float_pow
-    Float* fpow(STATE, Float* other);
+    Object* fpow(STATE, Float* other);
     // Rubinius.primitive! :float_pow
     Float* fpow(STATE, Integer* other);
 

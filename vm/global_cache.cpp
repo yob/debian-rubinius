@@ -1,18 +1,20 @@
+#include "vm.hpp"
+#include "global_cache.hpp"
+#include "object_position.hpp"
+#include "objectmemory.hpp"
 #include "lookup_data.hpp"
 #include "dispatch.hpp"
 
-#include "vm.hpp"
-#include "vm/global_cache.hpp"
-#include "vm/object_position.hpp"
-#include "vm/objectmemory.hpp"
-#include "vm/builtin/module.hpp"
-#include "vm/builtin/object.hpp"
-#include "vm/builtin/methodtable.hpp"
+#include "builtin/class.hpp"
+#include "builtin/module.hpp"
+#include "builtin/object.hpp"
+#include "builtin/methodtable.hpp"
 #include "builtin/alias.hpp"
+#include "builtin/cache.hpp"
 
 namespace rubinius {
   static bool hierarchy_resolve(STATE, Symbol* name, Dispatch& msg, LookupData& lookup,
-                                  bool* was_private)
+                                  Symbol** visibility)
   {
     Module* module = lookup.from;
     MethodTableBucket* entry;
@@ -30,10 +32,10 @@ namespace rubinius {
 
       /* If this was a private send, then we can handle use
        * any method seen. */
-      if(lookup.priv || skip_vis_check) {
+      if(lookup.min_visibility == G(sym_private) || skip_vis_check) {
         /* nil means that the actual method object is 'up' from here */
         if(entry->method()->nil_p()) goto keep_looking;
-        *was_private = entry->private_p(state);
+        *visibility = entry->visibility();
 
         if(Alias* alias = try_as<Alias>(entry->method())) {
           msg.method = alias->original_exec();
@@ -49,8 +51,8 @@ namespace rubinius {
           return false;
         } else if(entry->protected_p(state)) {
           /* The method is protected, but it's not being called from
-           * the same module */
-          if(!lookup.recv->kind_of_p(state, module)) {
+           * the same module, or we only want public methods. */
+          if(lookup.min_visibility == G(sym_public) || !lookup.recv->kind_of_p(state, module)) {
             return false;
           }
         }
@@ -70,6 +72,7 @@ namespace rubinius {
           msg.method = entry->method();
           msg.module = module;
         }
+        *visibility = entry->visibility();
         break;
       }
 
@@ -82,14 +85,50 @@ keep_looking:
 
     return true;
   }
+
+  MethodCacheEntry* GlobalCache::lookup_public(STATE, Module* mod, Class* cls, Symbol* name) {
+    thread::SpinLock::LockGuard guard(lock_);
+
+    CacheEntry* entry = entries + CPU_CACHE_HASH(mod, name);
+    if(entry->name == name &&
+         entry->klass == mod &&
+         entry->visibility != G(sym_private) &&
+        !entry->method_missing) {
+
+      return MethodCacheEntry::create(state, cls, entry->module,
+                                      entry->method);
+    }
+
+    return NULL;
+  }
+
+  MethodCacheEntry* GlobalCache::lookup_private(STATE, Module* mod, Class* cls, Symbol* name) {
+    thread::SpinLock::LockGuard guard(lock_);
+
+    CacheEntry* entry = entries + CPU_CACHE_HASH(mod, name);
+    if(entry->name == name &&
+         entry->klass == mod &&
+        !entry->method_missing) {
+
+      return MethodCacheEntry::create(state, cls, entry->module,
+                                      entry->method);
+    }
+
+    return NULL;
+  }
+
   bool GlobalCache::resolve(STATE, Symbol* name, Dispatch& msg, LookupData& lookup) {
-    struct GlobalCache::cache_entry* entry;
+    return state->vm()->global_cache()->resolve_i(state, name, msg, lookup);
+  }
+
+  bool GlobalCache::resolve_i(STATE, Symbol* name, Dispatch& msg, LookupData& lookup) {
+    thread::SpinLock::LockGuard guard(lock_);
 
     Module* klass = lookup.from;
+    CacheEntry* entry = this->lookup(state, klass, name);
 
-    entry = state->global_cache()->lookup(state, klass, name);
     if(entry) {
-      if(lookup.priv || entry->is_public) {
+      if(lookup.min_visibility == G(sym_private) || entry->visibility == G(sym_public) || lookup.min_visibility == entry->visibility) {
         msg.method = entry->method;
         msg.module = entry->module;
         msg.method_missing = entry->method_missing;
@@ -98,10 +137,10 @@ keep_looking:
       }
     }
 
-    bool was_private = false;
-    if(hierarchy_resolve(state, name, msg, lookup, &was_private)) {
-      state->global_cache()->retain(state, lookup.from, name,
-          msg.module, msg.method, msg.method_missing, was_private);
+    Symbol* visibility = G(sym_protected);
+    if(hierarchy_resolve(state, name, msg, lookup, &visibility)) {
+      retain_i(state, lookup.from, name,
+          msg.module, msg.method, msg.method_missing, visibility);
       return true;
     }
 
@@ -109,7 +148,8 @@ keep_looking:
   }
 
   void GlobalCache::prune_young() {
-    cache_entry* entry;
+    CacheEntry* entry;
+
     for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
       entry = &entries[i];
       bool clear = false;
@@ -145,17 +185,14 @@ keep_looking:
       }
 
       if(clear) {
-        entry->klass = 0;
-        entry->name = 0;
-        entry->module = 0;
-        entry->is_public = true;
-        entry->method_missing = false;
+        entry->clear();
       }
     }
   }
 
   void GlobalCache::prune_unmarked(int mark) {
-    cache_entry* entry;
+    CacheEntry* entry;
+
     for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
       entry = &entries[i];
       Object* klass = reinterpret_cast<Object*>(entry->klass);
@@ -165,11 +202,7 @@ keep_looking:
       Object* exec = reinterpret_cast<Object*>(entry->method);
 
       if(!klass->marked_p(mark) || !mod->marked_p(mark) || !exec->marked_p(mark)) {
-        entry->klass = 0;
-        entry->name = 0;
-        entry->module = 0;
-        entry->is_public = true;
-        entry->method_missing = false;
+        entry->clear();
       }
     }
   }

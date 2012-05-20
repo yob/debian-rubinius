@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Fixnum < Integer
 
   def self.===(obj)
@@ -41,13 +43,6 @@ class Fixnum < Integer
     redo_coerced :/, o
   end
   alias_method :/, :divide
-
-  # Must be it's own method, so that super calls the correct method
-  # on Numeric
-  def div(o)
-    Rubinius.primitive :fixnum_div
-    redo_coerced :div, o
-  end
 
   def %(o)
     Rubinius.primitive :fixnum_mod
@@ -105,11 +100,6 @@ class Fixnum < Integer
     end
 
     self >> other
-  end
-
-  def **(o)
-    Rubinius.primitive :fixnum_pow
-    redo_coerced :**, o
   end
 
   # comparison operators

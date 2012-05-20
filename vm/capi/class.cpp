@@ -3,9 +3,12 @@
 #include "builtin/symbol.hpp"
 
 #include "helpers.hpp"
+#include "exception_point.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
+
+#include <string.h>
 
 using namespace rubinius;
 using namespace rubinius::capi;
@@ -31,7 +34,7 @@ extern "C" {
   VALUE rb_class_name(VALUE class_handle) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     Class* class_object = c_as<Class>(env->get_object(class_handle));
-    return env->get_handle(class_object->name()->to_str(env->state()));
+    return env->get_handle(class_object->get_name(env->state()));
   }
 
   VALUE rb_class_inherited(VALUE super_handle, VALUE class_handle)
@@ -56,39 +59,38 @@ extern "C" {
     return env->get_handle(klass);
   }
 
-  VALUE rb_path2class(const char* name) {
+  VALUE rb_path2class(const char* path) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Module* mod = env->state()->shared.globals.object.get();
+    Module* mod = env->state()->vm()->shared.globals.object.get();
+    Object* val = 0;
 
-    char* base = strdup(name);
-    char* str = base;
-    char* pos = strstr(str, "::");
+    char* pathd = strdup(path);
+    char* ptr = pathd;
+    char* context;
+    char* name;
 
-    while(pos) {
-      pos[0] = 0;
+    bool found = false;
 
-      mod = try_as<Module>(mod->get_const(env->state(), str));
-      if(!mod) {
-        free(base);
-        capi_raise_type_error(Module::type, mod);
-        return Qnil;
+    while((name = strtok_r(ptr, ":", &context))) {
+      ptr = NULL;
+
+      val = mod->get_const(env->state(), env->state()->symbol(name), &found);
+
+      if(!found) {
+        free(pathd);
+        rb_raise(rb_eArgError, "undefined class or module %s", path);
       }
 
-      str = pos+2;
-      pos = strstr(str, "::");
+      if(!(mod = try_as<Module>(val))) {
+        free(pathd);
+        capi_raise_type_error(Module::type, val);
+      }
     }
 
-    Object* val = mod->get_const(env->state(), str);
+    free(pathd);
 
-    free(base);
-
-    // Make sure val is a module.
-    if(!kind_of<Module>(val)) {
-      capi_raise_type_error(Module::type, val);
-    }
-
-    return env->get_handle(val);
+    return env->get_handle(mod);
   }
 
   VALUE rb_cv_get(VALUE module_handle, const char* name) {
@@ -119,7 +121,7 @@ extern "C" {
                       env->get_handle(prefixed_by(env->state(), "@@", 2, name)));
   }
 
-  VALUE rb_cvar_set(VALUE module_handle, ID name, VALUE value, int unused) {
+  VALUE rb_cvar_set_internal(VALUE module_handle, ID name, VALUE value) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     return rb_funcall(module_handle, rb_intern("class_variable_set"),
@@ -146,8 +148,21 @@ extern "C" {
     Symbol* constant = env->state()->symbol(name);
 
     bool created = false;
-    VALUE klass = env->get_handle(rubinius::Helpers::open_class(env->state(),
-        env->current_call_frame(), module, superclass, constant, &created));
+
+    LEAVE_CAPI(env->state());
+    Class* opened_class = rubinius::Helpers::open_class(env->state(),
+        env->current_call_frame(), module, superclass, constant, &created);
+
+    // The call above could have triggered an Autoload resolve, which may
+    // raise an exception, so we have to check the value returned.
+    if(!opened_class) env->current_ep()->return_to(env);
+
+    // We need to grab the handle before entering back into C-API
+    // code. The problem otherwise can be that the GC runs and
+    // the opened_class is GC'ed.
+
+    VALUE klass = env->get_handle(opened_class);
+    ENTER_CAPI(env->state());
 
     if(super) rb_funcall(super, rb_intern("inherited"), 1, klass);
 

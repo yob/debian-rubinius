@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Alias < Node
@@ -485,7 +487,7 @@ module Rubinius
       end
 
       def map_arguments(scope)
-        @required.each.with_index do |arg, index|
+        @required.each_with_index do |arg, index|
           case arg
           when PatternArguments
             arg.map_arguments scope
@@ -557,7 +559,16 @@ module Rubinius
       end
 
       def bytecode(g)
-        @arguments.body.each { |arg| arg.bytecode(g) }
+        @arguments.body.each do |arg|
+          if arg.kind_of? PatternArguments
+            g.shift_array
+            g.cast_array
+            arg.bytecode(g)
+            g.pop
+          else
+            arg.bytecode(g)
+          end
+        end
       end
     end
 
@@ -920,20 +931,40 @@ module Rubinius
     end
 
     class Container < ClosedScope
-      attr_accessor :file, :name, :variable_scope
+      attr_accessor :file, :name, :variable_scope, :pre_exe
 
       def initialize(body)
         @body = body || NilLiteral.new(1)
+        @pre_exe = []
+      end
+
+      def push_state(g)
+        g.push_state self
+      end
+
+      def pop_state(g)
+        g.pop_state
       end
 
       def container_bytecode(g)
         g.name = @name
         g.file = @file.to_sym
 
+        push_state(g)
+        @pre_exe.each { |pe| pe.pre_bytecode(g) }
+
         yield if block_given?
+        pop_state(g)
 
         g.local_count = local_count
         g.local_names = local_names
+      end
+
+      def to_sexp
+        sexp = [sexp_name]
+        @pre_exe.each { |pe| sexp << pe.pre_sexp }
+        sexp << @body.to_sexp
+        sexp
       end
     end
 
@@ -951,7 +982,7 @@ module Rubinius
         depth = 1
         scope = @variable_scope
         while scope
-          if slot = scope.method.local_slot(name)
+          if !scope.method.for_eval? and slot = scope.method.local_slot(name)
             return Compiler::NestedLocalVariable.new(depth, slot)
           elsif scope.eval_local_defined?(name, false)
             return Compiler::EvalLocalVariable.new(name)
@@ -991,20 +1022,22 @@ module Rubinius
         var.variable = reference
       end
 
+      def push_state(g)
+        g.push_state self
+        g.state.push_eval self
+      end
+
       def bytecode(g)
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
-          g.state.push_eval self
           @body.bytecode(g)
           g.ret
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:eval, @body.to_sexp]
+      def sexp_name
+        :eval
       end
     end
 
@@ -1018,14 +1051,12 @@ module Rubinius
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
           @body.bytecode(g)
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:snippet, @body.to_sexp]
+      def sexp_name
+        :snippet
       end
     end
 
@@ -1039,17 +1070,15 @@ module Rubinius
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
           @body.bytecode(g)
           g.pop
           g.push :true
           g.ret
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:script, @body.to_sexp]
+      def sexp_name
+        :script
       end
     end
 

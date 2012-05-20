@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # A linked list that details the static, lexical scope the method was created
 # in.
@@ -31,6 +33,9 @@ module Rubinius
 
     # Set to indicate that no methods may be add to this scope
     attr_accessor :disabled_for_methods
+
+    # Lazy initialized hash map used for flip-flops
+    attr_accessor :flip_flops
 
     def inspect
       "#<#{self.class.name}:0x#{self.object_id.to_s(16)} parent=#{@parent.inspect} module=#{@module}>"
@@ -81,8 +86,9 @@ module Rubinius
     end
 
     def __undef_method__(name)
-      mod = for_method_definition()
-      mod.undef_method name
+      Rubinius.privately do
+        for_method_definition.undef_method name
+      end
     end
 
     def active_path

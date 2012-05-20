@@ -3,8 +3,11 @@
 
 #include "vm/exception.hpp"
 #include "vm/type_info.hpp"
+#include "vm/signal.hpp"
 
 #include "builtin/object.hpp"
+#include "builtin/randomizer.hpp"
+#include "builtin/lookuptable.hpp"
 #include "executor.hpp"
 
 namespace rubinius {
@@ -35,6 +38,10 @@ namespace rubinius {
 
     Fixnum* thread_id_; // slot
 
+    Randomizer* randomizer_; // slot
+
+    LookupTable* locals_; // slot
+
     thread::SpinLock init_lock_;
 
     /// The VM state for this thread and this thread alone
@@ -47,7 +54,7 @@ namespace rubinius {
   public:
     const static object_type type = ThreadType;
 
-    static void   init(VM* state);
+    static void   init(State* state);
 
   public:
     attr_accessor(alive, Object);
@@ -62,8 +69,16 @@ namespace rubinius {
 
     attr_accessor(thread_id, Fixnum);
 
+    attr_accessor(randomizer, Randomizer);
+
+    attr_accessor(locals, LookupTable);
+
     VM* vm() {
       return vm_;
+    }
+
+    bool signal_handler_thread_p() {
+      return runner_ == handle_tramp;
     }
 
   public:
@@ -103,6 +118,11 @@ namespace rubinius {
     // Rubinius.primitive :thread_pass
     static Object* pass(STATE, CallFrame* calling_environment);
 
+    /**
+     *   List all live threads.
+     */
+    // Rubinius.primitive :thread_list
+    static Array* list(STATE);
 
   public:   /* Instance primitives */
 
@@ -121,6 +141,14 @@ namespace rubinius {
     Object* fork(STATE);
 
     /**
+     *  Execute the Thread.
+     *
+     *  This leaves the thread in an attached state, so that
+     *  a pthread_join() later on will work.
+     */
+    int fork_attached(STATE);
+
+    /**
      *  Retrieve the priority set for this Thread.
      *
      *  The value is numeric, higher being more important
@@ -134,7 +162,7 @@ namespace rubinius {
      *  Process an exception raised for this Thread.
      */
     // Rubinius.primitive :thread_raise
-    Object* raise(STATE, Exception* exc);
+    Object* raise(STATE, GCToken gct, Exception* exc);
 
     /**
      *  Set the priority for this Thread.
@@ -154,20 +182,56 @@ namespace rubinius {
      *  is queued to be run, although not necessarily immediately.
      */
     // Rubinius.primitive :thread_wakeup
-    Thread* wakeup(STATE);
+    Thread* wakeup(STATE, GCToken gct);
 
     // Rubinius.primitive :thread_context
     Tuple* context(STATE);
 
+    // Rubinius.primitive :thread_mri_backtrace
+    Array* mri_backtrace(STATE, GCToken gct, CallFrame* calling_environment);
+
     // Rubinius.primitive :thread_join
-    Object* join(STATE, CallFrame* calling_environment);
+    Object* join(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :thread_set_critical
     static Object* set_critical(STATE, Object* obj);
 
     // Rubinius.primitive :thread_unlock_locks
-    Object* unlock_locks(STATE);
+    Object* unlock_locks(STATE, GCToken gct);
 
+    /**
+     * Retrieve a value store in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_aref
+    Object* locals_aref(STATE, Symbol* key);
+
+    /**
+     * Store a value in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_store
+    Object* locals_store(STATE, Symbol* key, Object* value);
+
+    /**
+     * Retrieve the keys for all thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_keys
+    Array* locals_keys(STATE);
+
+    /**
+     * Check whether a given key has a value store in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_has_key
+    Object* locals_has_key(STATE, Symbol* key);
+
+    void init_lock();
     void cleanup();
 
     /**

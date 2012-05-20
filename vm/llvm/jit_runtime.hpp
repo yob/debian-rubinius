@@ -16,7 +16,6 @@ namespace rubinius {
   class GarbageCollector;
   class RuntimeDataHolder;
   class ObjectMark;
-  class ObjectVisitor;
   class VM;
 
   namespace gc {
@@ -106,7 +105,9 @@ namespace rubinius {
         , native_size_(0)
       {}
 
-      virtual void cleanup(VM* vm, CodeManager* cm);
+      ~RuntimeDataHolder();
+
+      virtual void cleanup(State* vm, CodeManager* cm);
 
       virtual const char* kind() {
         return "jit-runtime";
@@ -139,7 +140,6 @@ namespace rubinius {
       }
 
       void mark_all(Object* obj, ObjectMark& mark);
-      void visit_all(ObjectVisitor& visit);
       void run_write_barrier(gc::WriteBarrier* wb, Object* obj);
     };
   }

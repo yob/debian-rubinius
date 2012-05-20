@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Dir
   include Enumerable
 
@@ -100,33 +102,6 @@ class Dir
   def self.getwd
     buf = " " * 1024
     FFI::Platform::POSIX.getcwd(buf, buf.length)
-  end
-
-  def self.open(path)
-    dir = new path
-    if block_given?
-      begin
-        value = yield dir
-      ensure
-        dir.close
-      end
-
-      return value
-    else
-      return dir
-    end
-  end
-
-  def self.entries(path)
-    ret = []
-
-    open(path) do |dir|
-      while s = dir.read
-        ret << s
-      end
-    end
-
-    ret
   end
 
   def self.chroot(path)

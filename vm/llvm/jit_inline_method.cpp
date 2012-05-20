@@ -86,7 +86,7 @@ namespace jit {
     // scope
     b().CreateStore(vars, get_field(call_frame, offset::CallFrame::scope));
 
-    nil_stack(vmm_->stack_size, constant(Qnil, obj_type));
+    nil_stack(vmm_->stack_size, constant(cNil, obj_type));
 
     Value* mod = b().CreateLoad(
         b().CreateConstGEP2_32(rd, 0, offset::runtime_data_module, "module_pos"),
@@ -111,7 +111,7 @@ namespace jit {
         int_pos
       };
 
-      Value* pos = b().CreateGEP(vars, idx2, idx2+3, "local_pos");
+      Value* pos = b().CreateGEP(vars, idx2, "local_pos");
 
       Value* arg_val = stack_args.at(i);
 
@@ -146,7 +146,7 @@ namespace jit {
 
     b().CreateStore(Constant::getNullValue(ls_->ptr_type("VariableScope")),
         get_field(vars, offset::vars_parent));
-    b().CreateStore(constant(Qnil, obj_type), get_field(vars, offset::vars_last_match));
+    b().CreateStore(constant(cNil, obj_type), get_field(vars, offset::vars_last_match));
 
     nil_locals();
   }

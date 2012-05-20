@@ -18,6 +18,7 @@ VM_EXE = RUBY_PLATFORM =~ /mingw|mswin/ ? 'vm/vm.exe' : 'vm/vm'
 # Files, Flags, & Constants
 
 encoding_database = "vm/gen/encoding_database.cpp"
+transcoders_database = "vm/gen/transcoder_database.cpp"
 
 ENV.delete 'CDPATH' # confuses llvm_config
 
@@ -30,17 +31,26 @@ INSN_GEN    = %w[ vm/gen/instruction_names.cpp
                   vm/gen/instruction_implementations.hpp
                   vm/gen/instruction_visitors.hpp
                   vm/gen/instruction_effects.hpp
+                  web/_includes/instructions.markdown
                 ]
 TYPE_GEN    = %w[ vm/gen/includes.hpp
                   vm/gen/kind_of.hpp
                   vm/gen/object_types.hpp
                   vm/gen/typechecks.gen.cpp
                   vm/gen/primitives_declare.hpp
-                  vm/gen/primitives_glue.gen.cpp ]
+                  vm/gen/glue_functions.cpp
+                  vm/gen/jit_functions.cpp
+                  vm/gen/invoke_functions.cpp
+                  vm/gen/accessor_functions.cpp
+                  vm/gen/glue_resolver.cpp
+                  vm/gen/jit_resolver.cpp
+                  vm/gen/invoke_resolver.cpp ]
 
 GENERATED = %W[ vm/gen/revision.h
                 vm/gen/config_variables.h
-                #{encoding_database} ] + TYPE_GEN + INSN_GEN
+                #{encoding_database}
+                #{transcoders_database}
+              ] + TYPE_GEN + INSN_GEN
 
 # Files are in order based on dependencies. For example,
 # CompactLookupTable inherits from Tuple, so the header
@@ -58,7 +68,6 @@ field_extract_headers = %w[
   vm/builtin/block_environment.hpp
   vm/builtin/block_as_method.hpp
   vm/builtin/bytearray.hpp
-  vm/builtin/chararray.hpp
   vm/builtin/io.hpp
   vm/builtin/channel.hpp
   vm/builtin/module.hpp
@@ -79,6 +88,7 @@ field_extract_headers = %w[
   vm/builtin/randomizer.hpp
   vm/builtin/regexp.hpp
   vm/builtin/staticscope.hpp
+  vm/builtin/encoding.hpp
   vm/builtin/string.hpp
   vm/builtin/symbol.hpp
   vm/builtin/thread.hpp
@@ -91,7 +101,6 @@ field_extract_headers = %w[
   vm/builtin/proc.hpp
   vm/builtin/variable_scope.hpp
   vm/builtin/location.hpp
-  vm/builtin/capi_handle.hpp
   vm/builtin/global_cache_entry.hpp
   vm/builtin/weakref.hpp
   vm/builtin/fiber.hpp
@@ -99,7 +108,7 @@ field_extract_headers = %w[
   vm/builtin/call_unit.hpp
   vm/builtin/call_unit_adapter.hpp
   vm/builtin/cache.hpp
-  vm/builtin/encoding.hpp
+  vm/builtin/atomic.hpp
 ]
 
 ############################################################
@@ -186,9 +195,32 @@ end
 files TYPE_GEN, field_extract_headers + %w[vm/codegen/field_extract.rb] + [:run_field_extract] do
 end
 
-file encoding_database => 'vm/codegen/encoding_extract.rb' do |t|
-  dir = File.expand_path "../vendor/onig"
-  ruby 'vm/codegen/encoding_extract.rb', dir, t.name
+encoding_extract = 'vm/codegen/encoding_extract.rb'
+
+file encoding_database => encoding_extract do |t|
+  dir = File.expand_path "../../vendor/oniguruma", __FILE__
+  ruby encoding_extract, dir, t.name
+end
+
+transcoders_lib_dir = File.expand_path "../../lib/19/encoding/converter", __FILE__
+directory transcoders_lib_dir
+
+transcoders_extract = 'vm/codegen/transcoders_extract.rb'
+
+transcoders_src_dir = File.expand_path "../../vendor/oniguruma/enc/trans", __FILE__
+
+TRANSCODING_LIBS = []
+
+Dir["#{transcoders_src_dir}/*#{$dlext}"].each do |name|
+  target = File.join transcoders_lib_dir, File.basename(name)
+  file target => name do |t|
+    cp t.prerequisites.first, t.name
+  end
+  TRANSCODING_LIBS << target
+end
+
+file transcoders_database => [transcoders_lib_dir, transcoders_extract] + TRANSCODING_LIBS do |t|
+  ruby transcoders_extract, transcoders_src_dir, t.name
 end
 
 task 'vm/gen/revision.h' do |t|
@@ -234,9 +266,24 @@ task 'vm/test/runner' => GENERATED do
   blueprint.build "vm/test/runner", @parallel_jobs
 end
 
+task :transcoders => 'vendor/oniguruma/libonig.a' do
+  dir = "lib/19/encoding/converter"
+  mkdir_p dir
+
+  Dir["vendor/oniguruma/enc/trans/*#{$dlext}"].each do |lib|
+    cp lib, dir
+  end
+end
+
 # Generate files for instructions and interpreters
 
-file 'vm/gen/primitives_glue.gen.cpp' => field_extract_headers
+file "gen/method_primitives.cpp" => field_extract_headers
+file "gen/jit_primitives.cpp" => field_extract_headers
+file "gen/invoke_primitives.cpp" => field_extract_headers
+file "gen/accessor_primitives.cpp" => field_extract_headers
+file "gen/method_resolver.cpp" => field_extract_headers
+file "gen/jit_resolver.cpp" => field_extract_headers
+file "gen/invoke_resolver.cpp" => field_extract_headers
 
 iparser = InstructionParser.new "vm/instructions.def"
 
@@ -329,8 +376,6 @@ namespace :vm do
     end
 
     blueprint.clean
-
-    rm_rf FileList['vm/**/artifacts']
   end
 
   desc "Clean up, including all external libs"

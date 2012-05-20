@@ -16,61 +16,55 @@ namespace rubinius {
 
   class GlobalCache : public Lockable {
   public:
-    struct cache_entry {
+    struct CacheEntry {
       Module* klass;
       Symbol* name;
       Module* module;
       Executable* method;
-      bool is_public;
+      Symbol* visibility;
       bool method_missing;
+
+      void clear() {
+        klass = NULL;
+        name = NULL;
+        module = NULL;
+        method = NULL;
+        visibility = NULL;
+        method_missing = false;
+      }
     };
 
-    struct cache_entry entries[CPU_CACHE_SIZE];
+    CacheEntry entries[CPU_CACHE_SIZE];
+    thread::SpinLock lock_;
 
   public:
 
     static bool resolve(STATE, Symbol* name, Dispatch& msg, LookupData& lookup);
+    bool resolve_i(STATE, Symbol* name, Dispatch& msg, LookupData& lookup);
 
     GlobalCache() {
+      lock_.init();
       clear();
     }
 
-    /** @todo This does NOT handle null? --rue */
-    struct cache_entry* lookup(STATE, Module* cls, Symbol* name) {
-      struct cache_entry* entry;
-
-      SYNC(state);
-      entry = entries + CPU_CACHE_HASH(cls, name);
-      if(entry->name == name && entry->klass == cls) {
-        return entry;
-      }
-
-      return NULL;
-    }
+    MethodCacheEntry* lookup_public(STATE, Module* mod, Class* cls, Symbol* name);
+    MethodCacheEntry* lookup_private(STATE, Module* mod, Class* cls, Symbol* name);
 
     void clear(STATE, Symbol* name) {
-      SYNC(state);
+      thread::SpinLock::LockGuard guard(lock_);
       for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
         if(entries[i].name == name) {
-          entries[i].klass = NULL;
-          entries[i].name = NULL;
-          entries[i].module = NULL;
-          entries[i].method = NULL;
-          entries[i].method_missing = false;
+          entries[i].clear();
         }
       }
     }
 
     void clear(STATE, Module* cls, Symbol* name) {
-      struct cache_entry* entry;
-      SYNC(state);
+      CacheEntry* entry;
+      thread::SpinLock::LockGuard guard(lock_);
       entry = entries + CPU_CACHE_HASH(cls, name);
       if(entry->name == name && entry->klass == cls) {
-        entry->klass = NULL;
-        entry->name = NULL;
-        entry->module = NULL;
-        entry->method = NULL;
-        entry->method_missing = false;
+        entry->clear();
       }
     }
 
@@ -79,9 +73,16 @@ namespace rubinius {
     void prune_unmarked(int mark);
 
     void retain(STATE, Module* cls, Symbol* name, Module* mod, Executable* meth,
-                bool missing, bool was_private = false) {
-      SYNC(state);
-      struct cache_entry* entry;
+                bool missing, Symbol* visibility) {
+      thread::SpinLock::LockGuard guard(lock_);
+      retain_i(state, cls, name, mod, meth, missing, visibility);
+    }
+
+    private:
+
+    void retain_i(STATE, Module* cls, Symbol* name, Module* mod, Executable* meth,
+                bool missing, Symbol* visibility) {
+      CacheEntry* entry;
 
       entry = entries + CPU_CACHE_HASH(cls, name);
       entry->klass = cls;
@@ -90,20 +91,23 @@ namespace rubinius {
       entry->method_missing = missing;
 
       entry->method = meth;
-      entry->is_public = !was_private;
+      entry->visibility = visibility;
     }
-
-    private:
 
     void clear() {
       for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
-        entries[i].klass = 0;
-        entries[i].name  = 0;
-        entries[i].module = 0;
-        entries[i].method = 0;
-        entries[i].is_public = true;
-        entries[i].method_missing = false;
+        entries[i].clear();
       }
+    }
+
+    // Must be called with the lock held on +this+
+    CacheEntry* lookup(STATE, Module* cls, Symbol* name) {
+      CacheEntry* entry = entries + CPU_CACHE_HASH(cls, name);
+      if(entry->name == name && entry->klass == cls) {
+        return entry;
+      }
+
+      return NULL;
     }
 
   };

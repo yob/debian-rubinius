@@ -9,6 +9,10 @@
 
 #include "configuration.hpp"
 
+#ifdef ENABLE_LLVM
+#include "llvm/state.hpp"
+#endif
+
 namespace rubinius {
   void ImmixGC::ObjectDescriber::added_chunk(int count) {
 #ifdef IMMIX_DEBUG
@@ -66,10 +70,6 @@ namespace rubinius {
 
   int ImmixGC::ObjectDescriber::size(memory::Address addr) {
     return addr.as<Object>()->size_in_bytes(object_memory_->state());
-  }
-
-  ImmixGC::~ImmixGC() {
-    // @todo free data
   }
 
   Object* ImmixGC::allocate(int bytes) {
@@ -188,7 +188,7 @@ namespace rubinius {
           ++i) {
         capi::Handle** loc = *i;
         if(capi::Handle* hdl = *loc) {
-          if(!CAPI_REFERENCE_P(hdl)) continue;
+          if(!REFERENCE_P(hdl)) continue;
           if(hdl->valid_p()) {
             Object* obj = hdl->object();
             if(obj && obj->reference_p()) {
@@ -202,6 +202,10 @@ namespace rubinius {
       }
     }
 
+#ifdef ENABLE_LLVM
+    if(LLVMState* ls = data.llvm_state()) ls->gc_scan(this);
+#endif
+
     gc_.process_mark_stack(allocator_);
 
     // We've now finished marking the entire object graph.
@@ -210,7 +214,9 @@ namespace rubinius {
 
     // Finalize can cause more things to continue to live, so we must
     // check the mark_stack again.
-    gc_.process_mark_stack(allocator_);
+    while(gc_.process_mark_stack(allocator_)) {
+      check_finalize();
+    }
 
     // Sweep up the garbage
     gc_.sweep_blocks();
@@ -351,7 +357,8 @@ namespace rubinius {
         if(!i->object->marked_p(object_memory_->mark())) {
           // Run C finalizers now rather that queue them.
           if(i->finalizer) {
-            (*i->finalizer)(state(), i->object);
+            State state_obj(state());
+            (*i->finalizer)(&state_obj, i->object);
             i->status = FinalizeObject::eFinalized;
             remove = true;
           } else {

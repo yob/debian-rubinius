@@ -18,7 +18,6 @@ namespace rubinius {
   class Object;
   class Symbol;
   class Module;
-  class VMMethod;
   class VariableScope;
   class NativeMethodFrame;
 
@@ -88,12 +87,12 @@ namespace rubinius {
       if(inline_method_p() && dispatch_data) {
         return reinterpret_cast<jit::RuntimeData*>(dispatch_data)->name();
       } else if(block_p()) {
-        return reinterpret_cast<Symbol*>(Qnil);
+        return reinterpret_cast<Symbol*>(cNil);
       } else if(arguments) {
         return arguments->name();
       }
 
-      return reinterpret_cast<Symbol*>(Qnil);
+      return reinterpret_cast<Symbol*>(cNil);
     }
 #else
     Symbol* name() {
@@ -101,7 +100,7 @@ namespace rubinius {
         return arguments->name();
       }
 
-      return reinterpret_cast<Symbol*>(Qnil);
+      return reinterpret_cast<Symbol*>(cNil);
     }
 #endif
 
@@ -242,6 +241,7 @@ namespace rubinius {
 
     void print_backtrace(STATE, int count=0);
     void print_backtrace(STATE, std::ostream& stream, int count=0);
+
     int line(STATE);
 
     bool scope_still_valid(VariableScope* scope);
@@ -262,7 +262,7 @@ namespace rubinius {
       ip_ = 0;
 
       for(int i = 0; i < stack; i++) {
-        stk[i] = Qnil;
+        stk[i] = cNil;
       }
     }
   };

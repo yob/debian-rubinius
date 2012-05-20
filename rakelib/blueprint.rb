@@ -3,16 +3,24 @@ Daedalus.blueprint do |i|
 
   gcc.cflags << "-Ivm -Ivm/test/cxxtest -I. "
   gcc.cflags << "-pipe -Wall -fno-omit-frame-pointer"
-  gcc.cflags << "-ggdb3 -Werror"
+  gcc.cflags << "-Wno-unused-function"
+  gcc.cflags << "-g -ggdb3 -Werror"
   gcc.cflags << "-DRBX_PROFILER"
   gcc.cflags << "-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS"
+  gcc.cflags << "-D_LARGEFILE_SOURCE"
+  gcc.cflags << "-D_FILE_OFFSET_BITS=64"
 
   gcc.cflags << Rubinius::BUILD_CONFIG[:user_cflags]
 
   if ENV['DEV']
     gcc.cflags << "-O0"
+    gcc.mtime_only = true
   else
     gcc.cflags << "-O2"
+  end
+
+  if ENV['POKE']
+    gcc.mtime_only = true
   end
 
   # This is necessary for the gcc sync prims to fully work
@@ -25,6 +33,8 @@ Daedalus.blueprint do |i|
   end
 
   if RUBY_PLATFORM =~ /darwin/i
+    gcc.cflags << "-D_DARWIN_USE_64_BIT_INODE"
+
     if `sw_vers` =~ /10\.4/
       gcc.cflags << "-DHAVE_STRLCAT -DHAVE_STRLCPY"
     end
@@ -39,7 +49,7 @@ Daedalus.blueprint do |i|
 
   gcc.ldflags << "-lstdc++" << "-lm"
 
-  %w[ /usr/local/lib /opt/local/lib ].each do |path|
+  Rubinius::BUILD_CONFIG[:lib_dirs].each do |path|
     gcc.ldflags << "-L#{path}" if File.exists? path
   end
 
@@ -52,7 +62,7 @@ Daedalus.blueprint do |i|
   when /freebsd/i
     gcc.ldflags << '-lcrypt' << '-pthread' << '-rdynamic'
     make = "gmake"
-  when /openbsd/i
+  when /openbsd|netbsd/i
     gcc.ldflags << '-lcrypto' << '-pthread' << '-lssl' << "-rdynamic" << "-Wl,--export-dynamic"
     make = "gmake"
   when /haiku/i
@@ -62,6 +72,10 @@ Daedalus.blueprint do |i|
     make = "gmake"
   when /mingw|win32/i
     gcc.ldflags << "-lws2_32"
+  when /solaris/
+    gcc.cflags << "-fPIC -Wno-strict-aliasing"
+    gcc.ldflags << "-lsocket" << "-lnsl" << "-fPIC"
+    make = "gmake"
   else
     gcc.ldflags << "-ldl" << "-lpthread"
   end
@@ -70,6 +84,8 @@ Daedalus.blueprint do |i|
       Rubinius::BUILD_CONFIG[:defines].include?('HAS_EXECINFO')
     gcc.ldflags << "-lexecinfo"
   end
+
+  gcc.ldflags << Rubinius::BUILD_CONFIG[:user_ldflags]
 
   # Files
   subdirs = %w[ builtin capi util instruments gc llvm missing ].map do |x|
@@ -81,49 +97,6 @@ Daedalus.blueprint do |i|
   perl = Rubinius::BUILD_CONFIG[:build_perl] || "perl"
 
   # Libraries
-  case Rubinius::BUILD_CONFIG[:llvm]
-  when :prebuilt, :svn
-    llvm = i.external_lib "vendor/llvm" do |l|
-      conf = "vendor/llvm/Release/bin/llvm-config"
-      flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
-      flags.delete_if { |x| x.index("-O") == 0 || x.index("-I") == 0 }
-      flags.delete_if { |x| x =~ /-D__STDC/ }
-      flags << "-Ivendor/llvm/include" << "-DENABLE_LLVM"
-      l.cflags = flags
-
-      ldflags = `#{perl} #{conf} --ldflags`.strip
-      objects = `#{perl} #{conf} --libfiles`.strip.split(/\s+/)
-
-      if Rubinius::BUILD_CONFIG[:windows]
-        ldflags = ldflags.sub(%r[-L/([a-zA-Z])/], '-L\1:/')
-
-        objects.select do |f|
-          f.sub!(%r[^/([a-zA-Z])/], '\1:/')
-          File.file? f
-        end
-      end
-
-      l.ldflags = [ldflags]
-      l.objects = objects
-    end
-
-    gcc.add_library llvm
-    files << llvm
-  when :config
-    conf = Rubinius::BUILD_CONFIG[:llvm_configure]
-    flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
-    flags.delete_if { |x| x.index("-O") == 0 }
-    flags.delete_if { |x| x =~ /-D__STDC/ }
-    flags << "-DENABLE_LLVM"
-    gcc.cflags.concat flags
-    gcc.ldflags.concat `#{perl} #{conf} --ldflags --libfiles`.strip.split(/\s+/)
-  when :no
-    # nothing, not using LLVM
-  else
-    STDERR.puts "Unsupported LLVM configuration: #{Rubinius::BUILD_CONFIG[:llvm]}"
-    raise "get out"
-  end
-
   ltm = i.external_lib "vendor/libtommath" do |l|
     l.cflags = ["-Ivendor/libtommath"]
     l.objects = [l.file("libtommath.a")]
@@ -132,13 +105,35 @@ Daedalus.blueprint do |i|
     end
   end
 
-  onig = i.external_lib "vendor/onig" do |l|
-    l.cflags = ["-Ivendor/onig"]
-    l.objects = [l.file(".libs/libonig.a")]
-    l.to_build do |x|
-      x.command "sh -c ./configure" unless File.exists?("Makefile")
-      x.command make
+  oniguruma = i.library_group "vendor/oniguruma" do |g|
+    g.depends_on "config.h", "configure"
+
+    gcc.cflags << "-Ivendor/oniguruma"
+    g.cflags = ["-DHAVE_CONFIG_H", "-I.", "-I../../vm/capi/19/include"]
+
+    g.static_library "libonig" do |l|
+      l.source_files "*.c", "enc/*.c"
     end
+
+    g.shared_library "enc/trans/big5"
+    g.shared_library "enc/trans/chinese"
+    g.shared_library "enc/trans/emoji"
+    g.shared_library "enc/trans/emoji_iso2022_kddi"
+    g.shared_library "enc/trans/emoji_sjis_docomo"
+    g.shared_library "enc/trans/emoji_sjis_kddi"
+    g.shared_library "enc/trans/emoji_sjis_softbank"
+    g.shared_library "enc/trans/escape"
+    g.shared_library "enc/trans/gb18030"
+    g.shared_library "enc/trans/gbk"
+    g.shared_library "enc/trans/iso2022"
+    g.shared_library "enc/trans/japanese"
+    g.shared_library "enc/trans/japanese_euc"
+    g.shared_library "enc/trans/japanese_sjis"
+    g.shared_library "enc/trans/korean"
+    g.shared_library "enc/trans/newline"
+    g.shared_library "enc/trans/single_byte"
+    g.shared_library "enc/trans/utf8_mac"
+    g.shared_library "enc/trans/utf_16_32"
   end
 
   gdtoa = i.external_lib "vendor/libgdtoa" do |l|
@@ -187,14 +182,58 @@ Daedalus.blueprint do |i|
     end
   end
 
+  case Rubinius::BUILD_CONFIG[:llvm]
+  when :prebuilt, :svn
+    llvm = i.external_lib "vendor/llvm" do |l|
+      conf = "vendor/llvm/Release/bin/llvm-config"
+      flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
+      flags.delete_if { |x| x.index("-O") == 0 || x.index("-I") == 0 }
+      flags.delete_if { |x| x =~ /-D__STDC/ }
+      flags.delete_if { |x| x == "-DNDEBUG" }
+      flags << "-Ivendor/llvm/include" << "-DENABLE_LLVM"
+      l.cflags = flags
+
+      ldflags = `#{perl} #{conf} --ldflags`.strip
+      objects = `#{perl} #{conf} --libfiles`.strip.split(/\s+/)
+
+      if Rubinius::BUILD_CONFIG[:windows]
+        ldflags = ldflags.sub(%r[-L/([a-zA-Z])/], '-L\1:/')
+
+        objects.select do |f|
+          f.sub!(%r[^/([a-zA-Z])/], '\1:/')
+          File.file? f
+        end
+      end
+
+      l.ldflags = [ldflags]
+      l.objects = objects
+    end
+
+    gcc.add_library llvm
+    files << llvm
+  when :config
+    conf = Rubinius::BUILD_CONFIG[:llvm_configure]
+    flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
+    flags.delete_if { |x| x.index("-O") == 0 }
+    flags.delete_if { |x| x =~ /-D__STDC/ }
+    flags.delete_if { |x| x == "-DNDEBUG" }
+    flags << "-DENABLE_LLVM"
+    gcc.cflags.concat flags
+    gcc.ldflags.concat `#{perl} #{conf} --ldflags --libfiles`.strip.split(/\s+/)
+  when :no
+    # nothing, not using LLVM
+  else
+    STDERR.puts "Unsupported LLVM configuration: #{Rubinius::BUILD_CONFIG[:llvm]}"
+    raise "get out"
+  end
+
   gcc.add_library zlib if Rubinius::BUILD_CONFIG[:vendor_zlib]
   gcc.add_library udis
   gcc.add_library ffi
   gcc.add_library gdtoa
-  gcc.add_library onig
   gcc.add_library ltm
 
-  %w[ /usr/local/include /opt/local/include ].each do |path|
+  Rubinius::BUILD_CONFIG[:include_dirs].each do |path|
     gcc.cflags << "-I#{path} " if File.exists? path
   end
 
@@ -217,7 +256,7 @@ Daedalus.blueprint do |i|
   files << udis
   files << ffi
   files << gdtoa
-  files << onig
+  files << oniguruma
   files << ltm
 
   cli = files.dup

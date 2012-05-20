@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class IO
 
   include Enumerable
@@ -59,7 +61,7 @@ class IO
     #
     # Returns the number of bytes in the buffer.
     def fill_from(io, skip = nil)
-      @channel.as_lock do
+      Rubinius.synchronize(self) do
         empty_to io
         discard skip if skip
 
@@ -84,7 +86,7 @@ class IO
       return 0 if @write_synced or empty?
       @write_synced = true
 
-      io.prim_write(String.from_chararray(@storage, @start, size))
+      io.prim_write(String.from_bytearray(@storage, @start, size))
       reset!
 
       return size
@@ -106,9 +108,9 @@ class IO
     # Returns the number of bytes to fetch from the buffer up-to-
     # and-including +pattern+. Returns +nil+ if pattern is not found.
     def find(pattern, discard = nil)
-      count = @storage.locate(pattern, @start, @used)
-      return nil unless count
-      return count - @start
+      if count = @storage.locate(pattern, @start, @used)
+        count - @start
+      end
     end
 
     ##
@@ -136,7 +138,7 @@ class IO
     end
 
     def unseek!(io)
-      @channel.as_lock do
+      Rubinius.synchronize(self) do
         # Unseek the still buffered amount
         return unless write_synced?
         io.prim_seek @start - @used, IO::SEEK_CUR unless empty?
@@ -148,11 +150,11 @@ class IO
     # Returns +count+ bytes from the +start+ of the buffer as a new String.
     # If +count+ is +nil+, returns all available bytes in the buffer.
     def shift(count=nil)
-      @channel.as_lock do
+      Rubinius.synchronize(self) do
         total = size
         total = count if count and count < total
 
-        str = String.from_chararray @storage, @start, total
+        str = String.from_bytearray @storage, @start, total
         @start += total
 
         str
@@ -162,7 +164,7 @@ class IO
     ##
     # Returns one Fixnum as the start byte, used for #getc
     def get_first
-      @channel.as_lock do
+      Rubinius.synchronize(self) do
         byte = @storage[@start]
         @start += 1
         byte
@@ -202,10 +204,6 @@ class IO
 
   attr_accessor :descriptor
   attr_accessor :mode
-
-  def self.for_fd(fd, mode = nil)
-    new fd, mode
-  end
 
   def self.foreach(name, sep_string = $/)
     return to_enum(:foreach, name, sep_string) unless block_given?
@@ -265,6 +263,10 @@ class IO
   end
 
   def self.parse_mode(mode)
+    return mode if Rubinius::Type.object_kind_of? mode, Integer
+
+    mode = StringValue(mode)
+
     ret = 0
 
     case mode[0]
@@ -309,160 +311,6 @@ class IO
     end
 
     ret
-  end
-
-  ##
-  # Creates a pair of pipe endpoints (connected to each other)
-  # and returns them as a two-element array of IO objects:
-  # [ read_file, write_file ]. Not available on all platforms.
-  #
-  # In the example below, the two processes close the ends of
-  # the pipe that they are not using. This is not just a cosmetic
-  # nicety. The read end of a pipe will not generate an end of
-  # file condition if there are any writers with the pipe still
-  # open. In the case of the parent process, the rd.read will
-  # never return if it does not first issue a wr.close.
-  #
-  #  rd, wr = IO.pipe
-  #
-  #  if fork
-  #    wr.close
-  #    puts "Parent got: <#{rd.read}>"
-  #    rd.close
-  #    Process.wait
-  #  else
-  #    rd.close
-  #    puts "Sending message to parent"
-  #    wr.write "Hi Dad"
-  #    wr.close
-  #  end
-  # produces:
-  #
-  #  Sending message to parent
-  #  Parent got: <Hi Dad>
-  def self.pipe
-    lhs = allocate
-    rhs = allocate
-    connect_pipe(lhs, rhs)
-    lhs.sync = true
-    rhs.sync = true
-    return [lhs, rhs]
-  end
-
-  ##
-  # Runs the specified command string as a subprocess;
-  # the subprocess‘s standard input and output will be
-  # connected to the returned IO object. If cmd_string
-  # starts with a ``-’’, then a new instance of Ruby is
-  # started as the subprocess. The default mode for the
-  # new file object is ``r’’, but mode may be set to any
-  # of the modes listed in the description for class IO.
-  #
-  # If a block is given, Ruby will run the command as a
-  # child connected to Ruby with a pipe. Ruby‘s end of
-  # the pipe will be passed as a parameter to the block.
-  # At the end of block, Ruby close the pipe and sets $?.
-  # In this case IO::popen returns the value of the block.
-  #
-  # If a block is given with a cmd_string of ``-’’, the
-  # block will be run in two separate processes: once in
-  # the parent, and once in a child. The parent process
-  # will be passed the pipe object as a parameter to the
-  # block, the child version of the block will be passed
-  # nil, and the child‘s standard in and standard out will
-  # be connected to the parent through the pipe.
-  # Not available on all platforms.
-  #
-  #  f = IO.popen("uname")
-  #  p f.readlines
-  #  puts "Parent is #{Process.pid}"
-  #  IO.popen ("date") { |f| puts f.gets }
-  #  IO.popen("-") {|f| $stderr.puts "#{Process.pid} is here, f is #{f}"}
-  #  p $?
-  # produces:
-  #
-  #  ["Linux\n"]
-  #  Parent is 26166
-  #  Wed Apr  9 08:53:52 CDT 2003
-  #  26169 is here, f is
-  #  26166 is here, f is #<IO:0x401b3d44>
-  #  #<Process::Status: pid=26166,exited(0)>
-  def self.popen(str, mode="r")
-    mode = parse_mode mode
-
-    readable = false
-    writable = false
-
-    if mode & IO::RDWR != 0
-      readable = true
-      writable = true
-    elsif mode & IO::WRONLY != 0
-      writable = true
-    else # IO::RDONLY
-      readable = true
-    end
-
-    pa_read, ch_write = pipe if readable
-    ch_read, pa_write = pipe if writable
-
-    pid = Process.fork
-
-    # child
-    if !pid
-      if readable
-        pa_read.close
-        STDOUT.reopen ch_write
-      end
-
-      if writable
-        pa_write.close
-        STDIN.reopen ch_read
-      end
-
-      if str == "-"
-        if block_given?
-          yield nil
-          exit! 0
-        else
-          return nil
-        end
-      else
-        Process.perform_exec "/bin/sh", ["sh", "-c", str]
-      end
-    end
-
-    ch_write.close if readable
-    ch_read.close  if writable
-
-    # We only need the Bidirectional pipe if we're reading and writing.
-    # If we're only doing one, we can just return the IO object for
-    # the proper half.
-    #
-    if readable and writable
-      # Transmogrify pa_read into a BidirectionalPipe object,
-      # and then tell it abou it's pid and pa_write
-
-      Rubinius::Unsafe.set_class pa_read, IO::BidirectionalPipe
-
-      pipe = pa_read
-      pipe.set_pipe_info(pa_write)
-    elsif readable
-      pipe = pa_read
-    elsif writable
-      pipe = pa_write
-    else
-      raise ArgumentError, "IO is neither readable nor writable"
-    end
-
-    pipe.pid = pid
-
-    return pipe unless block_given?
-
-    begin
-      yield pipe
-    ensure
-      pipe.close unless pipe.closed?
-    end
   end
 
   ##
@@ -575,10 +423,10 @@ class IO
   ##
   # Opens the given path, returning the underlying file descriptor as a Fixnum.
   #  IO.sysopen("testfile")   #=> 3
-  def self.sysopen(path, mode = "r", perm = 0666)
-    unless mode.kind_of? Integer
-      mode = parse_mode StringValue(mode)
-    end
+  def self.sysopen(path, mode = nil, perm = nil)
+    path = Rubinius::Type.coerce_to_path path
+    mode = parse_mode(mode || "r")
+    perm ||= 0666
 
     open_with_mode path, mode, perm
   end
@@ -598,15 +446,11 @@ class IO
     cur_mode &= ACCMODE
 
     if mode
-      unless Rubinius::Type.object_kind_of? mode, Integer
-        str_mode = StringValue mode
-        mode = IO.parse_mode(str_mode)
-      end
-
+      mode = parse_mode(mode)
       mode &= ACCMODE
 
       if (cur_mode == RDONLY or cur_mode == WRONLY) and mode != cur_mode
-        raise Errno::EINVAL, "Invalid new mode '#{str_mode}' for existing descriptor #{fd}"
+        raise Errno::EINVAL, "Invalid new mode for existing descriptor #{fd}"
       end
     end
 
@@ -616,19 +460,6 @@ class IO
     io.sync     ||= STDOUT.fileno == fd if STDOUT.respond_to?(:fileno)
     io.sync     ||= STDERR.fileno == fd if STDERR.respond_to?(:fileno)
   end
-
-  #
-  # Create a new IO associated with the given fd.
-  #
-  def initialize(fd, mode=nil)
-    if block_given?
-      warn 'IO::new() does not take block; use IO::open() instead'
-    end
-
-    IO.setup self, Rubinius::Type.coerce_to(fd, Integer, :to_int), mode
-  end
-
-  private :initialize
 
   ##
   # Obtains a new duplicate descriptor for the current one.
@@ -645,16 +476,6 @@ class IO
 
   def <<(obj)
     write(obj.to_s)
-    return self
-  end
-
-  ##
-  # Puts ios into binary mode. This is useful only in
-  # MS-DOS/Windows environments. Once a stream is in
-  # binary mode, it cannot be reset to nonbinary mode.
-  def binmode
-    ensure_open
-    # HACK what to do?
     return self
   end
 
@@ -725,36 +546,6 @@ class IO
     ensure_open
     super
   end
-
-  ##
-  # Executes the block for every line in ios, where
-  # lines are separated by sep_string. ios must be
-  # opened for reading or an IOError will be raised.
-  #
-  #  f = File.new("testfile")
-  #  f.each {|line| puts "#{f.lineno}: #{line}" }
-  # produces:
-  #
-  #  1: This is line one
-  #  2: This is line two
-  #  3: This is line three
-  #  4: And so on...
-  def each(sep=$/)
-    return to_enum(:each, sep) unless block_given?
-
-    ensure_open_and_readable
-
-    sep = sep.to_str if sep
-    while line = read_to_separator(sep)
-      @lineno += 1
-      $. = @lineno
-      yield line
-    end
-
-    self
-  end
-
-  alias_method :each_line, :each
 
   def each_byte
     return to_enum(:each_byte) unless block_given?
@@ -870,7 +661,7 @@ class IO
     command = Rubinius::Type.coerce_to command, Fixnum, :to_int
     FFI::Platform::POSIX.fcntl descriptor, command, arg
   end
-  
+
   ##
   # Provides a mechanism for issuing low-level commands to
   # control or query file-oriented I/O streams. Arguments
@@ -973,40 +764,10 @@ class IO
     return @ibuffer.get_first
   end
 
-  ##
-  # Reads the next ``line’’ from the I/O stream;
-  # lines are separated by sep_string. A separator
-  # of nil reads the entire contents, and a zero-length
-  # separator reads the input a paragraph at a time (two
-  # successive newlines in the input separate paragraphs).
-  # The stream must be opened for reading or an IOError
-  # will be raised. The line read in will be returned and
-  # also assigned to $_. Returns nil if called at end of file.
-  #
-  #  File.new("testfile").gets   #=> "This is line one\n"
-  #  $_                          #=> "This is line one\n"
-  def gets(sep=$/)
-    ensure_open_and_readable
-
-    if line = read_to_separator(sep)
-      line.taint
-      @lineno += 1
-      $. = @lineno
-    end
-
-    $_ = line
-  end
-
   def getbyte
     char = read 1
     return nil if char.nil?
-    char[0]
-  end
-
-  ##
-  # Return a string describing this IO object.
-  def inspect
-    "#<#{self.class}:0x#{object_id.to_s(16)}>"
+    char.bytes.to_a[0]
   end
 
   ##
@@ -1046,11 +807,7 @@ class IO
 
     raise TypeError if line_number.nil?
 
-    @lineno = Integer line_number
-  end
-
-  def lines(*args)
-    to_enum :each_line, *args
+    @lineno = Integer(line_number)
   end
 
   ##
@@ -1115,6 +872,7 @@ class IO
   # Formats and writes to ios, converting parameters under
   # control of the format string. See Kernel#sprintf for details.
   def printf(fmt, *args)
+    fmt = StringValue(fmt)
     write ::Rubinius::Sprinter.get(fmt).call(*args)
   end
 
@@ -1137,50 +895,6 @@ class IO
     end
 
     return obj
-  end
-
-  ##
-  # Writes the given objects to ios as with IO#print.
-  # Writes a record separator (typically a newline)
-  # after any that do not already end with a newline
-  # sequence. If called with an array argument, writes
-  # each element on a new line. If called without arguments,
-  # outputs a single record separator.
-  #
-  #  $stdout.puts("this", "is", "a", "test")
-  # produces:
-  #
-  #  this
-  #  is
-  #  a
-  #  test
-  def puts(*args)
-    if args.empty?
-      write DEFAULT_RECORD_SEPARATOR
-    else
-      args.each do |arg|
-        if arg.equal? nil
-          str = "nil"
-        elsif Thread.guarding? arg
-          str = "[...]"
-        elsif arg.kind_of?(Array)
-          Thread.recursion_guard arg do
-            arg.each do |a|
-              puts a
-            end
-          end
-        else
-          str = arg.to_s
-        end
-
-        if str
-          write str
-          write DEFAULT_RECORD_SEPARATOR unless str.suffix?(DEFAULT_RECORD_SEPARATOR)
-        end
-      end
-    end
-
-    nil
   end
 
   ##
@@ -1284,60 +998,6 @@ class IO
   end
 
   ##
-  # Chains together buckets of input from the buffer until
-  # locating +sep+. If +sep+ is +nil+, returns +read_all+.
-  # If +sep+ is +""+, reads until +"\n\n"+. Otherwise, reads
-  # until +sep+. This is the behavior of +#each+ and +#gets+.
-  # Also, sets +$.+ for each line read. Returns the line read
-  # or +nil+ if <tt>#eof?</tt> is true.
-  #--
-  # This implementation is slightly longer to reduce several
-  # method calls. The common case is that the buffer has
-  # enough data to just find the sep and return. Instead of
-  # returning nil right of if buffer.exhausted?, allow the
-  # nil to fall through. Also, don't create an empty string
-  # just to append a single line to it.
-  #++
-  def read_to_separator(sep)
-    return if @ibuffer.exhausted?
-    return read_all unless sep
-
-    sep = StringValue sep if sep
-
-    if sep.empty?
-      sep = "\n\n"
-      skip = ?\n
-    else
-      skip = nil
-    end
-
-    line = nil
-    until @ibuffer.exhausted?
-      @ibuffer.fill_from self, skip
-
-      if count = @ibuffer.find(sep)
-        str = @ibuffer.shift(count)
-      else
-        str = @ibuffer.shift
-      end
-
-      if line
-        line << str
-      else
-        line = str
-      end
-
-      break if count
-    end
-
-    @ibuffer.discard skip if skip
-
-    line unless line.empty?
-  end
-
-  private :read_to_separator
-
-  ##
   # Reads a character as with IO#getc, but raises an EOFError on end of file.
   def readchar
     char = getc
@@ -1347,6 +1007,7 @@ class IO
 
   def readbyte
     byte = getbyte
+    raise EOFError, "end of file reached" unless byte
     raise EOFError, "end of file" unless bytes
     byte
   end

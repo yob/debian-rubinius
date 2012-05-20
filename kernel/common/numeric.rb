@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Numeric
   include Comparable
 
@@ -18,16 +20,6 @@ class Numeric
     [div(other), self % other]
   end
 
-  def div(other)
-    Float(self.__slash__(other)).floor
-  end
-
-  def quo(other)
-    self.__slash__(other)
-  end
-
-  alias_method :fdiv, :quo
-
   def eql?(other)
     return false unless other.instance_of? self.class
     self == other
@@ -47,42 +39,36 @@ class Numeric
     raise ArgumentError, "step cannot be 0" if step == 0
 
     value = self
-    if value.kind_of? Fixnum and limit.kind_of? Fixnum and step.kind_of? Fixnum
-      if step > 0
-        while value <= limit
-          yield value
-          value += step
-        end
-      else
-        while value >= limit
-          yield value
-          value += step
-        end
-      end
-
-    elsif value.kind_of? Float or limit.kind_of? Float or step.kind_of? Float
+    if value.kind_of? Float or limit.kind_of? Float or step.kind_of? Float
       # Ported from MRI
 
       value = FloatValue(value)
       limit = FloatValue(limit)
       step =  FloatValue(step)
 
-      range = limit - value
-      n = range / step;
-      err = (value.abs + limit.abs + range.abs) / step.abs * Float::EPSILON
-
       if step.infinite?
         yield value if step > 0 ? value <= limit : value >= limit
       else
+        err = (value.abs + limit.abs + (limit - value).abs) / step.abs * Float::EPSILON
         err = 0.5 if err > 0.5
-        n = (n + err).floor + 1
+        n = ((limit - value) / step + err).floor
         i = 0
-        while i < n
-          yield i * step + value
-          i += 1
+        if step > 0
+          while i <= n
+            d = i * step + value
+            d = limit if limit < d
+            yield d
+            i += 1
+          end
+        else
+          while i <= n
+            d = i * step + value
+            d = limit if limit > d
+            yield d
+            i += 1
+          end
         end
       end
-
     else
       if step > 0
         until value > limit
@@ -107,11 +93,6 @@ class Numeric
   # Delegate #to_int to #to_i in subclasses
   def to_int
     to_i
-  end
-
-  # Delegate #modulo to #% in subclasses
-  def modulo(other)
-    self % other
   end
 
   def integer?

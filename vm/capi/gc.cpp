@@ -35,9 +35,9 @@ extern "C" {
 
     // Normally ignore this. It's almost always a hack.
     if(getenv("RBX_RESPECT_RB_GC")) {
-      env->state()->om->collect_young_now = true;
-      env->state()->om->collect_mature_now = true;
-      env->state()->interrupts.set_perform_gc();
+      env->state()->vm()->om->collect_young_now = true;
+      env->state()->vm()->om->collect_mature_now = true;
+      env->state()->shared().gc_soon();
     }
   }
 
@@ -47,7 +47,7 @@ extern "C" {
 
   void rb_gc_mark(VALUE ptr) {
     Handle* handle = Handle::from(ptr);
-    if(CAPI_REFERENCE_P(handle) && handle->object()->reference_p()) {
+    if(REFERENCE_P(handle) && handle->object()->reference_p()) {
       Object* res = capi::current_mark()->call(handle->object());
       if(res) {
         handle->set_object(res);

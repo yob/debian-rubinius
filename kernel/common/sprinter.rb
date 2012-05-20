@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Sprinter
 
@@ -288,9 +290,9 @@ module Rubinius
 
         @g.local_count = @arg_count + 1
         if @index_mode == :absolute
-          @g.local_names = (0...@arg_count).map {|i| :"#{i + 1}$" } + [:splat]
+          @g.local_names = (0...@arg_count).map { |i| :"#{i + 1}$" } + [:splat]
         else
-          @g.local_names = (0...@arg_count).map {|i| :"arg#{i}" } + [:splat]
+          @g.local_names = (0...@arg_count).map { |i| :"arg#{i}" } + [:splat]
         end
 
         @g.string_build @append_parts
@@ -433,10 +435,6 @@ module Rubinius
             @prec_index = @b.next_index(ref)
           end
 
-          if @format_code == 'g' && @f_alt && !full
-            @prec_static = 4
-          end
-
           @has_precision = @prec_static || @prec_index
         end
 
@@ -564,7 +562,6 @@ module Rubinius
 
         def push_format_string
           float_format_code = @format_code
-          float_format_code = 'f' if @format_code == 'g' && @f_alt
 
           leader = "%#{@flags}"
           if !@width_index && !@prec_index
