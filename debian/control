@@ -11,7 +11,7 @@ Homepage: http://rubini.us/
 
 Package: rubinius
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ruby-common
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Suggests: ruby-switch
 Provides: ruby-interpreter
 Description: implementation of the Ruby programming language
