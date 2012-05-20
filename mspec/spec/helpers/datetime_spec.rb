@@ -1,5 +1,6 @@
-require File.dirname(__FILE__) + '/../spec_helper'
-require 'mspec/helpers/datetime'
+require 'spec_helper'
+require 'mspec/guards'
+require 'mspec/helpers'
 
 describe Object, "#new_datetime" do
   it "returns a default DateTime instance" do
@@ -37,7 +38,7 @@ describe Object, "#new_datetime" do
   end
 
   it "returns a DateTime instance with the specified offset value" do
-    d = new_datetime :offset => 3
-    d.offset.should == 3
+    d = new_datetime :offset => Rational(3,24)
+    d.offset.should == Rational(3,24)
   end
 end

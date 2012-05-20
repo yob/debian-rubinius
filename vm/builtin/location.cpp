@@ -10,13 +10,15 @@
 
 #include "call_frame.hpp"
 
+#include "ontology.hpp"
+
 #include <sstream>
 
 namespace rubinius {
   void Location::init(STATE) {
-    GO(location).set(state->new_class("Location", G(object), G(rubinius)));
+    GO(location).set(ontology::new_class(state, "Location",
+          G(object), G(rubinius)));
     G(location)->set_object_type(state, LocationType);
-    G(location)->name(state, state->symbol("Rubinius::Location"));
   }
 
   Location* Location::create(STATE, CallFrame* call_frame,
@@ -55,6 +57,13 @@ namespace rubinius {
     loc->static_scope(state, call_frame->static_scope());
 
     return loc;
+  }
+
+  Location* Location::of_closest_ruby_method(STATE, CallFrame* calling_environment) {
+    CallFrame* dest = static_cast<CallFrame*>(calling_environment->previous);
+    // Skip any frames for native methods
+    while(dest->native_method_p()) { dest = dest->previous; }
+    return Location::create(state, dest, false);
   }
 
   Location* Location::create(STATE, NativeMethodFrame* nmf) {
@@ -115,8 +124,8 @@ namespace rubinius {
   }
 
   static bool kernel_method(STATE, CompiledMethod* cm) {
-    const char* s = cm->file()->c_str(state);
-    if(strncmp(s, "kernel/", 7) == 0) return true;
+    std::string s = cm->file()->cpp_str(state);
+    if(s.size() >= 7 && strncmp(s.data(), "kernel/", 7) == 0) return true;
     return false;
   }
 
@@ -135,11 +144,11 @@ namespace rubinius {
       // Ignore synthetic frames
       if(call_frame->cm && !kernel_method(state, call_frame->cm)) {
         Symbol* name;
-        Object* block = Qfalse;
+        Object* block = cFalse;
         Fixnum* line = Fixnum::from(call_frame->line(state));
 
         if(call_frame->block_p()) {
-          block = Qtrue;
+          block = cTrue;
           name = call_frame->top_scope(state)->method()->name();
         } else {
           Symbol* current_name = call_frame->name();

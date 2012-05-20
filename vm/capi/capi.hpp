@@ -14,6 +14,11 @@
 
 #include "capi/tag.hpp"
 
+#define ENTER_CAPI(state) (state->vm()->shared.enter_capi(state, __FILE__, __LINE__))
+#define LEAVE_CAPI(state) (state->vm()->shared.leave_capi(state))
+
+#define RSTRING_NOT_MODIFIED 1
+
 namespace rubinius {
   class Integer;
   class Object;
@@ -40,6 +45,10 @@ namespace rubinius {
     /** Raise backend */
     void capi_raise_backend(Exception* exception);
 
+    void capi_raise_backend(VALUE exception);
+
+    void capi_raise_backend(VALUE klass, const char* reason);
+
     /** Get an Array object for a handle ensuring that any RARRAY data has
      * been flushed. */
     Array* capi_get_array(NativeMethodEnvironment* env, VALUE ary_handle);
@@ -60,6 +69,9 @@ namespace rubinius {
 
     /** Wrap a C function in a Proc */
     Proc* wrap_c_function(void* func, VALUE cb, int arity);
+
+    /** Call a ruby method and ignore cached handles, etc */
+    VALUE capi_fast_call(VALUE receiver, ID method_name, int arg_count, ...);
 
     /** Converts a native type (int, uint, long) to a suitable Integer. */
     template<typename NativeType>

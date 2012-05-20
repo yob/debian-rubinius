@@ -62,7 +62,7 @@ def install_file(source, pattern, dest)
 end
 
 desc "Install Rubinius"
-task :install => %w[ build install:files ]
+task :install => %w[ build:build install:files gem_bootstrap install:done]
 
 namespace :install do
   desc "Install all the Rubinius files"
@@ -128,44 +128,43 @@ namespace :install do
       end
 
       # Install the C extensions for the standard library.
-      FileList["lib/ext/**/*.#{$dlext}"].each do |name|
-        install_file name, %r[^lib/ext], BUILD_CONFIG[:ext_path]
+      FileList["lib/**/ext/**/*.#{$dlext}"].each do |name|
+        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
       end
 
       # Install pre-installed gems
-      if BUILD_CONFIG[:preinst_gems]
-        gems_dest = "#{BUILD_CONFIG[:gemsdir]}/rubinius/preinstalled"
-        FileList["preinstalled-gems/data/**/*"].each do |name|
-          install_file name, %r[^preinstalled-gems/data], gems_dest
-        end
+      gems_dest = "#{BUILD_CONFIG[:gemsdir]}/rubinius/preinstalled"
+      FileList["preinstalled-gems/data/**/*"].each do |name|
+        install_file name, %r[^preinstalled-gems/data], gems_dest
+      end
 
-        FileList["preinstalled-gems/bin/*"].each do |name|
-          install_file name, /^preinstalled-gems/, BUILD_CONFIG[:gemsdir]
-        end
+      FileList["preinstalled-gems/bin/*"].each do |name|
+        install_file name, /^preinstalled-gems/, BUILD_CONFIG[:gemsdir]
       end
 
       # Install the Rubinius executable
       exe = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
       install "vm/vm", install_dir(exe), :mode => 0755, :verbose => true
 
-      if BUILD_CONFIG[:bindir_extra]
-        # Install the testrb command
-        testrb = "#{BUILD_CONFIG[:bindir]}/testrb"
-        install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
+      # Install the testrb command
+      testrb = "#{BUILD_CONFIG[:bindir]}/testrb"
+      install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
 
-        # Create symlinks for common commands
-        begin
-          ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
-            name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
-            File.delete name if File.exists? name
-            File.symlink BUILD_CONFIG[:program_name], name
-          end
-        rescue NotImplementedError
-          # ignore
+      # Create symlinks for common commands
+      begin
+        ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
+          name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
+          File.delete name if File.exists? name
+          File.symlink BUILD_CONFIG[:program_name], name
         end
+      rescue NotImplementedError
+        # ignore
       end
+    end
+  end
 
-      STDOUT.puts <<-EOM
+  task :done do
+    STDOUT.puts <<-EOM
 --------
 
 Successfully installed Rubinius #{BUILD_CONFIG[:version]}
@@ -177,8 +176,7 @@ Add '#{BUILD_CONFIG[:bindir]}' to your PATH. Available commands are:
   1. Run Ruby files with '#{BUILD_CONFIG[:program_name]} path/to/file.rb'
   2. Start IRB by running '#{BUILD_CONFIG[:program_name]}' with no arguments
 
-      EOM
-    end
+    EOM
   end
 end
 

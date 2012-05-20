@@ -1,9 +1,13 @@
 #include "builtin/object.hpp"
 #include "builtin/module.hpp"
 #include "builtin/symbol.hpp"
+#include "builtin/autoload.hpp"
+
+#include "vm/configuration.hpp"
 
 #include "helpers.hpp"
 #include "call_frame.hpp"
+#include "exception_point.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
@@ -26,8 +30,13 @@ extern "C" {
   }
 
   int rb_const_defined_at(VALUE module_handle, ID const_id) {
-    return rb_funcall(module_handle,
-        rb_intern("const_defined?"), 1, ID2SYM(const_id));
+    if(LANGUAGE_18_ENABLED(NativeMethodEnvironment::get()->state())) {
+      return rb_funcall(module_handle,
+          rb_intern("const_defined?"), 1, ID2SYM(const_id));
+    } else {
+      return rb_funcall(module_handle,
+          rb_intern("const_defined?"), 2, ID2SYM(const_id), Qfalse);
+    }
   }
 
   ID rb_frame_last_func() {
@@ -50,9 +59,14 @@ extern "C" {
 
     bool found = false;
     Object* val = module->get_const(env->state(), name, &found);
-    if(found) return env->get_handle(val);
 
-    return const_missing(module_handle, id_name);
+    if(!found) return const_missing(module_handle, id_name);
+
+    if(Autoload* autoload = try_as<Autoload>(val)) {
+      return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+    }
+
+    return env->get_handle(val);
   }
 
   VALUE rb_const_get_from(VALUE module_handle, ID id_name) {
@@ -64,7 +78,13 @@ extern "C" {
     bool found = false;
     while(!module->nil_p()) {
       Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      if(found) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
@@ -81,7 +101,13 @@ extern "C" {
     bool found = false;
     while(!module->nil_p()) {
       Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      if(found) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
@@ -91,7 +117,13 @@ extern "C" {
 
     while(!module->nil_p()) {
       Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      if(found) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
@@ -174,10 +206,20 @@ extern "C" {
     Module* parent = c_as<Module>(env->get_object(parent_handle));
     Symbol* constant = env->state()->symbol(name);
 
+    LEAVE_CAPI(env->state());
     Module* module = rubinius::Helpers::open_module(env->state(),
         env->current_call_frame(), parent, constant);
 
-    return env->get_handle(module);
+    // The call above could have triggered an Autoload resolve, which may
+    // raise an exception, so we have to check the value returned.
+    if(!module) env->current_ep()->return_to(env);
+
+    // Grab the module handle before grabbing the lock
+    // so the Module isn't accidentally GC'ed.
+    VALUE module_handle = env->get_handle(module);
+    ENTER_CAPI(env->state());
+
+    return module_handle;
   }
 
   void rb_include_module(VALUE includer_handle, VALUE includee_handle) {
@@ -189,10 +231,8 @@ extern "C" {
   }
 
   void rb_undef(VALUE handle, ID name) {
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-
     Symbol* sym = reinterpret_cast<Symbol*>(name);
-    rb_undef_method(handle, sym->c_str(env->state()));
+    rb_funcall(handle, rb_intern("undef_method!"), 1, sym);
     // In MRI, rb_undef also calls the undef_method hooks, maybe we should?
   }
 
@@ -220,7 +260,7 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     Module* module_object = c_as<Module>(env->get_object(module_handle));
 
-    String* str = module_object->name()->to_str(env->state());
+    String* str = module_object->get_name(env->state());
     return RSTRING_PTR(env->get_handle(str));
   }
 }

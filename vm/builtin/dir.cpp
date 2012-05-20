@@ -10,12 +10,14 @@
 
 #include "object_utils.hpp"
 
+#include "ontology.hpp"
+
 #include <sys/types.h>
 #include <dirent.h>
 
 namespace rubinius {
   void Dir::init(STATE) {
-    GO(dir).set(state->new_class("Dir", G(object)));
+    GO(dir).set(ontology::new_class(state, "Dir", G(object)));
     G(dir)->set_object_type(state, DirType);
   }
 
@@ -23,7 +25,7 @@ namespace rubinius {
     Dir* d = state->new_object<Dir>(G(dir));
     d->os_ = 0;
 
-    state->om->needs_finalization(d, (FinalizerFunction)&Dir::finalize);
+    state->memory()->needs_finalization(d, (FinalizerFunction)&Dir::finalize);
 
     return d;
   }
@@ -54,7 +56,7 @@ namespace rubinius {
   Object* Dir::open(STATE, String* path) {
     if(os_) closedir(os_);
 
-    os_ = opendir(path->c_str(state));
+    os_ = opendir(path->c_str_null_safe(state));
 
     if(!os_) {
       Exception::errno_error(state, "Unable to open directory", errno, path->c_str(state));
@@ -63,7 +65,7 @@ namespace rubinius {
 
     this->path(state, path);
 
-    return Qtrue;
+    return cTrue;
   }
 
   Object* Dir::close(STATE) {
@@ -74,11 +76,11 @@ namespace rubinius {
       os_ = 0;
     }
 
-    return Qnil;
+    return cNil;
   }
 
   Object* Dir::closed_p(STATE) {
-    return os_ ? Qfalse : Qtrue;
+    return os_ ? cFalse : cTrue;
   }
 
   Object* Dir::read(STATE) {
@@ -86,7 +88,7 @@ namespace rubinius {
 
     struct dirent *ent = readdir(os_);
 
-    if(!ent) return Qnil;
+    if(!ent) return cNil;
 
     return String::create(state, ent->d_name);
   }
@@ -97,13 +99,13 @@ namespace rubinius {
     switch(kind->to_native()) {
     case 0:
       seekdir(os_, pos->to_native());
-      return Qtrue;
+      return cTrue;
     case 1:
       rewinddir(os_);
-      return Qtrue;
+      return cTrue;
     case 2:
       return Integer::from(state, telldir(os_));
     }
-    return Qnil;
+    return cNil;
   }
 }

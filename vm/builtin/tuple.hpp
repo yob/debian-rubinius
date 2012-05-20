@@ -66,7 +66,7 @@ namespace rubinius {
 
   public: // Inline Functions
     Object* at(native_int index) {
-      if(index < 0 || num_fields() <= index) return Qnil;
+      if(index < 0 || num_fields() <= index) return cNil;
       return field[index];
     }
 
@@ -85,7 +85,6 @@ namespace rubinius {
 
       virtual void mark(Object* obj, ObjectMark& mark);
       virtual void auto_mark(Object* obj, ObjectMark& mark) {}
-      virtual void visit(Object* obj, ObjectVisitor& visit);
       virtual void show(STATE, Object* self, int level);
       virtual void show_simple(STATE, Object* self, int level);
       virtual size_t object_size(const ObjectHeader* object);

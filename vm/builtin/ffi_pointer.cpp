@@ -30,13 +30,15 @@
 #include "arguments.hpp"
 #include "dispatch.hpp"
 
+#include "ontology.hpp"
+
 #include "windows_compat.h"
 
 namespace rubinius {
 
   void Pointer::init(STATE) {
     Module* ffi = as<Module>(G(object)->get_const(state, "FFI"));
-    GO(ffi_pointer).set(state->new_class_under("Pointer", ffi));
+    GO(ffi_pointer).set(ontology::new_class_under(state, "Pointer", ffi));
     G(ffi_pointer)->set_object_type(state, PointerType);
 
     G(ffi_pointer)->set_const(state, "CURRENT_PROCESS",
@@ -83,7 +85,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::create(STATE, void* ptr) {
-    Pointer* obj = state->new_struct<Pointer>(G(ffi_pointer));
+    Pointer* obj = state->vm()->new_struct<Pointer>(G(ffi_pointer));
     obj->pointer = ptr;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -91,7 +93,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::allocate(STATE, Object* self) {
-    Pointer* obj = state->new_struct<Pointer>(as<Class>(self));
+    Pointer* obj = state->vm()->new_struct<Pointer>(as<Class>(self));
     obj->pointer = 0;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -99,7 +101,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::allocate_memory(STATE, Object* self, Fixnum* size) {
-    Pointer* obj = state->new_struct<Pointer>(as<Class>(self));
+    Pointer* obj = state->vm()->new_struct<Pointer>(as<Class>(self));
     obj->pointer = malloc(size->to_native());;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -107,7 +109,7 @@ namespace rubinius {
   }
 
   Integer* Pointer::get_address(STATE) {
-    return Integer::from(state, (intptr_t)pointer);
+    return Integer::from(state, (uintptr_t)pointer);
   }
 
   Integer* Pointer::set_address(STATE, Integer* ptr) {
@@ -123,7 +125,7 @@ namespace rubinius {
     autorelease = val->true_p() ? true : false;
 
     if(autorelease && !set_finalizer) {
-      state->om->needs_finalization(this,
+      state->memory()->needs_finalization(this,
           (FinalizerFunction)&Pointer::finalize);
       set_finalizer = true;
     }
@@ -152,9 +154,23 @@ namespace rubinius {
 
   Pointer* Pointer::write_string(STATE, String* str, Fixnum* len) {
     native_int n = len->to_native();
-    if(str->size() < n) n = str->size();
+    if(str->byte_size() < n) n = str->byte_size();
     memcpy(pointer, (void*)str->byte_address(), n);
     return this;
+  }
+
+  Integer* Pointer::write_char(STATE, Integer* val) {
+    unsigned char s = val->to_native();
+    *(unsigned char*)pointer = s;
+    return val;
+  }
+
+  Integer* Pointer::read_char(STATE, Object* sign) {
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(char*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned char*)pointer);
+    }
   }
 
   Integer* Pointer::write_short(STATE, Integer* val) {
@@ -163,8 +179,12 @@ namespace rubinius {
     return val;
   }
 
-  Integer* Pointer::read_short(STATE) {
-    return Integer::from(state, *(short*)pointer);
+  Integer* Pointer::read_short(STATE, Object* sign) {
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(short*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned short*)pointer);
+    }
   }
 
   Integer* Pointer::write_int(STATE, Integer* val) {
@@ -173,7 +193,7 @@ namespace rubinius {
   }
 
   Integer* Pointer::read_int(STATE, Object* sign) {
-    if(RTEST(sign)) {
+    if(CBOOL(sign)) {
       return Integer::from(state, *(int*)pointer);
     } else {
       return Integer::from(state, *(unsigned int*)pointer);
@@ -185,8 +205,12 @@ namespace rubinius {
     return val;
   }
 
-  Integer* Pointer::read_long(STATE) {
-    return Integer::from(state, *(long*)pointer);
+  Integer* Pointer::read_long(STATE, Object* sign) {
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(long*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned long*)pointer);
+    }
   }
 
   Integer* Pointer::write_long_long(STATE, Integer* val) {
@@ -194,8 +218,12 @@ namespace rubinius {
     return val;
   }
 
-  Integer* Pointer::read_long_long(STATE) {
-    return Integer::from(state, *(long long*)pointer);
+  Integer* Pointer::read_long_long(STATE, Object* sign) {
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(long long*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned long long*)pointer);
+    }
   }
 
   Float* Pointer::write_float(STATE, Float* flt) {
@@ -206,14 +234,19 @@ namespace rubinius {
   Float* Pointer::read_float(STATE) {
     return Float::create(state, (double)(*(float*)pointer));
   }
-  
+
   Float* Pointer::write_double(STATE, Float* flt) {
     *(double*)pointer = flt->val;
     return flt;
   }
-  
+
   Float* Pointer::read_double(STATE) {
     return Float::create(state, *(double*)pointer);
+  }
+
+  Pointer* Pointer::write_pointer(STATE, Pointer* ptr) {
+    *(void**)pointer = ptr->pointer;
+    return ptr;
   }
 
   Pointer* Pointer::read_pointer(STATE) {
@@ -264,7 +297,7 @@ namespace rubinius {
       ret = Fixnum::from((unsigned int)(READ(unsigned char)));
       break;
     case RBX_FFI_TYPE_BOOL:
-      ret = (READ(unsigned char)) ? Qtrue : Qfalse;
+      ret = (READ(unsigned char)) ? cTrue : cFalse;
       break;
     case RBX_FFI_TYPE_SHORT:
       ret = Fixnum::from((int)(READ(short)));
@@ -302,7 +335,7 @@ namespace rubinius {
     case RBX_FFI_TYPE_PTR: {
       void *lptr = READ(void*);
       if(!lptr) {
-        ret = Qnil;
+        ret = cNil;
       } else {
         ret = Pointer::create(state, lptr);
       }
@@ -311,7 +344,7 @@ namespace rubinius {
     case RBX_FFI_TYPE_STRING: {
       char* result = READ(char*);
       if(result == NULL) {
-        ret = Qnil;
+        ret = cNil;
       } else {
         ret = String::create(state, result);
       }
@@ -325,7 +358,7 @@ namespace rubinius {
       result = READ(char*);
 
       if(result == NULL) {
-        s = p = Qnil;
+        s = p = cNil;
       } else {
         s = String::create(state, result);
         p = Pointer::create(state, result);
@@ -339,7 +372,7 @@ namespace rubinius {
     }
     default:
     case RBX_FFI_TYPE_VOID:
-      ret = Qnil;
+      ret = cNil;
       break;
     }
 
@@ -368,7 +401,7 @@ namespace rubinius {
       WRITE(unsigned char, as<Fixnum>(val)->to_native());
       break;
     case RBX_FFI_TYPE_BOOL:
-      WRITE(unsigned char, RTEST(val) ? 1 : 0);
+      WRITE(unsigned char, CBOOL(val) ? 1 : 0);
       break;
     case RBX_FFI_TYPE_SHORT:
       type_assert(state, val, FixnumType, "converting to short");
@@ -379,7 +412,7 @@ namespace rubinius {
       WRITE(unsigned short, as<Fixnum>(val)->to_native());
       break;
     case RBX_FFI_TYPE_INT:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(int, as<Fixnum>(val)->to_int());
       } else {
         type_assert(state, val, BignumType, "converting to int");
@@ -387,7 +420,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_UINT:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned int, as<Fixnum>(val)->to_uint());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned int");
@@ -395,7 +428,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(long, as<Fixnum>(val)->to_long());
       } else {
         type_assert(state, val, BignumType, "converting to long");
@@ -403,7 +436,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_ULONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned long, as<Fixnum>(val)->to_ulong());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned long");
@@ -423,7 +456,7 @@ namespace rubinius {
       break;
     }
     case RBX_FFI_TYPE_LONG_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(long long, as<Fixnum>(val)->to_long_long());
       } else {
         type_assert(state, val, BignumType, "converting to long long");
@@ -431,7 +464,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_ULONG_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned long long, as<Fixnum>(val)->to_ulong_long());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned long long");
@@ -442,7 +475,7 @@ namespace rubinius {
       WRITE(Object*, val);
       break;
     case RBX_FFI_TYPE_PTR:
-      if(NIL_P(val)) {
+      if(val->nil_p()) {
         WRITE(void*, NULL);
       } else {
         Pointer *mp = as<Pointer>(val);
@@ -452,11 +485,11 @@ namespace rubinius {
       break;
     case RBX_FFI_TYPE_STRING: {
       const char* result;
-      if(NIL_P(val)) {
+      if(val->nil_p()) {
         result = NULL;
       } else {
         String* str = as<String>(val);
-        /* TODO this is probably not correct. Saving away an 
+        /* TODO this is probably not correct. Saving away an
          * internal pointer to the string means that when the string
          * moves, the data will point at the wrong place. Probably need to
          * copy the string data instead */
@@ -466,7 +499,7 @@ namespace rubinius {
       break;
     }
     default:
-      sassert(0);
+      rubinius::bug("Unknown FFI type");
     }
   }
 

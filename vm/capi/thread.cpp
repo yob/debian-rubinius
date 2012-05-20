@@ -45,7 +45,7 @@ extern "C" {
     }
 
     for(;;) {
-      env->state()->shared.leave_capi(env->state());
+      LEAVE_CAPI(env->state());
       {
         GCIndependent guard(env);
         ret = select(max, read, write, except, tvp);
@@ -53,7 +53,7 @@ extern "C" {
 
       bool ok = env->state()->check_async(env->current_call_frame());
 
-      env->state()->shared.enter_capi(env->state());
+      ENTER_CAPI(env->state());
 
       if(!ok) {
         // Ok, there was an exception raised by an async event. We need
@@ -86,7 +86,7 @@ extern "C" {
 
   VALUE rb_thread_current(void) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    Thread* thread = env->state()->thread.get();
+    Thread* thread = env->state()->vm()->thread.get();
 
     return env->get_handle(thread);
   }
@@ -114,28 +114,28 @@ extern "C" {
   // THAR BE DRAGONS.
   //
   // When venturing through the valleys of the unmanaged, our hero must
-  // remain vigilant and disiplined! If she should ever find a VALUE for
+  // remain vigilant and disciplined! If she should ever find a VALUE for
   // a reference in her travels: Look away! For these VALUEs are pure
   // death! Our hero must steel herself and continue on her quest, returning
   // as soon as possible to the castle of the managed.
   VALUE rb_thread_blocking_region(rb_blocking_function_t func, void* data,
                                   rb_unblock_function_t ubf, void* ubf_data) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    VM* state = env->state();
+    State* state = env->state();
     VALUE ret = Qnil;
 
     if (ubf == RUBY_UBF_IO || ubf == RUBY_UBF_PROCESS) {
-      state->interrupt_with_signal();
+      state->vm()->interrupt_with_signal();
     } else {
-      state->wait_on_custom_function(ubf, ubf_data);
+      state->vm()->wait_on_custom_function(ubf, ubf_data);
     }
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
     {
       GCIndependent guard(env);
       ret = (*func)(data);
     }
-    env->state()->shared.enter_capi(env->state());
-    state->clear_waiter();
+    ENTER_CAPI(env->state());
+    state->vm()->clear_waiter();
 
     return ret;
   }
@@ -146,13 +146,14 @@ extern "C" {
   void* rb_thread_call_with_gvl(void* (*func)(void*), void* data) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    env->state()->shared.enter_capi(env->state());
-    env->state()->shared.gc_dependent(env->state());
+    GCTokenImpl gct;
+    ENTER_CAPI(env->state());
+    env->state()->gc_dependent();
 
     void* ret = (*func)(data);
 
-    env->state()->shared.gc_independent(env->state());
-    env->state()->shared.leave_capi(env->state());
+    env->state()->gc_independent(gct);
+    LEAVE_CAPI(env->state());
 
     return ret;
   }

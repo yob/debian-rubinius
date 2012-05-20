@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Method objects are essentially detached, freely passed-around methods. The
 # Method is a copy of the method on the object at the time of extraction, so
@@ -26,20 +28,6 @@ class Method
   attr_reader :receiver
   attr_reader :defined_in
   attr_reader :executable
-
-  def name
-    @name.to_s
-  end
-
-  ##
-  # Method objects are equal if they have the same body and are bound to the
-  # same object.
-
-  def ==(other)
-    other.class == Method and
-      @receiver.equal?(other.receiver) and
-      @executable == other.executable
-  end
 
   ##
   # Indication of how many arguments this method takes. It is defined so that
@@ -116,25 +104,10 @@ class Method
   end
 
   def parameters
-    return [] unless @executable.respond_to? :local_names
-
-    m = @executable.required_args - @executable.post_args
-    o = m + @executable.total_args - @executable.required_args
-    p = o + @executable.post_args
-    p += 1 if @executable.splat
-
-    @executable.local_names.each_with_index.map do |name, i|
-      if i < m
-        [:req, name]
-      elsif i < o
-        [:opt, name]
-      elsif @executable.splat == i
-        [:rest, name]
-      elsif i < p
-        [:req, name]
-      else
-        [:block, name]
-      end
+    if @executable.respond_to? :parameters
+      @executable.parameters
+    else
+      []
     end
   end
 
@@ -199,10 +172,6 @@ class UnboundMethod
   attr_reader :executable
   attr_reader :defined_in
 
-  def name
-    @name.to_s
-  end
-
   ##
   # UnboundMethod objects are equal if and only if they refer to the same
   # method. One may be an alias for the other or both for a common one. Both
@@ -213,6 +182,10 @@ class UnboundMethod
     other.kind_of? UnboundMethod and
       @defined_in == other.defined_in and
       @executable == other.executable
+  end
+
+  def hash
+    @defined_in.hash ^ @executable.hash
   end
 
   ##
@@ -267,7 +240,13 @@ class UnboundMethod
   # Module it is defined in and the Module that it was extracted from.
 
   def inspect
-    "#<#{self.class}: #{@pulled_from}##{@name} (defined in #{@defined_in})>"
+    file, line = source_location()
+
+    if file
+      "#<#{self.class}: #{@pulled_from}##{@name} (defined in #{@defined_in} at #{file}:#{line})>"
+    else
+      "#<#{self.class}: #{@pulled_from}##{@name} (defined in #{@defined_in})>"
+    end
   end
 
   alias_method :to_s, :inspect

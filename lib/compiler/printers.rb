@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Compiler
     class Printer < Stage
@@ -61,11 +63,18 @@ module Rubinius
       end
 
       def print_lines(cm)
-        print "Lines to IP: "
-        size = cm.lines.size - 1
+        lines = cm.lines
+        size = lines.size - 1
         i = 1
+
+        if lines[0] == -1
+          puts  "Line:        #{lines[1]}"
+          i += 2
+        end
+
+        print "Lines to IP: "
         while i < size
-          print "#{cm.lines[i]}: #{cm.lines[i - 1]}..#{cm.lines[i + 1] - 1}"
+          print "#{lines[i]}: #{lines[i - 1]}..#{lines[i + 1] - 1}"
           i += 2
           print ", " if i < size
         end

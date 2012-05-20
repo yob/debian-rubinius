@@ -27,6 +27,10 @@
 #include "bytecode_verification.hpp"
 #include "instruments/timing.hpp"
 
+#include "on_stack.hpp"
+
+#include "ontology.hpp"
+
 #ifdef ENABLE_LLVM
 #include "llvm/state.hpp"
 #include "llvm/jit_compiler.hpp"
@@ -36,9 +40,9 @@
 namespace rubinius {
 
   void CompiledMethod::init(STATE) {
-    GO(cmethod).set(state->new_class("CompiledMethod", G(executable), G(rubinius)));
+    GO(cmethod).set(ontology::new_class(state,
+                      "CompiledMethod", G(executable), G(rubinius)));
     G(cmethod)->set_object_type(state, CompiledMethodType);
-    G(cmethod)->name(state, state->symbol("Rubinius::CompiledMethod"));
   }
 
   CompiledMethod* CompiledMethod::create(STATE) {
@@ -46,7 +50,7 @@ namespace rubinius {
     cm->local_count(state, Fixnum::from(0));
     cm->set_executor(CompiledMethod::default_executor);
     cm->backend_method_ = NULL;
-    cm->inliners_ = NULL;
+    cm->inliners_ = 0;
     cm->prim_index_ = -1;
 
 #ifdef ENABLE_LLVM
@@ -99,40 +103,48 @@ namespace rubinius {
     return as<Fixnum>(lines_->at(state, fin+1))->to_native();
   }
 
-  VMMethod* CompiledMethod::internalize(STATE, const char** reason, int* ip) {
+  VMMethod* CompiledMethod::internalize(STATE, GCToken gct,
+                                        const char** reason, int* ip)
+  {
     VMMethod* vmm = backend_method_;
+
     atomic::memory_barrier();
+
+    if(vmm) return vmm;
+
+    CompiledMethod* self = this;
+    OnStack<1> os(state, self);
+
+    self->hard_lock(state, gct);
+
+    vmm = self->backend_method_;
     if(!vmm) {
-      hard_lock(state);
-
-      vmm = backend_method_;
-      if(!vmm) {
-        {
-          BytecodeVerification bv(this);
-          if(!bv.verify(state)) {
-            if(reason) *reason = bv.failure_reason();
-            if(ip) *ip = bv.failure_ip();
-            std::cerr << "Error validating bytecode: " << bv.failure_reason() << "\n";
-            return 0;
-          }
+      {
+        BytecodeVerification bv(self);
+        if(!bv.verify(state)) {
+          if(reason) *reason = bv.failure_reason();
+          if(ip) *ip = bv.failure_ip();
+          std::cerr << "Error validating bytecode: " << bv.failure_reason() << "\n";
+          return 0;
         }
-
-        vmm = new VMMethod(state, this);
-
-        if(!resolve_primitive(state)) {
-          vmm->setup_argument_handler(this);
-        }
-
-        // We need to have an explicit memory barrier here, because we need to
-        // be sure that vmm is completely initialized before it's set.
-        // Otherwise another thread might see a partially initialized
-        // VMMethod.
-        atomic::memory_barrier();
-        backend_method_ = vmm;
       }
 
-      hard_unlock(state);
+      vmm = new VMMethod(state, self);
+
+      if(self->resolve_primitive(state)) {
+        vmm->fallback = execute;
+      } else {
+        vmm->setup_argument_handler(self);
+      }
+
+      // We need to have an explicit memory barrier here, because we need to
+      // be sure that vmm is completely initialized before it's set.
+      // Otherwise another thread might see a partially initialized
+      // VMMethod.
+      atomic::write(&backend_method_, vmm);
     }
+
+    self->hard_unlock(state, gct);
     return vmm;
   }
 
@@ -145,7 +157,7 @@ namespace rubinius {
 
     // TODO fix me to raise an exception
     assert(0);
-    return Qnil;
+    return cNil;
   }
 
   void CompiledMethod::specialize(STATE, TypeInfo* ti) {
@@ -155,14 +167,17 @@ namespace rubinius {
   Object* CompiledMethod::default_executor(STATE, CallFrame* call_frame,
                           Executable* exec, Module* mod, Arguments& args)
   {
-    LockableScopedLock lg(state, &state->shared, __FILE__, __LINE__);
+    LockableScopedLock lg(state, &state->shared(), __FILE__, __LINE__);
 
     CompiledMethod* cm = as<CompiledMethod>(exec);
     if(cm->execute == default_executor) {
       const char* reason = 0;
       int ip = -1;
 
-      if(!cm->internalize(state, &reason, &ip)) {
+      OnStack<4> os(state, cm, exec, mod, args.argument_container_location());
+      GCTokenImpl gct;
+
+      if(!cm->internalize(state, gct, &reason, &ip)) {
         Exception::bytecode_error(state, call_frame, cm, ip, reason);
         return 0;
       }
@@ -186,12 +201,18 @@ namespace rubinius {
     executor target = v->unspecialized;
 
     for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
-      if(v->specializations[i].class_id == id) {
-        target = v->specializations[i].execute;
+      int c_id = v->specializations[i].class_id;
+      executor x = v->specializations[i].execute;
+
+      if(c_id == id && x != 0) {
+        target = x;
         break;
       }
     }
 
+    // This is a bug. We should not have this setup if there are no
+    // specializations. FIX THIS BUG!
+    if(!target) target = v->fallback;
 
     return target(state, call_frame, exec, mod, args);
   }
@@ -280,20 +301,30 @@ namespace rubinius {
     return name_->to_str(state);
   }
 
-  Object* CompiledMethod::set_breakpoint(STATE, Fixnum* ip, Object* bp) {
+  void CompiledMethod::set_interpreter(executor interp) {
+    set_executor(interp);
+    backend_method_->fallback = interp;
+  }
+
+  Object* CompiledMethod::set_breakpoint(STATE, GCToken gct, Fixnum* ip, Object* bp) {
+    CompiledMethod* self = this;
+    OnStack<3> os(state, self, ip, bp);
+
     int i = ip->to_native();
-    if(backend_method_ == NULL) {
-      if(!internalize(state)) return Primitives::failure();
-    }
-    if(!backend_method_->validate_ip(state, i)) return Primitives::failure();
-
-    if(breakpoints_->nil_p()) {
-      breakpoints(state, LookupTable::create(state));
+    if(self->backend_method_ == NULL) {
+      if(!self->internalize(state, gct)) return Primitives::failure();
     }
 
-    breakpoints_->store(state, ip, bp);
-    backend_method_->debugging = 1;
-    backend_method_->run = VMMethod::debugger_interpreter;
+    if(!self->backend_method_->validate_ip(state, i)) return Primitives::failure();
+
+    if(self->breakpoints_->nil_p()) {
+      self->breakpoints(state, LookupTable::create(state));
+    }
+
+    self->breakpoints_->store(state, ip, bp);
+    self->backend_method_->debugging = 1;
+    self->backend_method_->run = VMMethod::debugger_interpreter;
+
     return ip;
   }
 
@@ -313,20 +344,20 @@ namespace rubinius {
       }
     }
 
-    return removed ? Qtrue : Qfalse;
+    return removed ? cTrue : cFalse;
   }
 
   Object* CompiledMethod::is_breakpoint(STATE, Fixnum* ip) {
     int i = ip->to_native();
-    if(backend_method_ == NULL) return Qfalse;
+    if(backend_method_ == NULL) return cFalse;
     if(!backend_method_->validate_ip(state, i)) return Primitives::failure();
-    if(breakpoints_->nil_p()) return Qfalse;
+    if(breakpoints_->nil_p()) return cFalse;
 
     bool found = false;
     breakpoints_->fetch(state, ip, &found);
 
-    if(found) return Qtrue;
-    return Qfalse;
+    if(found) return cTrue;
+    return cFalse;
   }
 
   CompiledMethod* CompiledMethod::of_sender(STATE, CallFrame* calling_environment) {
@@ -401,41 +432,6 @@ namespace rubinius {
             mark.just_set(obj, tmp);
           }
         }
-      }
-    }
-  }
-
-  void CompiledMethod::Info::visit(Object* obj, ObjectVisitor& visit) {
-    auto_visit(obj, visit);
-
-    visit_inliners(obj, visit);
-
-    CompiledMethod* cm = as<CompiledMethod>(obj);
-    if(!cm->backend_method_) return;
-
-    VMMethod* vmm = cm->backend_method_;
-
-#ifdef ENABLE_LLVM
-    if(cm->jit_data()) {
-      cm->jit_data()->visit_all(visit);
-    }
-
-    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
-      if(vmm->specializations[i].jit_data) {
-        vmm->specializations[i].jit_data->visit_all(visit);
-      }
-    }
-#endif
-
-    for(size_t i = 0; i < vmm->inline_cache_count(); i++) {
-      InlineCache* cache = &vmm->caches[i];
-
-      MethodCacheEntry* mce = cache->cache_;
-      if(mce) visit.call(mce);
-
-      for(int i = 0; i < cTrackedICHits; i++) {
-        Module* mod = cache->seen_classes_[i].klass();
-        if(mod) visit.call(mod);
       }
     }
   }

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class BlockEnvironment
     def self.allocate
@@ -40,6 +42,10 @@ module Rubinius
 
       def total_args
         @block_env.code.total_args
+      end
+
+      def post_args
+        @block_env.code.post_args
       end
 
       def splat

@@ -26,6 +26,11 @@
     <!--[if IE]><link href="/stylesheets/blueprint/ie.css" media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <!--[if IE]><link href="/stylesheets/ie.css"           media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <link href="/stylesheets/pygments.css" media="screen" rel="stylesheet" />
+
+    <link href="/favicon.ico"                 rel="shortcut icon"    type="image/vnd.microsoft.icon" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="72x72"   />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="114x114" />
   </head>
 
   <body>
@@ -62,6 +67,553 @@
 </div>
 
   <div class="container blog_posts">
+  
+    <div class="post">
+      <h2 class="post_title">
+        <a href="/2012/01/04/debugging-rubinius/" title="Debugging scary crashes of Rubinius" class="post_title">
+        Debugging scary crashes of Rubinius
+        </a>
+      </h2>
+      <div class="by_line">
+  <p><span class="author">Dirkjan Bussink</span>
+    <span class="date">04 January 2012</span>
+    
+      <a href="http://rubini.us/2012/01/04/debugging-rubinius/#disqus_thread" data-disqus-identifier="/2012/01/04/debugging-rubinius/"></a>
+
+    
+  </p>
+</div>
+
+      <p>Bugs, we all are in the infinite fight of getting rid of them. Sometimes
+they are trivial, other times a bit harder. In this video I&rsquo;m going to
+show how I have been debugging an issue that caused memory corruption of
+your dear Ruby objects in Rubinius.</p>
+
+<h3 id="background">Background</h3>
+
+<p>It&rsquo;s a pretty long video clocking at 55 minutes but I&rsquo;m trying to be
+detailed in the discovery process. I&rsquo;m explaining the steps I&rsquo;m taking
+along the way and explaining why I&rsquo;m taking those.</p>
+
+<p>The real debugging process if of course littered with taking wrong turns
+so please don&rsquo;t think I&rsquo;m brilliant and able to zoom into the issue
+immediately all the time. The video is not recorded as I was going
+through it the first time, so I exactly knew where I was going and
+which steps to take.</p>
+
+<p>If you want to look up some more information on GDB that I&rsquo;m using
+in the video, here are some links that explain some of the most
+used commands in the video:</p>
+
+<p><a href="http://sourceware.org/gdb/onlinedocs/gdb/Data.html">GDB - Examining data</a>
+<a href="http://sourceware.org/gdb/onlinedocs/gdb/Set-Watchpoints.html">GDB - Setting watchpoints</a></p>
+
+<p>During the video there&rsquo;s a part from 8:18 until 11:28 where it&rsquo;s just
+watching a rebuild of Rubinius scrolling by. I&rsquo;d suggest skipping it
+since it&rsquo;s not very useful. I tried to remove it but after having
+to reencode the video it only grew larger. If anyone has more skills
+to fix that, please let us know!</p>
+
+<h3 id="download">Download</h3>
+
+<p>You can find the video on Vimeo:</p>
+
+<p><a href="http://vimeo.com/34622441">Watch on Vimeo</a></p>
+
+<p>It&rsquo;s probably best to download the video and play it locally on your
+machine. It&rsquo;s 453 MB so it might take a while.</p>
+
+<p>Please let us know if you find this useful, we might do more of them
+in the future if there&rsquo;s interest!</p>
+
+
+    </div>
+  
+    <div class="post">
+      <h2 class="post_title">
+        <a href="/2011/10/18/contributing-to-rubinius/" title="Contributing to Rubinius" class="post_title">
+        Contributing to Rubinius
+        </a>
+      </h2>
+      <div class="by_line">
+  <p><span class="author">Brian Ford</span>
+    <span class="date">18 October 2011</span>
+    
+      <a href="http://rubini.us/2011/10/18/contributing-to-rubinius/#disqus_thread" data-disqus-identifier="/2011/10/18/contributing-to-rubinius/"></a>
+
+    
+  </p>
+</div>
+
+      <p>Implementing Ruby is a lot of hard work. The Rubinius project has been lucky
+to have <a href="http://it.isagit.com/rubinius/rubinius">more than 240 contributors</a>,
+many with <em>hundreds</em> of commits, including code, benchmarks, documentation,
+translations, and more. Lately, we have seen a surge of new folks working hard
+on 1.9 language features. While we concentrate on making Rubinius easy to
+contribute to, this post should clarify some things and pave an easier road to
+your first Rubinius commit.</p>
+
+<h3 id="contributions">Contributions</h3>
+
+<p>Before diving into the Rubinius code, I want to emphasize that there are many
+ways that you can contribute to Rubinius. One of the most valuable for us is
+trying your own library or application on Rubinius. We&rsquo;ve worked super hard to
+make using Rubinius in place of MRI as simple as possible. For example, with a
+typical Rails application, here is all you should need to do to get set up:</p>
+
+<pre><code>rvm install rbx
+rvm use rbx
+gem install bundler
+</code></pre>
+
+<p>Once you&rsquo;ve got Rubinius and Bundler installed, running your application
+should be this simple:</p>
+
+<pre><code>cd &lt;my_application&gt;
+rm Gemfile.lock
+bundle install
+</code></pre>
+
+<p>Note the step of removing the <code>Gemfile.lock</code>. This is necessary to force
+bundler to resolve the dependencies for Rubinius. This is very important. Not
+all gems for MRI will work with Rubinius, and in some cases Rubinius has
+built-in gems or stubs that need to be considered when resolving dependencies
+(ruby-debug and ffi are two examples).</p>
+
+<p>Once <code>bundle install</code> is finished, you should be able to start your
+application just like you would under MRI. If you have any trouble, please let
+us know. Issues for Rubinius are <a href="https://github.com/rubinius/rubinius/issues">tracked on
+Github</a>.</p>
+
+<p>Another way to contribute to Rubinius is talking about the project. If you
+tried your application and your 50 gems installed without problems, consider
+<a href="https://twitter.com/rubinius">tweeting at us</a> or writing up a quick blog post
+about your experiences. If you&rsquo;ve done something
+<a href="http://fancy-lang.org/">fancy</a> that you&rsquo;d like to share with us, we&rsquo;re always
+happy to have <a href="http://rubini.us/2011/02/23/introduction-to-fancy/">guest blog
+posts</a>, too. We even have
+documentation on <a href="http://rubini.us/doc/en/how-to/write-a-blog-post/">how to write a blog
+post</a>.</p>
+
+<h3 id="clone--build">Clone &amp; Build</h3>
+
+<p>Before we can do anything else, we need to get the Rubinius source code and
+build it. Run the commands below to do this:</p>
+
+<pre><code>git clone git://github.com/rubinius/rubinius.git
+cd rubinius
+./configure
+rake
+</code></pre>
+
+<p>You can run Rubinius directly from the build directory, there is no need to
+install it. We provide symlinks for common commands like <code>gem</code>, <code>rake</code>, <code>irb</code>,
+<code>ri</code>, <code>rdoc</code>, and even <code>ruby</code>. Just add <code>&lt;rbx_clone&gt;/bin</code> to your <code>PATH</code>.</p>
+
+<p>If you run into any trouble with these steps, see the <a href="http://rubini.us/doc/en/getting-started/">Getting
+Started</a> page for more information.
+You may need to install libraries required to build Rubinius. If you don&rsquo;t
+find answers there, visit the <code>#rubinius</code> channel on freenode.net and we&rsquo;ll
+help you out.</p>
+
+<p>While the build is running, let&rsquo;s get a quick overview of how Rubinius is
+organized.</p>
+
+<h3 id="code-tour">Code Tour</h3>
+
+<p>There are two main divisions in the Rubinius source code. The virtual machine,
+garbage collector, and just-in-time (JIT) compiler are written in C++. The
+Ruby core library, bytecode compiler, and various tools like the profiler and
+debugger are written mostly or all in Ruby.</p>
+
+<h4 id="ruby-core-library">Ruby Core Library</h4>
+
+<p>The Ruby core library is found in the <code>kernel/</code> directory. The kernel is
+divided into subdirectories that are loaded in order when Rubinius boots. The
+divisions were made to help share the Ruby core library with other
+implementations. I&rsquo;ll cover those basic divisions here. For more details about
+how the loading process works, see the
+<a href="http://rubini.us/doc/en/bootstrapping/">Bootstrapping</a> documentation.</p>
+
+<ol>
+  <li><code>alpha.rb</code> - Sets up very basic Ruby features needed to start loading the
+rest of the core library.</li>
+  <li><code>bootstrap/</code>- Contains implementation-specific features needed to load the
+main parts of the core library.</li>
+  <li><code>platform/</code> - Contains platform-specific features like the FFI
+(foreign-function interface) code that is used extensively in Rubinius to
+bind to standard <code>libc</code> functions.</li>
+  <li><code>common/</code> - Contains the majority of the Ruby core library and the code
+should be implementation-agnostic.</li>
+  <li><code>delta/</code> - Contains more implementation-specific code that may extend or
+override code from <code>common/</code>.</li>
+</ol>
+
+<p>Most of the work on the Ruby core library will be done in <code>kernel/common/</code>.</p>
+
+<h4 id="rubinius-vm">Rubinius VM</h4>
+
+<p>The concept of a virtual machine is somewhat nebulous. It can be hard to draw
+the lines around the different components. In Rubinius, the code for the
+bytecode interpreter, garbage collector, and JIT compiler is under the <code>vm/</code>
+directory. There are subdirectories for the garbage collector (<code>vm/gc/</code>) and
+the JIT compiler (<code>vm/llvm/</code>). The <code>main()</code> function is in
+<code>vm/drivers/cli.cpp</code>.</p>
+
+<p>One of the important parts of Rubinius are the low-level operations that
+cannot be defined in Ruby. These are things like adding two Fixnums together.
+These operations are called primitives and the code for them is in
+<code>vm/builtin</code>. Since you will likely encounter these in the core library, we&rsquo;ll
+delve into them a bit.</p>
+
+<h4 id="primitives">Primitives</h4>
+
+<p>All methods that can be called in Ruby are exposed as, well, Ruby methods. If
+you open <code>kernel/bootstrap/fixnum.rb</code>, you should see the following code:</p>
+
+<div class="highlight"><pre><code class="ruby"><span class="lineno">1</span> <span class="k">def</span> <span class="nf">to_f</span>
+<span class="lineno">2</span>   <span class="no">Rubinius</span><span class="o">.</span><span class="n">primitive</span> <span class="ss">:fixnum_to_f</span>
+<span class="lineno">3</span>   <span class="k">raise</span> <span class="no">PrimitiveFailure</span><span class="p">,</span> <span class="s2">&quot;Fixnum#to_f primitive failed&quot;</span>
+<span class="lineno">4</span> <span class="k">end</span>
+</code></pre>
+</div>
+
+<p>The <code>Rubinius.primitive :fixnum_to_f</code> code looks like a normal Ruby method
+call but it is not. It&rsquo;s actually a compiler directive to tag this Ruby method
+as having an associated primitive operation. The name of the primitive is
+<code>fixnum_to_f</code>. This naming convention is standard, being composed of the class
+name and the method name. Methods in Ruby that are characters, like <code>+</code>, are
+given word names for the primitives.</p>
+
+<p>When this method is run, the primitive operation is invoked. If the primitive
+operation fails, the Ruby code following the <code>Rubinius.primitive</code> line is run.
+This code can perform any Ruby operation. For example, it may coerce the
+arguments to a particular class and re-dispatch to itself. If no other
+operation is appropriate, the method should raise an exception.</p>
+
+<p>To see how the Ruby method relates to the primitive code, open
+<code>vm/builtin/fixnum.hpp</code>:</p>
+
+<div class="highlight"><pre><code class="cpp"><span class="lineno">1</span> <span class="c1">// Rubinius.primitive :fixnum_to_f</span>
+<span class="lineno">2</span> <span class="n">Float</span><span class="o">*</span> <span class="n">to_f</span><span class="p">(</span><span class="n">STATE</span><span class="p">);</span>
+</code></pre>
+</div>
+
+<p>The <code>vm/builtin/*.hpp</code> files are processed by the Rubinius build system to
+automatically generate C++ code to resolve and bind these primitive
+operations. The comment provides the link between the Ruby method and the C++
+method.</p>
+
+<p>Finally, the actual implementation of this primitive is found in
+<code>vm/builtin/fixnum.cpp</code>:</p>
+
+<div class="highlight"><pre><code class="cpp"><span class="lineno">1</span> <span class="n">Float</span><span class="o">*</span> <span class="n">Fixnum</span><span class="o">::</span><span class="n">to_f</span><span class="p">(</span><span class="n">STATE</span><span class="p">)</span> <span class="p">{</span>
+<span class="lineno">2</span>   <span class="k">return</span> <span class="n">Float</span><span class="o">::</span><span class="n">create</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="p">(</span><span class="kt">double</span><span class="p">)</span><span class="n">to_native</span><span class="p">());</span>
+<span class="lineno">3</span> <span class="p">}</span>
+</code></pre>
+</div>
+
+<p>Here you can see that a new Float object is being created from the value of
+the Fixnum. Rubinius names the C++ classes that implement the Ruby primitive
+operations the same as their Ruby counterparts. One of the goals of Rubinius
+is to build an elegant, easily comprehensible system, and we feel that this
+consistency has been a great benefit toward that goal.</p>
+
+<p>Now that we have a basic idea of the structure of Rubinius, let&rsquo;s look at some
+aspects of its runtime behavior, in particular, supporting different Ruby
+language modes.</p>
+
+<h3 id="language-modes">Language Modes</h3>
+
+<p>Rubinius 2.0 (the master branch) implements both 1.8 and 1.9 language features
+in one executable. You can select the language mode at runtime by passing the
+<code>-X18</code> or <code>-X19</code> flag, either as a command line option or by setting the
+<code>RBXOPT</code> environment variable. Both commands below should have the same
+effect:</p>
+
+<pre><code>RBXOPT=-X19 bin/rbx -v
+bin/rbx -X19 -v
+</code></pre>
+
+<p>If I run that on my system, I will see the following:</p>
+
+<pre><code>rubinius 2.0.0dev (1.9.2 0f223599 yyyy-mm-dd JI) [x86_64-apple-darwin10.8.0]
+</code></pre>
+
+<p>The default language mode is 1.8, so if you invoke <code>rbx</code> with no other
+options, you&rsquo;ll be running in 1.8 mode. You can change the default mode with a
+configure time option as follows:</p>
+
+<pre><code>./configure --default-version=1.9
+</code></pre>
+
+<p>If you configure Rubinius to have a default language mode of 1.9, you can
+access 1.8 mode with the <code>-X18</code> runtime option as discussed above.</p>
+
+<p>Ok, we&rsquo;ve got the code, we understand something about how it is organized,
+we&rsquo;ve got the runtime behavior down, now let&rsquo;s look at actually implementing
+Ruby. To do that, we need to know how Ruby behaves, and that is what RubySpec
+is all about.</p>
+
+<h3 id="by-the-spec">By the Spec</h3>
+
+<p>Rubinius created the RubySpec project to ensure that we would be faithfully
+implementing Ruby behavior, and we are constantly contributing more to it.
+Basically, Rubinius does it by the spec. So, any commit to the Ruby core
+library in Rubinius must either have new specs or make existing specs pass. To
+effectively contribute to Rubinius, you&rsquo;ll need to understand some basics
+about RubySpec. I recommend that you have a read through the documentation at
+<a href="http://rubyspec.org/">rubyspec.org</a>.</p>
+
+<p>RubySpec includes a custom-built framework for the specs called MSpec. The
+syntax is intended to be consistent with <a href="http://rspec.info">RSpec</a>, but there
+are various facilities that are purpose-built to support multiple
+implementations, multiple versions of Ruby, and multiple platforms.</p>
+
+<h4 id="running-specs">Running Specs</h4>
+
+<p>MSpec provides several different scripts to run the specs under different
+conditions. The default behavior is to simply run all the specs. If you invoke
+the following command, it will run all the Ruby Array specs in the default
+language mode, which should be 1.8 unless you configured 1.9 to be the
+default:</p>
+
+<pre><code>bin/mspec core/array
+</code></pre>
+
+<p>To Run the specs in 1.9 mode, add the <code>-tx19</code> option:</p>
+
+<pre><code>bin/mspec -tx19 core/array
+</code></pre>
+
+<p>The <code>-t</code> option specifies which target to run the specs under. The default in
+Rubinius is to run them with Rubinius, so <code>-tx</code> is implied. You can easily run
+with another target by giving the name of an executable on your PATH or the
+full path to an executable. Since the specs are intended to show the behavior
+of MRI, if you are writing new specs you need to run them under MRI 1.8.7 and
+1.9.2. I have those on my PATH, so I can do the following:</p>
+
+<pre><code>bin/mspec -t ruby1.8.7 core/array
+bin/mspec -t ruby1.9.2 core/array
+</code></pre>
+
+<p>Finally, if you are running <code>bin/mspec</code> in the Rubinius source directory, the
+location of the RubySpecs are known (<code>spec/ruby/</code>), so you can use the full
+path or the shortened version <code>core/array</code> above.</p>
+
+<h4 id="continuous-integration">Continuous Integration</h4>
+
+<p>One goal of MSpec is to make it as easy as possible to run the specs for the
+parts of Ruby that have been implemented. It takes a long time to implement
+all of Ruby correctly, but we want to know that the parts we have implemented
+don&rsquo;t get broken while working on other parts. That is the role of continuous
+integration. To use CI effectively, we need to partition the specs into those
+that we expect to pass and those we know we don&rsquo;t pass yet. MSpec provides a
+facility for this, called tagging, that we&rsquo;ll look at shortly. For now, we&rsquo;ll
+just look at running the specs in CI mode.</p>
+
+<p>To run all the Rubinius specs in CI mode under the default language version,
+use the following command:</p>
+
+<pre><code>bin/mspec ci
+</code></pre>
+
+<p>Likewise, to run these specs in the 1.9 language mode, add the <code>-tx19</code> option:</p>
+
+<pre><code>bin/mspec ci -tx19
+</code></pre>
+
+<p>The <code>bin/mspec ci</code> command runs the <code>mspec-ci</code> script. You should be familiar
+with this mechanism from working with Git. It&rsquo;s the same idea. The <code>mspec</code>
+script itself is just a utility to invoke the various specific MSpec scripts.
+To see the options for <code>mspec</code>, run the following command</p>
+
+<pre><code>bin/mspec -h
+</code></pre>
+
+<p>There are three basic functions that MSpec performs and these correspond to
+<code>mspec-run</code>, <code>mspec-ci</code>, and <code>mspec-tag</code>. When not given an operation, <code>mspec</code>
+assumes <code>run</code>, so the following two commands are equivalent:</p>
+
+<pre><code>mspec core/array
+mspec run core/array
+</code></pre>
+
+<p>If the operation is given, it must be the first parameter to <code>mspec</code>. In the
+case below, the first command runs <code>mspec-ci</code> with <code>core/array</code> while the
+second command runs <code>mspec-run</code> with <code>core/array</code> and <code>ci</code> as files.</p>
+
+<pre><code>mspec ci core/array
+mspec core/array ci
+</code></pre>
+
+<p>Now that we&rsquo;ve got the basics of MSpec down, let&rsquo;s look at how we find specs
+that fail on Rubinius. To do this, we&rsquo;ll use the <code>mspec tag</code> command.</p>
+
+<h4 id="tagged-specs">Tagged Specs</h4>
+
+<p>Since Rubinius uses the tagging mechanism to create the set of CI specs to
+run, the best way to discover what parts of RubySpec that Rubinius isn&rsquo;t
+passing yet is to list the specs that are tagged. There&rsquo;s a command for that:</p>
+
+<pre><code>bin/mspec tag --list fails -tx19 :ci_files
+</code></pre>
+
+<p>This command lists all the specs that are tagged as failing. There&rsquo;s some new
+syntax here, namely <code>:ci_files</code>. MSpec has the concept of pseudo-directories.
+Basically, they are lists of files. The reason for this is that running all
+the core or standard library specs in RubySpec is not as simple as just
+running all the files under <code>spec/ruby/core</code> or <code>spec/ruby/library</code>. It&rsquo;s more
+complicated than that because there are 1.8- and 1.9-specific libraries.
+Rather than wrapping everything in <code>ruby_version_is</code> guards, MSpec adds
+version-specific lists and names them, for example, <code>:core</code> and <code>:library</code>.</p>
+
+<p>In this case, we&rsquo;re using the list of files specified by <code>:ci_files</code>. This
+list excludes some files that are known to cause problems if they are run.</p>
+
+<p>The list of specs that are currently marked as failing is pretty long. We can
+reduce the number of tags we are looking at by giving a smaller set of specs
+to run.  For example, let&rsquo;s just run the File specs:</p>
+
+<pre><code>bin/mspec tag --list fails -tx19 core/file
+</code></pre>
+
+<p>Looking at the output from this command, we notice (at least at the time of
+writing this post) that there are several failures in the
+<code>File.world_writable?</code> specs. We can run just these specs:</p>
+
+<pre><code>bin/mspec tag --list fails -tx19 core/file/world_writable
+</code></pre>
+
+<p>If we look into the documentation for <code>File.world_writable?</code>, we&rsquo;ll find that
+it is a new method introduced in 1.9. Excellent, this gives us an opportunity
+to talk about language-specific changes in Rubinius.</p>
+
+<h3 id="language-specific-changes">Language-specific Changes</h3>
+
+<p>When Rubinius boots, it loads different files depending on what language mode
+it is running. In the <code>kernel/**/</code> directories, there are <code>load_order18.txt</code>
+and <code>load_order19.txt</code> files. These files are used during the build process to
+create separate runtime kernels for Rubinius. You can see these in the
+<code>runtime/18</code> and <code>runtime/19</code> directories after building.</p>
+
+<p>Here&rsquo;s how language-specific features are handled in the Rubinius kernel.</p>
+
+<ol>
+  <li>If there are no language-specific methods, the name of the file in
+<code>kernel/common</code> is the name of the class. In the case here, the file is
+<code>kernel/common/file.rb</code>. This rule applies regardless of whether the class
+is 1.8- or 1.9-specific. For example, Rational is part of the 1.9 core
+library, but does not exist in the core library in 1.8. The Rational class
+is in <code>kernel/core/rational.rb</code>.</li>
+  <li>If there are version-specific methods, they go in <code>kernel/common/file18.rb</code>
+and <code>kernel/common/file19.rb</code>. The correct file is then added to the
+appropriate <code>load_orderNN.txt</code> file.</li>
+</ol>
+
+<p>In the case of <code>File.world_writable?</code>, there is no 1.8 version. So, we open
+<code>kernel/common/file19.rb</code> and add the method definition. After changing any of
+the <code>kernel/**/*.rb</code> files, we have to build Rubinius. Run the following
+command to do that:</p>
+
+<pre><code>rake build
+</code></pre>
+
+<p>After making the change, we verify that the specs pass by running the specs
+<em>without</em> the CI tags:</p>
+
+<pre><code>bin/mspec -tx19 core/file/world_writable
+</code></pre>
+
+<p>If all the specs pass, then you&rsquo;re ready to remove the CI tags. To do so, run
+the following command:</p>
+
+<pre><code>bin/mspec tag --del fails -tx19 core/file/world_writable
+</code></pre>
+
+<p>After removing the CI tags, the final step is to ensure that all specs still
+pass. To run all the CI specs in both 1.8 and 1.9 modes, simply do:</p>
+
+<pre><code>rake
+</code></pre>
+
+<p>If everything passes, you&rsquo;re ready to submit a pull request. All in all, that
+wasn&rsquo;t too bad, right?</p>
+
+<p>One final note, if you are making changes to RubySpec, make separate commits
+in your pull request for changes to <code>spec/ruby/**/*_specs.rb</code> and another
+commit for any other Rubinius files. It is fine to commit the removed tags
+with the other Rubinius changes.</p>
+
+<h3 id="wrapping-presents">Wrapping Presents</h3>
+
+<p>The information here should give you everything you need to get your feet wet
+in Rubinius. By the way, today is Evan&rsquo;s birthday. If you&rsquo;re not taking him to
+dinner, why don&rsquo;t you show your appreciation for this fantastic project he
+created by grabbing Rubinius and hacking on some Ruby code. Be safe and have
+fun! We can&rsquo;t wait to hear from you.</p>
+
+    </div>
+  
+    <div class="post">
+      <h2 class="post_title">
+        <a href="/2011/10/11/matz-and-me-at-rubyconf-2011/" title="Matz and Me at RubyConf 2011" class="post_title">
+        Matz and Me at RubyConf 2011
+        </a>
+      </h2>
+      <div class="by_line">
+  <p><span class="author">Shane Becker</span>
+    <span class="date">11 October 2011</span>
+    
+      <a href="http://rubini.us/2011/10/11/matz-and-me-at-rubyconf-2011/#disqus_thread" data-disqus-identifier="/2011/10/11/matz-and-me-at-rubyconf-2011/"></a>
+
+    
+  </p>
+</div>
+
+      <p>I had a great time at RubyConf 2011 in New Orleans, LA. I saw old friends from all over the world. I met new friends from all over the world. We laughed and shared our dreams with each other. I gave away a huge pile of <a href="http://store.americanapparel.net/tr401.html" title="Tri-Blend Short Sleeve Track Shirt">super soft t-shirts</a>. I heard from many of you a pledge to go back to work and deploy something meaningful on Rubinius in production (more on that soon). </p>
+
+<p>Oh, and we took these pictures of me and Matz in the new Rubinius shirt. Altogether, not a bad conference at all.</p>
+
+<p><a href="http://www.flickr.com/photos/veganstraightedge/6234562423"><img src="http://farm7.static.flickr.com/6232/6234562423_2c2c5b5f8b_z.jpg" alt="Me with Matz in a Rubinius shirt at RubyConf 2011 in New Orleans, LA" /></a><a href="http://www.flickr.com/photos/veganstraightedge/6234562147"><img src="http://farm7.static.flickr.com/6048/6234562147_d986abe428_z.jpg" alt="Matz in a Rubinius shirt at RubyConf 2011 in New Orleans, LA" /></a></p>
+
+<p>How was <em>your</em> RubyConf?</p>
+
+    </div>
+  
+    <div class="post">
+      <h2 class="post_title">
+        <a href="/2011/10/04/steve-klabnik-thinks-rubinius-is-awesome/" title="Steve Klabnik Thinks Rubinius is Awesome" class="post_title">
+        Steve Klabnik Thinks Rubinius is Awesome
+        </a>
+      </h2>
+      <div class="by_line">
+  <p><span class="author">Shane Becker</span>
+    <span class="date">04 October 2011</span>
+    
+      <a href="http://rubini.us/2011/10/04/steve-klabnik-thinks-rubinius-is-awesome/#disqus_thread" data-disqus-identifier="/2011/10/04/steve-klabnik-thinks-rubinius-is-awesome/"></a>
+
+    
+  </p>
+</div>
+
+      <p>Steve Klabnik <a href="https://github.com/rubinius/rubinius/pull/1184">added support for <code>require_relative</code> to Rubinius</a>. He documents his process and <a href="http://blog.steveklabnik.com/2011/10/04/rubinius-is-awesome.html" title="Rubinius Is Awesome - Literate Programming">how much fun he had</a>. We&rsquo;re glad to hear that Steve thinks Rubinius is awesome. Making Rubinius awesome for rubyists has always been one of our core tenets.</p>
+
+<blockquote>
+  <p>Even if I didn’t have some code to look at, because Rubinius is just Ruby,
+it was really easy to dive in and check out the code, because it’s all Ruby.
+Seriously. Rubinius is just Ruby. Just Ruby. Ruby.</p>
+</blockquote>
+
+<blockquote>
+  <p>So dive in and add some features today! If having an awesome alternate Ruby implementation
+isn’t enough for you, the rbx team will bribe you with special stickers for committers, and sweet 
+black-on-black tshirts for people with 10 commits or more!</p>
+</blockquote>
+
+<p><a href="http://blog.steveklabnik.com/2011/10/04/rubinius-is-awesome.html" title="Rubinius Is Awesome - Literate Programming">Read all about it on his blog Literate Programming</a>.</p>
+
+    </div>
   
     <div class="post">
       <h2 class="post_title">
@@ -131,264 +683,6 @@ Installer.</p>
 <p>Get blogging.</p>
 
 <p><em>&mdash; XOXO RBX</em></p>
-
-    </div>
-  
-    <div class="post">
-      <h2 class="post_title">
-        <a href="/2011/08/30/rubinius-3d/" title="Rubinius - Now in The Third Dimension" class="post_title">
-        Rubinius - Now in The Third Dimension
-        </a>
-      </h2>
-      <div class="by_line">
-  <p><span class="author">Shane Becker</span>
-    <span class="date">30 August 2011</span>
-    
-      <a href="http://rubini.us/2011/08/30/rubinius-3d/#disqus_thread" data-disqus-identifier="/2011/08/30/rubinius-3d/"></a>
-
-    
-  </p>
-</div>
-
-      <p>A long time ago, <a href="http://twitter.com/bookis" title="@bookis on Twitter">Bookis Smuin</a> crafted up a 3-dimensional representation of the little Rubinius <em>r</em> logo. It was used on the Rubinius website and as the avatar for the <a href="http://twitter.com/#!/rubinius" title="@Rubinius on Twitter">@Rubinius</a> account. And for awhile, things were good.</p>
-
-<p>Somewhere along the way, the original files were lost. That left us with only PNG that was 239px wide. That&rsquo;s no good. To the Twitters!</p>
-
-<p>I <a href="http://twitter.com/#!/veganstraightedge/status/101149379880157184" title="Plea for 3D Help on Twitter">lazy tweeted</a> asking for help re-building the logo in 3D based on the work that Bookis did. Lo and behold, I asked and the internet delivered.</p>
-
-<p>The very smart and good looking Roger Bacardit (<a href="http://twitter.com/ruxii" title="@ruxii on Twitter">@ruxii</a>) from <a href="http://codegram.com" title="Codegram - Smart Web Apps">Codegram</a> in Barcelona, Espa&ntilde;a stepped up to tackle the task. Lickity split, he cranked out two versions (white on black and black on white) at super mega huge resolution (~4000px square).</p>
-
-<p>Like everything else we do, <a href="https://github.com/rubinius/collateral/tree/master/logos/3D">these logo files</a> are <a href="https://github.com/rubinius/collateral/blob/master/README.md">very liberally licensed</a> and available for download and reuse in the <a href="https://github.com/rubinius/collateral">Rubinius Collateral repo</a> over on GitHub.</p>
-
-<p>Thank you, Bookis, for the original.
-Thank you, Roger, for the rebuild.</p>
-
-<p><em>&mdash; XOXO RBX</em></p>
-
-    </div>
-  
-    <div class="post">
-      <h2 class="post_title">
-        <a href="/2011/08/05/rbxday-blog-posts/" title="&#35;rbxday Blog Posts" class="post_title">
-        &#35;rbxday Blog Posts
-        </a>
-      </h2>
-      <div class="by_line">
-  <p><span class="author">Shane Becker</span>
-    <span class="date">05 August 2011</span>
-    
-      <a href="http://rubini.us/2011/08/05/rbxday-blog-posts/#disqus_thread" data-disqus-identifier="/2011/08/05/rbxday-blog-posts/"></a>
-
-    
-  </p>
-</div>
-
-      <p>With just a few hours left in the first <a href="http://rbxday.rubini.us">#rbxday</a>,
-I wanted to share a few blog posts that people have written for today.
-It seems like lots of people are having lots of fun all while using Rubinius.
-That&rsquo;s what really matters.</p>
-
-<p>And I think <a href="http://twitter.com/andrewwk">Andrew W. K.</a>
-would probably be proud of that.</p>
-
-<p>Onto the blog posts&hellip;</p>
-
-<p>Nathan Engdahl on the
-<a href="http://bluebox.net/news/2011/08/rubinius-day" title="Rubinius Day">Blue Box Group blog</a>
-writes:</p>
-
-<blockquote>
-  <p>What is Rubinius you ask? Quite simply, it’s an alternative implementation
-of Ruby, written in Ruby, designed for modern web developers. It provides
-tools for simpler development of web applications. Rubinius strives for a
-particularly fast and optimized implementation, ensuring applications run
-at peak efficiency.</p>
-</blockquote>
-
-<p>Chris White <a href="http://rubysource.blogspot.com/2011/08/taking-byte-out-of-ruby.html" title="A Source For All Things Ruby: Taking A Byte Out of Ruby">compares bytecode</a>
-from MRI, JRuby and Rubinius:</p>
-
-<blockquote>
-  <p>Many developers don&rsquo;t think too much about what&rsquo;s going on behind the
-scenes when they run their Ruby code. That&rsquo;s the beauty of it, easy to
-write code that&rsquo;s given to Ruby and run for the developer. At some point
-the developer may wonder, what&rsquo;s REALLY going on behind the scenes. How is
-it that something meant to run Ruby can host <a href="http://rubini.us/projects&quot;">so many other languages</a>?
-The answer lies in what&rsquo;s known as a VM, or Virtual Machine.</p>
-</blockquote>
-
-<p>Finally, there&rsquo;s the
-<a href="http://rubysfera.pl/2011/08/kod-zrodlowy-rubiego-w-rubym/" title="Kod źródłowy Rubiego w Rubym">Rubysfera blog</a>
-that&rsquo;s not written in a language that I can read. So, I&rsquo;ll just assume that
-they&rsquo;re talking about Chocolate Rubinius Cake and how to bake it. ;)</p>
-
-<blockquote>
-  <p>Rubiniusa (implementacji Rubiego, napisanej w Rubym) nikomu chyba
-przedstawiać nie trzeba. Obecnie obsługiwana jest wersja języka 1.8.7, a
-niektóre benchmarki pokazują, że Rubinius w tej wersji może osiągać szybkość
-porównywalną z JRuby. Benchmarki, benchmarkami, najciekawsza jest możliwość
-zajrzenia do implementacji języka w Rubym.</p>
-</blockquote>
-
-<p><em>Seriously though, I have no idea what that post says.
-If you do, please let me know.</em></p>
-
-<p>There&rsquo;s still time. Go test your app running on Rubinius. Tweet about it.
-Use the hashtag <a href="https://twitter.com/#!/search/%23rbxday">#rbxday</a>, so we
-notice you and re-share your tweet. If there are bugs, please
-<a href="https://github.com/rubinius/rubinius/issues">create an issue</a> on Github.
-Give us any other feedback you want on the
-<a href="http://rbxday.rubini.us/feedback">rbxday.rubini.us</a> website.</p>
-
-<p><em>&mdash; XOXO RBX</em></p>
-
-    </div>
-  
-    <div class="post">
-      <h2 class="post_title">
-        <a href="/2011/08/03/rbxday-in-real-life/" title="&#35;rbxday In Real Life" class="post_title">
-        &#35;rbxday In Real Life
-        </a>
-      </h2>
-      <div class="by_line">
-  <p><span class="author">Brian Ford</span>
-    <span class="date">03 August 2011</span>
-    
-      <a href="http://rubini.us/2011/08/03/rbxday-in-real-life/#disqus_thread" data-disqus-identifier="/2011/08/03/rbxday-in-real-life/"></a>
-
-    
-  </p>
-</div>
-
-      <p><strong>UPDATE:</strong> <em>We have added several locations since this post was first
-published. See the list below for all the current details. Also, stay tuned to
-the official <a href="http://rbxday.rubini.us">rbxday.rubini.us</a> website for updates
-throughout</em> <a href="https://twitter.com/#!/search/%23rbxday">#rbxday</a>.</p>
-
-<p><strong>The first ever</strong> <a href="https://twitter.com/#!/search/%23rbxday">#rbxday</a> is fast
-approaching on Friday, August 5th. Depending on your time zone, that is either
-tomorrow or the day after tomorrow. To help you get prepared, here are a few
-updates.</p>
-
-<p>Originally, the idea for <a href="https://twitter.com/#!/search/%23rbxday">#rbxday</a>
-was a day that people all around the world could have fun experimenting with
-Ruby and Rubinius. Try your application or pet Ruby project on Rubinius, or
-pull out that idea you&rsquo;ve been wanting to explore, code it up, and run it on
-Rubinius. We are not asking anyone to contribute to Rubinius, but we would be
-most flattered if you wanted to dig into the Rubinius code to see what&rsquo;s going
-on under the hood. To sum up, the motto of the day is &ldquo;Ruby, Rubinius, Fun Fun Fun Fun&rdquo;.</p>
-
-<p>Of course, a great way to multiply fun is to share it with others. Several
-people have taken the initiative of organizing meetups on
-<a href="https://twitter.com/#!/search/%23rbxday">#rbxday</a>:</p>
-
-<ul>
-  <li>
-    <p><strong>San Francisco, CA, USA</strong>: <a href="http://twitter.com/engineyard">Melissa Sheehan - @engineyard</a>
-of <a href="http://engineyard.com">Engine Yard</a>, sign up at <a href="http://rbxdaysf.eventbrite.com/">rbxdaysf.eventbrite.com</a></p>
-  </li>
-  <li>
-    <p><strong>Mountain View, CA, USA</strong>: <a href="http://twitter.com/bcurren">Ben Curren - @bcurren</a> co-founder
-of <a href="http://outright.com">Outright.com</a>,
-sign up at <a href="http://rbxday.eventbrite.com/">rbxday.eventbrite.com</a></p>
-  </li>
-  <li>
-    <p><strong>Los Angeles, CA, USA</strong>: <a href="http://twitter.com/veganstraightedge">Shane Becker - @veganstraightedge</a>
-Open Source Cheerleader at <a href="http://engineyard.com">Engine Yard</a>
-for <a href="http://rubini.us">Rubinius</a>, 10am - 8pm at
-<a href="http://farmhouse.la">the Farmhouse</a></p>
-  </li>
-  <li>
-    <p><strong>Portland, OR, USA</strong>: <a href="http://twitter.com/kyledrake">Kyle Drake - @kyledrake</a>
-avid Rubyist, event at <a href="http://piepdx.com">PIE</a>, see
-<a href="http://calagator.org/events/1250461183">Calagator.org</a> for details</p>
-  </li>
-  <li>
-    <p><strong>Amsterdam, Netherlands</strong>: <a href="http://twitter.com/dbussink">Dirkjan Bussink - @dbussink</a>
-long time Rubinius contributor, event at
-<a href="http://80beans.com/en/blog/2011/07/29/rbxday-at-the-80beans-office">80beans</a></p>
-  </li>
-  <li>
-    <p><strong>Barcelona, Spain</strong>: <a href="http://twitter.com/txustice">Josep M. Bach - @txustice</a> inventor of
-<a href="http://blog.txustice.me/2011/06/rexpl-interactive-bytecode-console-for-rubinius">cool Rubinius technology</a>,
-event at <a href="http://blog.codegram.com/2011/8/celebrate-rbxday-with-us-at-codegram">Codegram</a></p>
-  </li>
-  <li>
-    <p><strong>Montevideo, Uruguay</strong>: <a href="http://twitter.com/spastorino">Santiago Pastorino - @spastorino</a>
-co-founder of <a href="http://twitter.com/wyeworks">@wyeworks</a>, event at the <a href="http://www.wyeworks.com/">WyeWorks office</a></p>
-  </li>
-</ul>
-
-<p>A huge thanks to everyone who has organized one of these events. They did so
-on their own initiative and show the true power of a community. If you&rsquo;re near
-one of the events, please do attend. If not, <em>there&rsquo;s still time to organize
-one near you.</em></p>
-
-<p>If you are joining <a href="http://twitter.com/#!/search/%23rbxday">#rbxday</a> from the
-comfort of your own home, tweet about it, include pictures, and join us in
-the <a href="irc://irc.freenode.net#rubinius">#rubinius</a> IRC channel on freenode.net.
-We would love to hear from you.</p>
-
-<p>A final thought about all the ways you can help Rubinius. You don&rsquo;t have to
-contribute code directly to help. Each of these activities is just as
-valuable, and if you think of any I didn&rsquo;t include, please let me know:</p>
-
-<ul>
-  <li>Wearing your <a href="http://rubini.us/2011/05/26/rubinius-rewards">Rubinius shirt</a></li>
-  <li>Talking to co-workers about Rubinius</li>
-  <li>Asking your company to sponsor some of your time contributing to Rubinius</li>
-  <li>Writing libraries in Ruby</li>
-  <li>Writing blog posts or books about Ruby technology, like fully-concurrent
-threads in <a href="http://jruby.org">JRuby</a> and Rubinius 2.0</li>
-  <li>Talking to people about what you find painful in Ruby and how we may be able
-to improve those pain points</li>
-  <li>Testing your code on Rubinius and submitting bug/performance reports</li>
-</ul>
-
-<p>Above all, please do have fun. That&rsquo;s no gimmick. The world needs more fun.</p>
-
-<p>Put a tag on it <a href="http://twitter.com/#!/search/%23rbxday">#rbxday</a>.</p>
-
-    </div>
-  
-    <div class="post">
-      <h2 class="post_title">
-        <a href="/2011/07/31/rbxday-at-80beans/" title="Come hack in Amsterdam for &#35;rbxday" class="post_title">
-        Come hack in Amsterdam for &#35;rbxday
-        </a>
-      </h2>
-      <div class="by_line">
-  <p><span class="author">Dirkjan Bussink</span>
-    <span class="date">31 July 2011</span>
-    
-      <a href="http://rubini.us/2011/07/31/rbxday-at-80beans/#disqus_thread" data-disqus-identifier="/2011/07/31/rbxday-at-80beans/"></a>
-
-    
-  </p>
-</div>
-
-      <p>Not only in the US is <a href="http://rbxday.rubini.us/">&#35;rbxday</a> celebrated, but
-we have also something in Amsterdam next Friday. It&rsquo;s really becoming the
-International Rubinius Day that it was set out to be.</p>
-
-<p>The guys are <a href="http://www.80beans.com/">80beans</a> are sponsoring the event and
-have graciously offered their office as the place to hang out and are
-providing refreshments. The office is located on the <a href="http://maps.google.com/maps/place?q=80beans,+Amsterdam,+The+Netherlands&amp;hl=en&amp;cid=15251096961071716406">Vijzelstraat 72</a> in
-Amsterdam and we&rsquo;re starting at 3pm.</p>
-
-<p>If you&rsquo;re living in the neighborhood, please come and join us. As long
-term Rubinius contributor Dirkjan Bussink is coming over from the other side of
-the country, so don&rsquo;t feel held back when you&rsquo;re not living in Amsterdam
-itself.</p>
-
-<p>So be prepared for an afternoon of very interesting hacking. We really want
-to make it a fun afternoon of experimenting with Rubinius, so anything
-goes! Please leave a message on the <a href="http://www.80beans.com/en/blog">80beans blog</a> if you&rsquo;re planning to come over:</p>
-
-<p><a href="http://www.80beans.com/en/blog/2011/07/29/rbxday-at-the-80beans-office">http://www.80beans.com/en/blog/2011/07/29/rbxday-at-the-80beans-office</a></p>
-
-<p>Hopefully see you there!</p>
-
 
     </div>
   

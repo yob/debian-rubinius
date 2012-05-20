@@ -22,6 +22,7 @@
 
 namespace rubinius {
 
+  class State;
   class VM;
 
   /** Platform-dependent integer type large enough for pointers too. */
@@ -31,12 +32,18 @@ namespace rubinius {
   typedef native_int hashval;
 
 
-  #define STATE rubinius::VM* state
+  #define STATE rubinius::State* state
   #define THREAD rubinius::ManagedThread* state
   #define G(whatever) state->globals().whatever.get()
   #define GO(whatever) state->globals().whatever
 
 }
+
+#if __GNUC__ >= 4
+#define WARN_UNUSED __attribute__ ((warn_unused_result))
+#else
+#define WARN_UNUSED
+#endif
 
 #endif
 

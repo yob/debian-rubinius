@@ -1,23 +1,34 @@
 #ifndef RBX_SIGNAL_HPP
 #define RBX_SIGNAL_HPP
 
-#include "util/thread.hpp"
 #include "lock.hpp"
+
+#include "gc/root.hpp"
 
 #include <list>
 
 namespace rubinius {
   class VM;
+  class State;
   struct CallFrame;
+  class Thread;
 
-  class SignalHandler : public thread::Thread, Lockable {
-    VM* vm_;
+  Object* handle_tramp(STATE);
+
+  class SignalHandler : public Lockable {
+    VM* target_;
+    VM* self_;
+
     int pending_signals_[NSIG];
     int queued_signals_;
     thread::SpinLock lock_;
     int read_fd_;
     int write_fd_;
     bool exit_;
+
+    TypedRoot<Thread*> thread_;
+
+    std::list<int> watched_signals_;
 
   public:
     enum HandlerType {
@@ -26,20 +37,28 @@ namespace rubinius {
       eCustom
     };
 
-    SignalHandler(VM* vm);
+    SignalHandler(STATE);
 
-    void perform();
+    void perform(State*);
 
-    void add_signal(VM*, int sig, HandlerType type = eCustom);
+    void add_signal(State*, int sig, HandlerType type = eCustom);
     void handle_signal(int sig);
     static void signal_tramp(int sig);
 
-    bool deliver_signals(CallFrame* call_frame);
+    bool deliver_signals(STATE, CallFrame* call_frame);
 
     void reopen_pipes();
-    static void on_fork();
+
+    static void on_fork(STATE, bool full=true);
+    void on_fork_i(STATE, bool full);
+
+    static void pause();
+    void pause_i();
+
     static void shutdown();
     void shutdown_i();
+
+    void run(State*);
   };
 }
 

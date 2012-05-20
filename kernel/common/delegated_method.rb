@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # DelegatedMethod is used to implement Module#define_method
 
@@ -11,6 +13,7 @@ module Rubinius
     end
 
     attr_reader :name
+    attr_reader :receiver
 
     def call(called_object, called_method, *args, &block)
       args.unshift called_object if @pass_self

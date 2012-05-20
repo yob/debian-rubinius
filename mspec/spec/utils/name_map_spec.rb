@@ -1,4 +1,4 @@
-require File.dirname(__FILE__) + '/../spec_helper'
+require 'spec_helper'
 require 'mspec/utils/name_map'
 
 module NameMapSpecs
@@ -74,7 +74,6 @@ describe NameMap, "#class_or_module" do
       DTracer
       NameMap
       OptionParser
-      YAML
     ]
 
     excluded.each do |const|

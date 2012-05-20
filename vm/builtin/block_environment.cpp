@@ -27,6 +27,8 @@
 #include "configuration.hpp"
 #include "on_stack.hpp"
 
+#include "ontology.hpp"
+
 #ifdef RBX_WINDOWS
 #include <malloc.h>
 #endif
@@ -40,10 +42,9 @@
 namespace rubinius {
 
   void BlockEnvironment::init(STATE) {
-    GO(blokenv).set(state->new_class("BlockEnvironment", G(object),
+    GO(blokenv).set(ontology::new_class(state, "BlockEnvironment", G(object),
                                      G(rubinius)));
     G(blokenv)->set_object_type(state, BlockEnvironmentType);
-    G(blokenv)->name(state, state->symbol("Rubinius::BlockEnvironment"));
   }
 
   BlockEnvironment* BlockEnvironment::allocate(STATE) {
@@ -51,16 +52,22 @@ namespace rubinius {
     return env;
   }
 
-  VMMethod* BlockEnvironment::vmmethod(STATE) {
-    return code_->internalize(state);
+  VMMethod* BlockEnvironment::vmmethod(STATE, GCToken gct) {
+    return code_->internalize(state, gct);
   }
 
   Object* BlockEnvironment::invoke(STATE, CallFrame* previous,
-                            BlockEnvironment* const env, Arguments& args,
+                            BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation)
   {
+    VMMethod* vmm = env->code_->backend_method();
 
-    VMMethod* vmm = env->vmmethod(state);
+    if(!vmm) {
+      OnStack<2> os(state, env, args.argument_container_location());
+      GCTokenImpl gct;
+      vmm = env->vmmethod(state, gct);
+    }
+
     if(!vmm) {
       Exception::internal_error(state, previous, "invalid bytecode method");
       return 0;
@@ -119,7 +126,7 @@ namespace rubinius {
           Array* ary = 0;
 
           if(!(ary = try_as<Array>(obj))) {
-            if(RTEST(obj->respond_to(state, state->symbol("to_ary"), Qfalse))) {
+            if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
               obj = obj->send(state, call_frame, state->symbol("to_ary"));
               if(!(ary = try_as<Array>(obj))) {
                 Exception::type_error(state, "to_ary must return an Array", call_frame);
@@ -150,7 +157,7 @@ namespace rubinius {
       const native_int O = DT - R;
 
       // HS is for has splat
-      const native_int HS = vmm->splat_position > 0 ? 1 : 0;
+      const native_int HS = vmm->splat_position >= 0 ? 1 : 0;
 
       // CT is for clamped total
       const native_int CT = HS ? T : MIN(T, DT);
@@ -161,6 +168,10 @@ namespace rubinius {
       // U is for the available # of optional args
       const native_int U = Z - P;
 
+      // PAO is for the post-args offset
+      // PLO is for the post-arg locals offset
+      const native_int PAO = CT - MIN(Z, P);
+      const native_int PLO = M + O + HS;
 
       /* There are 4 types of arguments, illustrated here:
        *    m(a, b=1, *c, d)
@@ -192,11 +203,9 @@ namespace rubinius {
       }
 
       // Phase 2, post args
-      for(native_int i = CT - MIN(Z, P), l = M + O + HS;
-          i < CT;
-          i++)
+      for(native_int i = 0; i < MIN(Z, P); i++)
       {
-        scope->set_local(l, args.get_argument(i));
+        scope->set_local(PLO + i, args.get_argument(PAO + i));
       }
 
       // Phase 3, optionals
@@ -247,10 +256,12 @@ namespace rubinius {
   // Future code will detect hot blocks and queue them in the JIT, whereby the
   // JIT will install a newly minted machine function into ::execute.
   Object* BlockEnvironment::execute_interpreter(STATE, CallFrame* previous,
-                            BlockEnvironment* const env, Arguments& args,
+                            BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation)
   {
-    VMMethod* const vmm = env->vmmethod(state);
+    // Don't use env->vmmethod() because it might lock and the work should already
+    // be done.
+    VMMethod* const vmm = env->code_->backend_method();
 
     if(!vmm) {
       Exception::internal_error(state, previous, "invalid bytecode method");
@@ -259,7 +270,7 @@ namespace rubinius {
 
 #ifdef ENABLE_LLVM
     if(vmm->call_count >= 0) {
-      if(vmm->call_count >= state->shared.config.jit_call_til_compile) {
+      if(vmm->call_count >= state->shared().config.jit_call_til_compile) {
         LLVMState* ls = LLVMState::get(state);
 
         ls->compile_soon(state, env->code(), env, true);
@@ -270,11 +281,7 @@ namespace rubinius {
     }
 #endif
 
-    size_t scope_size = sizeof(StackVariables) +
-                         (vmm->number_of_locals * sizeof(Object*));
-
-    StackVariables* scope =
-      reinterpret_cast<StackVariables*>(alloca(scope_size));
+    StackVariables* scope = ALLOCA_STACKVARIABLES(vmm->number_of_locals);
 
     Module* mod = invocation.module;
     if(!mod) mod = env->module();
@@ -299,7 +306,7 @@ namespace rubinius {
                                        | CallFrame::cBlock;
 
     // TODO: this is a quick hack to process block arguments in 1.9.
-    if(LANGUAGE_19_ENABLED(state) || LANGUAGE_20_ENABLED(state)) {
+    if(!LANGUAGE_18_ENABLED(state)) {
       if(!GenericArguments::call(state, frame, vmm, scope, args, invocation.flags)) {
         return NULL;
       }
@@ -308,23 +315,16 @@ namespace rubinius {
     // Check the stack and interrupts here rather than in the interpreter
     // loop itself.
 
+    GCTokenImpl gct;
+
     if(state->detect_stack_condition(frame)) {
-      if(!state->check_interrupts(frame, frame)) return NULL;
+      if(!state->check_interrupts(gct, frame, frame)) return NULL;
     }
 
-    if(unlikely(state->interrupts.check)) {
-      state->interrupts.checked();
-      if(state->interrupts.perform_gc) {
-        state->interrupts.perform_gc = false;
-        state->collect_maybe(frame);
-      }
-    }
-
-    state->set_call_frame(frame);
-    state->shared.checkpoint(state);
+    state->checkpoint(gct, frame);
 
 #ifdef RBX_PROFILER
-    if(unlikely(state->tooling())) {
+    if(unlikely(state->vm()->tooling())) {
       Module* mod = scope->module();
       if(SingletonClass* sc = try_as<SingletonClass>(mod)) {
         if(Module* ma = try_as<Module>(sc->attached_instance())) {
@@ -364,7 +364,7 @@ namespace rubinius {
         Exception::make_argument_error(state, 1, args.total(),
                                        state->symbol("__block__"));
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
       return NULL;
     }
 
@@ -383,7 +383,7 @@ namespace rubinius {
         Exception::make_argument_error(state, 2, args.total(),
                                        state->symbol("__block__"));
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
       return NULL;
     }
 
@@ -395,15 +395,15 @@ namespace rubinius {
   }
 
 
-  BlockEnvironment* BlockEnvironment::under_call_frame(STATE,
+  BlockEnvironment* BlockEnvironment::under_call_frame(STATE, GCToken gct,
       CompiledMethod* cm, VMMethod* caller,
-      CallFrame* call_frame, size_t index)
+      CallFrame* call_frame)
   {
     OnStack<1> os(state, cm);
 
     state->set_call_frame(call_frame);
 
-    VMMethod* vmm = cm->internalize(state);
+    VMMethod* vmm = cm->internalize(state, gct);
     if(!vmm) {
       Exception::internal_error(state, call_frame, "invalid bytecode method");
       return 0;
@@ -441,7 +441,7 @@ namespace rubinius {
     // inlinable so that this works even with the JIT on.
 
     if(!target) {
-      return Qnil;
+      return cNil;
     }
 
     target->cm->backend_method()->set_no_inline();
@@ -450,7 +450,7 @@ namespace rubinius {
       return target->scope->block();
     }
 
-    return Qnil;
+    return cNil;
   }
 
   void BlockEnvironment::Info::show(STATE, Object* self, int level) {

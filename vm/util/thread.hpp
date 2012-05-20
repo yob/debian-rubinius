@@ -89,11 +89,15 @@ namespace thread {
     // Set the name of the thread. Be sure to call this inside perform
     // so that the system can see the proper thread to set if that is
     // available (OS X only atm)
-    void set_name(const char* name) {
-      name_ = name;
+    static void set_os_name(const char* name) {
 #ifdef HAVE_PTHREAD_SETNAME
       pthread_setname_np(name);
 #endif
+    }
+
+    void set_name(const char* name) {
+      name_ = name;
+      set_os_name(name);
     }
 
     static pthread_t self() {
@@ -147,7 +151,7 @@ namespace thread {
       if(err != 0) {
         if(err == EDEADLK) {
           std::cout << "Thread deadlock in ::join()!\n";
-          abort();   
+          abort();
         }
 
         // Ignore the other errors, since they mean there is no thread
@@ -392,7 +396,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "Mutex ";
       ss << (void*)this;
       return ss.str();
@@ -478,7 +482,7 @@ namespace thread {
     bool try_lock() { return cLocked; }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "NullLock ";
       ss << (void*)this;
       return ss.str();
@@ -505,6 +509,10 @@ namespace thread {
       : native_(0)
     {}
 
+    void init() {
+      native_ = 0;
+    }
+
     void lock() {
       OSSpinLockLock(&native_);
     }
@@ -522,7 +530,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();
@@ -539,23 +547,27 @@ namespace thread {
     typedef StackUnlockGuard<SpinLock> UnlockGuard;
 
   private:
-    int lock_;
+    atomic::atomic_int_t lock_;
 
   public:
     SpinLock()
-      : lock_(1)
+      : lock_(0)
     {}
 
+    void init() {
+      lock_ = 0;
+    }
+
     void lock() {
-      while(!atomic::compare_and_swap(&lock_, 1, 0));
+      while(atomic::test_and_set(&lock_));
     }
 
     void unlock() {
-      lock_ = 1;
+      atomic::test_and_clear(&lock_);
     }
 
     Code try_lock() {
-      if(atomic::compare_and_swap(&lock_, 1, 0)) {
+      if(!atomic::test_and_set(&lock_)) {
         return cLocked;
       }
 
@@ -563,7 +575,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();

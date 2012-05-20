@@ -29,9 +29,9 @@ namespace rubinius {
         i.context().inline_log("inlining")
           << ops.state()->enclosure_name(cm)
           << "#"
-          << ops.state()->symbol_cstr(cm->name())
+          << ops.state()->symbol_debug_str(cm->name())
           << " into "
-          << ops.state()->symbol_cstr(ops.method_name())
+          << ops.state()->symbol_debug_str(ops.method_name())
           << ". primitive " << name << "\n";
       }
     }
@@ -199,13 +199,13 @@ namespace rubinius {
         log("static_fixnum_s_eqq: true");
 
         i.exception_safe();
-        i.set_result(ops.constant(Qtrue));
+        i.set_result(ops.constant(cTrue));
         return true;
       } else if(!kt.unknown_p()) {
         log("static_fixnum_s_eqq: false");
 
         i.exception_safe();
-        i.set_result(ops.constant(Qfalse));
+        i.set_result(ops.constant(cFalse));
         return true;
       }
 
@@ -219,7 +219,7 @@ namespace rubinius {
       Value* cmp = ops.check_if_fixnum(i.arg(0));
 
       Value* imm_value = ops.b().CreateSelect(cmp,
-          ops.constant(Qtrue), ops.constant(Qfalse), "is_fixnum");
+          ops.constant(cTrue), ops.constant(cFalse), "is_fixnum");
 
       i.exception_safe();
       i.set_result(imm_value);
@@ -234,13 +234,13 @@ namespace rubinius {
         log("static_symbol_s_eqq: true");
 
         i.exception_safe();
-        i.set_result(ops.constant(Qtrue));
+        i.set_result(ops.constant(cTrue));
         return true;
       } else if(!kt.unknown_p()) {
         log("static_symbol_s_eqq: false");
 
         i.exception_safe();
-        i.set_result(ops.constant(Qfalse));
+        i.set_result(ops.constant(cFalse));
         return true;
       }
 
@@ -260,7 +260,7 @@ namespace rubinius {
       Value* cmp = ops.b().CreateICmpEQ(masked, sym_tag, "is_symbol");
 
       Value* imm_value = ops.b().CreateSelect(cmp,
-          ops.constant(Qtrue), ops.constant(Qfalse), "is_symbol");
+          ops.constant(cTrue), ops.constant(cFalse), "is_symbol");
 
       i.exception_safe();
       i.set_result(imm_value);
@@ -403,8 +403,8 @@ namespace rubinius {
 
       Value* le = ops.b().CreateSelect(
           performed,
-          ops.constant(Qtrue),
-          ops.constant(Qfalse));
+          ops.constant(cTrue),
+          ops.constant(cFalse));
 
       i.use_send_for_failure();
       i.exception_safe();
@@ -412,7 +412,7 @@ namespace rubinius {
       i.context().leave_inline();
     }
 
-    void float_op(MathOperation op) { 
+    void float_op(MathOperation op) {
       log("float_op");
       i.context().enter_inline();
 
@@ -456,7 +456,7 @@ namespace rubinius {
       perform->moveAfter(convert_block);
       ops.set_block(perform);
 
-      PHINode* rhs = ops.b().CreatePHI(fix_rhs->getType(), "rhs");
+      PHINode* rhs = ops.b().CreatePHI(fix_rhs->getType(), 2, "rhs");
       rhs->addIncoming(unboxed_rhs, unbox_block);
       rhs->addIncoming(fix_rhs, convert_block);
 
@@ -489,7 +489,7 @@ namespace rubinius {
       }
 
       Signature sig(ops.state(), ops.state()->ptr_type("Float"));
-      sig << "VM";
+      sig << "State";
 
       Function* func = sig.function("rbx_float_allocate");
       func->setDoesNotAlias(0, true); // return value
@@ -544,7 +544,7 @@ namespace rubinius {
 
       do_compare->moveAfter(converted_block);
 
-      PHINode* rhs = ops.b().CreatePHI(converted_rhs->getType(), "float_rhs");
+      PHINode* rhs = ops.b().CreatePHI(converted_rhs->getType(), 2, "float_rhs");
       rhs->addIncoming(unboxed_rhs, unboxed_block);
       rhs->addIncoming(converted_rhs, converted_block);
 
@@ -576,7 +576,7 @@ namespace rubinius {
       }
 
       Value* imm_value = ops.b().CreateSelect(performed,
-          ops.constant(Qtrue), ops.constant(Qfalse), "select_bool");
+          ops.constant(cTrue), ops.constant(cFalse), "select_bool");
 
       i.exception_safe();
       i.set_result(imm_value);
@@ -590,8 +590,8 @@ namespace rubinius {
       i.check_recv(klass);
 
       Value* cmp = ops.create_equal(i.recv(), i.arg(0), "identity_equal");
-      Value* imm_value = SelectInst::Create(cmp, ops.constant(Qtrue),
-          ops.constant(Qfalse), "select_bool", ops.current_block());
+      Value* imm_value = SelectInst::Create(cmp, ops.constant(cTrue),
+          ops.constant(cFalse), "select_bool", ops.current_block());
 
       i.exception_safe();
       i.set_result(imm_value);
@@ -607,7 +607,7 @@ namespace rubinius {
       Value* V = i.recv();
 
       Signature sig(ops.state(), "Object");
-      sig << "VM";
+      sig << "State";
       sig << "CallFrame";
       sig << "Object";
 
@@ -624,8 +624,8 @@ namespace rubinius {
       log("type_object_equal");
 
       Value* cmp = ops.create_equal(i.arg(0), i.arg(1), "identity_equal");
-      Value* imm_value = SelectInst::Create(cmp, ops.constant(Qtrue),
-          ops.constant(Qfalse), "select_bool", ops.current_block());
+      Value* imm_value = SelectInst::Create(cmp, ops.constant(cTrue),
+          ops.constant(cFalse), "select_bool", ops.current_block());
 
       i.exception_safe();
       i.set_result(imm_value);
@@ -636,7 +636,7 @@ namespace rubinius {
       i.context().enter_inline();
 
       Signature sig(ops.state(), ops.state()->ptr_type("Object"));
-      sig << "VM";
+      sig << "State";
       sig << "Object";
 
       Value* call_args[] = { ops.vm(), i.recv() };
@@ -655,7 +655,7 @@ namespace rubinius {
        ops.check_class(self, klass, i.failure());
 
        Signature sig(ops.state(), "Class");
-       sig << "VM";
+       sig << "State";
        sig << "Object";
 
        Value* call_args[] = { ops.vm(), self };
@@ -761,9 +761,9 @@ namespace rubinius {
             context_.inline_log("inlining")
               << ops_.state()->enclosure_name(cm)
               << "#"
-              << ops_.state()->symbol_cstr(cm->name())
+              << ops_.state()->symbol_debug_str(cm->name())
               << " into "
-              << ops_.state()->symbol_cstr(ops_.method_name())
+              << ops_.state()->symbol_debug_str(ops_.method_name())
               << ". generic primitive: " << stub_res.name() << "\n";
           }
 
@@ -774,7 +774,7 @@ namespace rubinius {
           std::vector<Value*> call_args;
 
           Signature sig(ops_.state(), "Object");
-          sig << "VM";
+          sig << "State";
           call_args.push_back(ops_.vm());
 
           if(stub_res.pass_callframe()) {
@@ -805,7 +805,7 @@ namespace rubinius {
 
           Value* as_i = ops_.ptrtoint(res);
           Value* icmp = ops_.b().CreateICmpEQ(as_i,
-              ConstantInt::get(ops_.state()->IntPtrTy, reinterpret_cast<intptr_t>(Qundef)));
+              ConstantInt::get(ops_.state()->IntPtrTy, reinterpret_cast<intptr_t>(cUndef)));
 
           use_send_for_failure();
 
@@ -825,11 +825,11 @@ namespace rubinius {
           context_.inline_log("NOT inlining")
             << ops_.state()->enclosure_name(cm)
             << "#"
-            << ops_.state()->symbol_cstr(cm->name())
+            << ops_.state()->symbol_debug_str(cm->name())
             << " into "
-            << ops_.state()->symbol_cstr(ops_.method_name())
+            << ops_.state()->symbol_debug_str(ops_.method_name())
             << ". No fast stub. primitive: "
-            << ops_.state()->symbol_cstr(cm->primitive())
+            << ops_.state()->symbol_debug_str(cm->primitive())
             << "\n";
         }
 

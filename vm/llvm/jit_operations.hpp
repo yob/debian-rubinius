@@ -86,14 +86,14 @@ namespace rubinius {
     llvm::Value* valid_flag_;
 
   public:
-    const llvm::Type* NativeIntTy;
-    const llvm::Type* FixnumTy;
-    const llvm::Type* ObjType;
-    const llvm::Type* ObjArrayTy;
+    llvm::Type* NativeIntTy;
+    llvm::Type* FixnumTy;
+    llvm::Type* ObjType;
+    llvm::Type* ObjArrayTy;
 
     // Frequently used types
-    const llvm::Type* VMTy;
-    const llvm::Type* CallFrameTy;
+    llvm::Type* StateTy;
+    llvm::Type* CallFrameTy;
 
     // Commonly used constants
     llvm::Value* Zero;
@@ -130,7 +130,7 @@ namespace rubinius {
       ObjType = ptr_type("Object");
       ObjArrayTy = llvm::PointerType::getUnqual(ObjType);
 
-      VMTy = ptr_type("VM");
+      StateTy = ptr_type("State");
       CallFrameTy = ptr_type("CallFrame");
 
       Function::arg_iterator input = function_->arg_begin();
@@ -157,7 +157,7 @@ namespace rubinius {
 
     void setup_out_args(int args) {
       b().CreateStore(stack_back(args), out_args_recv_);
-      b().CreateStore(constant(Qnil), out_args_block_);
+      b().CreateStore(constant(cNil), out_args_block_);
       b().CreateStore(cint(args),
                     out_args_total_);
       b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
@@ -256,13 +256,13 @@ namespace rubinius {
 
     // Type resolution and manipulation
     //
-    const llvm::Type* ptr_type(std::string name) {
+    llvm::Type* ptr_type(std::string name) {
       std::string full_name = std::string("struct.rubinius::") + name;
       return llvm::PointerType::getUnqual(
           module_->getTypeByName(full_name.c_str()));
     }
 
-    const llvm::Type* type(std::string name) {
+    llvm::Type* type(std::string name) {
       std::string full_name = std::string("struct.rubinius::") + name;
       return module_->getTypeByName(full_name.c_str());
     }
@@ -272,7 +272,7 @@ namespace rubinius {
     }
 
     Value* upcast(Value* rec, const char* name) {
-      const Type* type = ptr_type(name);
+      Type* type = ptr_type(name);
 
       return b().CreateBitCast(rec, type, "upcast");
     }
@@ -402,13 +402,13 @@ namespace rubinius {
         }
         return type::KnownType::fixnum();
       case NilType:
-        verify_guard(check_is_immediate(obj, Qnil), failure);
+        verify_guard(check_is_immediate(obj, cNil), failure);
         return type::KnownType::nil();
       case TrueType:
-        verify_guard(check_is_immediate(obj, Qtrue), failure);
+        verify_guard(check_is_immediate(obj, cTrue), failure);
         return type::KnownType::true_();
       case FalseType:
-        verify_guard(check_is_immediate(obj, Qfalse), failure);
+        verify_guard(check_is_immediate(obj, cFalse), failure);
         return type::KnownType::false_();
       default:
         {
@@ -424,7 +424,7 @@ namespace rubinius {
           } else if(kt.class_id() == klass->class_id()) {
             if(ls_->config().jit_inline_debug) {
               context().info_log("eliding redundant guard")
-                << "class " << ls_->symbol_cstr(klass->name())
+                << "class " << ls_->symbol_debug_str(klass->module_name())
                 << " (" << klass->class_id() << ")\n";
             }
 
@@ -432,7 +432,11 @@ namespace rubinius {
           }
 
           check_reference_class(obj, klass->class_id(), failure);
-          return type::KnownType::instance(klass->class_id());
+          if(kind_of<SingletonClass>(klass)) {
+            return type::KnownType::singleton_instance(klass->class_id());
+          } else {
+            return type::KnownType::instance(klass->class_id());
+          }
         }
       }
     }
@@ -517,6 +521,12 @@ namespace rubinius {
 
     Value* stack_back_position(int back) {
       return stack_position(-back);
+    }
+
+    void store_stack_back_position(int back, Value* val) {
+      Value* pos = stack_back_position(back);
+      clear_hint(-back);
+      b().CreateStore(val, pos);
     }
 
     Value* stack_objects(int count) {
@@ -649,6 +659,15 @@ namespace rubinius {
       }
     }
 
+    void clear_hint(int back) {
+      int target = sp_ + back;
+      if(hints_.size() > (size_t)target) {
+        hints_[target].hint = 0;
+        hints_[target].metadata = 0;
+        hints_[target].known_type = type::KnownType::unknown();
+      }
+    }
+
     llvm::Value* stack_back(int back) {
       Instruction* I = b().CreateLoad(stack_back_position(back), "stack_load");
       type::KnownType kt = hint_known_type(back);
@@ -696,7 +715,7 @@ namespace rubinius {
       set_block(do_flush);
 
       Signature sig(ls_, "Object");
-      sig << "VM";
+      sig << "State";
       sig << "StackVariables";
 
       Value* call_args[] = { vm_, vars };
@@ -716,7 +735,7 @@ namespace rubinius {
           ObjType, "const_obj");
     }
 
-    Value* constant(void* obj, const Type* type) {
+    Value* constant(void* obj, Type* type) {
       return b().CreateIntToPtr(
           ConstantInt::get(ls_->IntPtrTy, (intptr_t)obj),
           type, "const_of_type");
@@ -746,7 +765,7 @@ namespace rubinius {
 
     // Fixnum manipulations
     //
-    Value* tag_strip(Value* obj, const Type* type = NULL) {
+    Value* tag_strip(Value* obj, Type* type = NULL) {
       if(!type) type = FixnumTy;
 
       Value* i = b().CreatePtrToInt(
@@ -885,7 +904,7 @@ namespace rubinius {
     //
     GetElementPtrInst* create_gep(Value* rec, Value** idx, int count,
                                   const char* name) {
-      return cast<GetElementPtrInst>(b().CreateGEP(rec, idx, idx+count, name));
+      return cast<GetElementPtrInst>(b().CreateGEP(rec, ArrayRef<Value*>(idx, count), name));
     }
 
     LoadInst* create_load(Value* ptr, const char* name = "") {
@@ -927,7 +946,7 @@ namespace rubinius {
 
     void write_barrier(Value* obj, Value* val) {
       Signature wb(ls_, ObjType);
-      wb << VMTy;
+      wb << StateTy;
       wb << ObjType;
       wb << ObjType;
 
@@ -957,7 +976,7 @@ namespace rubinius {
       sig.call("rbx_jit_debug_spot", call_args, 1, "", b());
     }
 
-    Value* gc_literal(Object* obj, const Type* type) {
+    Value* gc_literal(Object* obj, Type* type) {
       jit::GCLiteral* lit = method_info_.runtime_data()->new_literal(obj);
       Value* ptr = constant(lit->address_of_object(), llvm::PointerType::getUnqual(type));
       return b().CreateLoad(ptr, "gc_literal");

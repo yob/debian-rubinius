@@ -10,24 +10,27 @@ extern "C" {
   const char *rb_id2name(ID sym) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    return reinterpret_cast<Symbol*>(sym)->c_str(env->state());
+    return reinterpret_cast<Symbol*>(sym)->cpp_str(env->state()).c_str();
   }
 
   int rb_is_const_id(ID sym) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    return RBX_RTEST(reinterpret_cast<Symbol*>(sym)->is_constant_p(env->state())) ? Qtrue : Qfalse;
+    Object* p = reinterpret_cast<Symbol*>(sym)->is_constant_p(env->state());
+    return CBOOL(p) ? Qtrue : Qfalse;
   }
 
   int rb_is_instance_id(ID sym) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    return RBX_RTEST(reinterpret_cast<Symbol*>(sym)->is_ivar_p(env->state())) ? Qtrue : Qfalse;
+    Object* p = reinterpret_cast<Symbol*>(sym)->is_ivar_p(env->state());
+    return CBOOL(p) ? Qtrue : Qfalse;
   }
 
   int rb_is_class_id(ID sym) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    return RBX_RTEST(reinterpret_cast<Symbol*>(sym)->is_cvar_p(env->state())) ? Qtrue : Qfalse;
+    Object* p = reinterpret_cast<Symbol*>(sym)->is_cvar_p(env->state());
+    return CBOOL(p) ? Qtrue : Qfalse;
   }
 }

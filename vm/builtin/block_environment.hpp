@@ -9,7 +9,6 @@ namespace rubinius {
   class CompiledMethod;
   class VariableScope;
   struct CallFrame;
-  class Message;
   class VMMethod;
   class VMExecutable;
 
@@ -53,20 +52,20 @@ namespace rubinius {
     /* interface */
 
     static void init(STATE);
-    VMMethod* vmmethod(STATE);
+    VMMethod* vmmethod(STATE, GCToken gct);
 
     // Rubinius.primitive :blockenvironment_allocate
     static BlockEnvironment* allocate(STATE);
 
     static Object* invoke(STATE, CallFrame* previous,
-                            BlockEnvironment* const env, Arguments& args,
+                            BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation);
 
-    static BlockEnvironment* under_call_frame(STATE, CompiledMethod* cm,
-      VMMethod* caller, CallFrame* call_frame, size_t index);
+    static BlockEnvironment* under_call_frame(STATE, GCToken gct, CompiledMethod* cm,
+      VMMethod* caller, CallFrame* call_frame);
 
     static Object* execute_interpreter(STATE, CallFrame* previous,
-                            BlockEnvironment* const env, Arguments& args,
+                            BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation);
 
     Object* call(STATE, CallFrame* call_frame, Arguments& args, int flags=0);

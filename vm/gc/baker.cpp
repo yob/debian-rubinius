@@ -16,6 +16,10 @@
 #include "capi/handle.hpp"
 #include "capi/tag.hpp"
 
+#ifdef ENABLE_LLVM
+#include "llvm/state.hpp"
+#endif
+
 namespace rubinius {
 
   /**
@@ -66,7 +70,7 @@ namespace rubinius {
 
     if(!obj->reference_p()) return obj;
 
-    if(obj->zone() != YoungObjectZone) return obj;
+    if(!obj->young_object_p()) return obj;
 
     if(obj->forwarded_p()) return obj->forward();
 
@@ -105,7 +109,7 @@ namespace rubinius {
     Object* iobj = next->next_unscanned(object_memory_->state());
 
     while(iobj) {
-      assert(iobj->zone() == YoungObjectZone);
+      assert(iobj->young_object_p());
       if(!iobj->forwarded_p()) scan_object(iobj);
       iobj = next->next_unscanned(object_memory_->state());
     }
@@ -151,7 +155,7 @@ namespace rubinius {
       // unremember_object throws a NULL in to remove an object
       // so we don't have to compact the set in unremember
       if(tmp) {
-        // assert(tmp->zone == MatureObjectZone);
+        // assert(tmp->mature_object_p());
         // assert(!tmp->forwarded_p());
 
         // Remove the Remember bit, since we're clearing the set.
@@ -237,7 +241,7 @@ namespace rubinius {
           ++i) {
         capi::Handle** loc = *i;
         if(capi::Handle* hdl = *loc) {
-          if(!CAPI_REFERENCE_P(hdl)) continue;
+          if(!REFERENCE_P(hdl)) continue;
           if(hdl->valid_p()) {
             Object* obj = hdl->object();
             if(obj && obj->reference_p() && obj->young_object_p()) {
@@ -249,6 +253,10 @@ namespace rubinius {
         }
       }
     }
+
+#ifdef ENABLE_LLVM
+    if(LLVMState* ls = data.llvm_state()) ls->gc_scan(this);
+#endif
 
     // Handle all promotions to non-young space that occurred.
     handle_promotions();
@@ -266,7 +274,8 @@ namespace rubinius {
     // alive (and thus promoted).
     handle_promotions();
 
-    assert(fully_scanned_p());
+    if(!promoted_stack_.empty()) rubinius::bug("promote stack has elements!");
+    if(!fully_scanned_p()) rubinius::bug("more young refs");
 
     // Check any weakrefs and replace dead objects with nil
     clean_weakrefs(true);
@@ -317,7 +326,9 @@ namespace rubinius {
 
   }
 
-  void BakerGC::handle_promotions() {
+  bool BakerGC::handle_promotions() {
+    if(promoted_stack_.empty() && fully_scanned_p()) return false;
+
     while(!promoted_stack_.empty() || !fully_scanned_p()) {
       while(!promoted_stack_.empty()) {
         Object* obj = promoted_stack_.back();
@@ -328,6 +339,8 @@ namespace rubinius {
 
       copy_unscanned();
     }
+
+    return true;
   }
 
   void BakerGC::check_finalize() {
@@ -365,7 +378,8 @@ namespace rubinius {
           if(!i->object->forwarded_p()) {
             // Run C finalizers now rather that queue them.
             if(i->finalizer) {
-              (*i->finalizer)(state(), i->object);
+              State state_obj(state());
+              (*i->finalizer)(&state_obj, i->object);
               i->status = FinalizeObject::eFinalized;
               remove = true;
             } else {

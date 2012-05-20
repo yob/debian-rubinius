@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
 
   # Names of local variables at point of call (including evaled)
@@ -11,18 +13,20 @@ module Kernel
     while scope
       if scope.method.local_names
         scope.method.local_names.each do |name|
-          name = name.to_s
           locals << name
         end
       end
 
-      # the names of dynamic locals is now handled by the compiler
-      # and thusly local_names has them.
+      if dyn = scope.dynamic_locals
+        dyn.keys.each do |name|
+          locals << name.to_s unless locals.include?(name.to_s)
+        end
+      end
 
       scope = scope.parent
     end
 
-    locals
+    Rubinius.convert_to_names(locals)
   end
   module_function :local_variables
 
@@ -33,7 +37,9 @@ module Kernel
       Rubinius::VariableScope.of_sender,
       Rubinius::CompiledMethod.of_sender,
       Rubinius::StaticScope.of_sender,
-      self)
+      self,
+      Rubinius::Location.of_closest_ruby_method
+    )
   end
   module_function :binding
 
@@ -41,19 +47,10 @@ module Kernel
   #
   def eval(string, binding=nil, filename=nil, lineno=1)
     filename = StringValue(filename) if filename
-    lineno = Type.coerce_to lineno, Fixnum, :to_i
+    lineno = Rubinius::Type.coerce_to lineno, Fixnum, :to_i
 
     if binding
-      if binding.kind_of? Proc
-        binding = binding.binding
-      elsif binding.respond_to? :to_binding
-        binding = binding.to_binding
-      end
-
-      unless binding.kind_of? Binding
-        raise ArgumentError, "unknown type of binding"
-      end
-
+      binding = Rubinius::Type.coerce_to_binding binding
       filename ||= binding.static_scope.active_path
     else
       binding = Binding.setup(Rubinius::VariableScope.of_sender,
@@ -64,14 +61,17 @@ module Kernel
       filename ||= "(eval)"
     end
 
-    binding.static_scope = binding.static_scope.dup
+    existing_scope = binding.static_scope
+    binding.static_scope = existing_scope.dup
 
     be = Rubinius::Compiler.construct_block string, binding,
                                             filename, lineno
 
     be.set_eval_binding binding
 
-    be.call_on_instance(binding.self)
+    result = be.call_on_instance(binding.self)
+    binding.static_scope = existing_scope
+    result
   end
   module_function :eval
   private :eval

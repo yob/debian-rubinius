@@ -35,17 +35,21 @@
 
 #include "vm/object_utils.hpp"
 #include "vm/on_stack.hpp"
+#include "vm/configuration.hpp"
 
 #include "capi/handle.hpp"
+
+#include "ontology.hpp"
 
 #include "windows_compat.h"
 
 namespace rubinius {
   void IO::init(STATE) {
-    GO(io).set(state->new_class("IO", G(object)));
+    GO(io).set(ontology::new_class(state, "IO", G(object)));
     G(io)->set_object_type(state, IOType);
 
-    GO(iobuffer).set(state->new_class("InternalBuffer", G(object), G(io)));
+    GO(iobuffer).set(ontology::new_class(state, "InternalBuffer",
+          G(object), G(io)));
     G(iobuffer)->set_object_type(state, IOBufferType);
   }
 
@@ -70,12 +74,12 @@ namespace rubinius {
     }
 
     io->ibuffer(state, IOBuffer::create(state));
-    io->eof(state, Qfalse);
+    io->eof(state, cFalse);
     io->lineno(state, Fixnum::from(0));
 
     // Don't bother to add finalization for stdio
     if(fd >= 3) {
-      state->om->needs_finalization(io, (FinalizerFunction)&IO::finalize);
+      state->memory()->needs_finalization(io, (FinalizerFunction)&IO::finalize);
     }
 
     return io;
@@ -86,26 +90,26 @@ namespace rubinius {
     io->descriptor(state, nil<Fixnum>());
     io->mode(state, nil<Fixnum>());
     io->ibuffer(state, IOBuffer::create(state));
-    io->eof(state, Qfalse);
+    io->eof(state, cFalse);
     io->lineno(state, Fixnum::from(0));
 
     // Ensure the instance's class is set (i.e. for subclasses of IO)
     io->klass(state, as<Class>(self));
 
-    state->om->needs_finalization(io, (FinalizerFunction)&IO::finalize);
+    state->memory()->needs_finalization(io, (FinalizerFunction)&IO::finalize);
 
     return io;
   }
 
   Fixnum* IO::open(STATE, String* path, Fixnum* mode, Fixnum* perm) {
-    int fd = ::open(path->c_str(state), mode->to_native(), perm->to_native());
+    int fd = ::open(path->c_str_null_safe(state), mode->to_native(), perm->to_native());
     return Fixnum::from(fd);
   }
 
 
   namespace {
     /** Utility function used by IO::select, returns highest descriptor. */
-    static inline native_int fd_set_from_array(VM* state,
+    static inline native_int fd_set_from_array(State* state,
                                Object* maybe_descriptors, fd_set* set)
     {
       if(NULL == set) {
@@ -128,6 +132,10 @@ namespace rubinius {
         }
 
         native_int descriptor = io->to_fd();
+
+        // 1024 is selec't limit. If we try to set a value higher, it corrupts
+        // memory. YAY FD_SET!
+        if(descriptor >= FD_SETSIZE) return -2;
         highest = descriptor > highest ? descriptor : highest;
 
         if(descriptor >= 0) FD_SET((int_fd_t)descriptor, set);
@@ -137,7 +145,7 @@ namespace rubinius {
     }
 
     /** Utility function used by IO::select, returns Array of IOs that were set. */
-    static inline Array* reject_unset_fds(VM* state,
+    static inline Array* reject_unset_fds(State* state,
                            Object* maybe_originals, fd_set* set)
     {
       if(NULL == set) return Array::create(state, 0);
@@ -196,11 +204,14 @@ namespace rubinius {
 
     /* Build the sets, track the highest descriptor number. These handle NULLs */
     highest = fd_set_from_array(state, readables, maybe_read_set);
+    if(highest == -2) return Primitives::failure();
 
     candidate = fd_set_from_array(state, writables, maybe_write_set);
+    if(candidate == -2) return Primitives::failure();
     highest = candidate > highest ? candidate : highest;
 
     candidate = fd_set_from_array(state, errorables, maybe_error_set);
+    if(candidate == -2) return Primitives::failure();
     highest = candidate > highest ? candidate : highest;
 
     struct timeval future;
@@ -224,8 +235,8 @@ namespace rubinius {
 
     /* And the main event, pun intended */
     retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state, calling_environment);
@@ -235,8 +246,8 @@ namespace rubinius {
                                                   maybe_limit);
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     if(events == -1) {
       if(errno == EAGAIN || errno == EINTR) {
@@ -257,7 +268,7 @@ namespace rubinius {
     }
 
     /* Timeout expired */
-    if(events == 0) return Qnil;
+    if(events == 0) return cNil;
 
     /* Build the results. */
     Array* output = Array::create(state, 3);
@@ -287,13 +298,13 @@ namespace rubinius {
       ibuf->reset(state);
     }
 
-    return Qtrue;
+    return cTrue;
   }
 
   Object* IO::reopen_path(STATE, String* path, Fixnum* mode) {
     native_int cur_fd   = to_fd();
 
-    int other_fd = ::open(path->c_str(state), mode->to_native(), 0666);
+    int other_fd = ::open(path->c_str_null_safe(state), mode->to_native(), 0666);
 
     if(other_fd == -1) {
       Exception::errno_error(state, "reopen");
@@ -314,7 +325,7 @@ namespace rubinius {
       ibuf->reset(state);
     }
 
-    return Qtrue;
+    return cTrue;
   }
 
   Object* IO::ensure_open(STATE) {
@@ -328,7 +339,7 @@ namespace rubinius {
       Exception::io_error(state, "shutdown stream");
     }
 
-    return Qnil;
+    return cNil;
   }
 
   Object* IO::connect_pipe(STATE, IO* lhs, IO* rhs) {
@@ -342,7 +353,7 @@ namespace rubinius {
 
     lhs->mode(state, Fixnum::from(O_RDONLY));
     rhs->mode(state, Fixnum::from(O_WRONLY));
-    return Qtrue;
+    return cTrue;
   }
 
   Integer* IO::seek(STATE, Integer* amount, Fixnum* whence) {
@@ -373,7 +384,7 @@ namespace rubinius {
 
     // Already closed, ignore.
     if(desc == -1) {
-      return Qnil;
+      return cNil;
     }
 
     // Invalid descriptor no matter what.
@@ -389,7 +400,7 @@ namespace rubinius {
         if(!hdl->rio_close()) {
           Exception::errno_error(state);
         }
-        return Qnil;
+        return cNil;
       }
     }
 
@@ -407,7 +418,7 @@ namespace rubinius {
       Exception::system_call_error(state, message.str());
     }
 
-    return Qnil;
+    return cNil;
   }
 
   /**
@@ -469,10 +480,6 @@ namespace rubinius {
     mode(state, Fixnum::from(acc_mode));
   }
 
-  void IO::unsafe_set_descriptor(native_int fd) {
-    descriptor_ = Fixnum::from(fd);
-  }
-
   void IO::force_read_only(STATE) {
     int m = mode_->to_native();
     mode(state, Fixnum::from((m & ~O_ACCMODE) | O_RDONLY));
@@ -490,7 +497,7 @@ namespace rubinius {
 
     // Flush the buffer to disk if it's not write sync'd
     if(IOBuffer* buf = try_as<IOBuffer>(io->ibuffer())) {
-      if(!RTEST(buf->write_synced())) {
+      if(!CBOOL(buf->write_synced())) {
         native_int start = buf->start()->to_native();
         native_int used = buf->used()->to_native();
         native_int bytes = used - start;
@@ -533,30 +540,45 @@ namespace rubinius {
         }
       }
 
-      ::close(fd);
+      if (LANGUAGE_18_ENABLED(state)) {
+        ::close(fd);
+      } else if (io->autoclose_ != cFalse) {
+        ::close(fd);
+      }
     }
   }
 
-  Object* IO::sysread(STATE, Fixnum* number_of_bytes, CallFrame* calling_environment) {
-    std::size_t count = number_of_bytes->to_ulong();
-    String* buffer = String::create_pinned(state, number_of_bytes);
+#define STACK_BUF_SZ 8096
+
+  Object* IO::sysread(STATE, Fixnum* number_of_bytes,
+                             CallFrame* calling_environment)
+  {
+    char stack_buf[STACK_BUF_SZ];
+    char* malloc_buf = 0;
+
+    char* buf = stack_buf;
+
+    size_t count = number_of_bytes->to_ulong();
+
+    if(count > STACK_BUF_SZ) {
+      malloc_buf = (char*)malloc(count);
+      buf = malloc_buf;
+    }
 
     ssize_t bytes_read;
     native_int fd = descriptor()->to_native();
 
-    OnStack<1> variables(state, buffer);
-
   retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state, calling_environment);
-      bytes_read = ::read(fd, buffer->byte_address(), count);
+      bytes_read = ::read(fd, buf, count);
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     if(bytes_read == -1) {
       if(errno == EINTR) {
@@ -566,19 +588,16 @@ namespace rubinius {
         Exception::errno_error(state, "read(2) failed");
       }
 
-      buffer->unpin();
-
+      if(malloc_buf) free(malloc_buf);
       return NULL;
     }
 
-    buffer->unpin();
+    if(bytes_read == 0) return cNil;
 
-    if(bytes_read == 0) {
-      return Qnil;
-    }
+    String* str = String::create(state, buf, bytes_read);
+    if(malloc_buf) free(malloc_buf);
 
-    buffer->num_bytes(state, Fixnum::from(bytes_read));
-    return buffer;
+    return str;
   }
 
   Object* IO::read_if_available(STATE, Fixnum* number_of_bytes) {
@@ -592,7 +611,7 @@ namespace rubinius {
     int res = ::select(fd+1, &set, 0, 0, &tv);
 
     if(res == 0) {
-      Exception::errno_error(state, "no data ready", EAGAIN);
+      Exception::errno_eagain_error(state, "no data ready");
       return 0;
     } else if(res <= 0) {
       Exception::errno_error(state, "read(2) failed");
@@ -617,15 +636,15 @@ namespace rubinius {
       Exception::errno_error(state, "read(2) failed");
     }
 
-    if(bytes_read == 0) return Qnil;
+    if(bytes_read == 0) return cNil;
 
     buffer->num_bytes(state, Fixnum::from(bytes_read));
     return buffer;
   }
 
   Object* IO::write(STATE, String* buf, CallFrame* call_frame) {
-    native_int left = buf->size();
-    native_int data_size = as<CharArray>(buf->data())->size();
+    native_int left = buf->byte_size();
+    native_int data_size = as<ByteArray>(buf->data())->size();
     if(unlikely(left > data_size)) {
       left = data_size;
     }
@@ -673,36 +692,53 @@ namespace rubinius {
       return NULL;
     }
 
-    return Integer::from(state, buf->size() - left);
+    return Integer::from(state, buf->byte_size() - left);
   }
 
   Object* IO::write_nonblock(STATE, String* buf) {
     set_nonblock(state);
 
-    native_int buf_size = buf->size();
-    native_int data_size = as<CharArray>(buf->data())->size();
+    native_int buf_size = buf->byte_size();
+    native_int data_size = as<ByteArray>(buf->data())->size();
     if(unlikely(buf_size > data_size)) {
       buf_size = data_size;
     }
 
-    int n = ::write(descriptor_->to_native(), buf->c_str(state), buf_size);
+    // We can use byte_address() here since we use an explicit size
+    int n = ::write(descriptor_->to_native(), buf->byte_address(), buf_size);
     if(n == -1) Exception::errno_error(state, "write_nonblock");
     return Fixnum::from(n);
   }
 
-  Object* IO::blocking_read(STATE, Fixnum* bytes) {
-    String* str = String::create(state, bytes);
+  Object* IO::advise(STATE, Symbol* advice_name, Integer* offset, Integer* len) {
+#ifdef HAVE_POSIX_FADVISE
+    int advice = 0;
 
-    ssize_t cnt = ::read(this->to_fd(), str->byte_address(), bytes->to_native());
-    if(cnt == -1) {
-      Exception::errno_error(state);
-    } else if(cnt == 0) {
-      return Qnil;
+    if (advice_name == state->symbol("normal")) {
+      advice = POSIX_FADV_NORMAL;
+    } else if (advice_name == state->symbol("sequential")) {
+      advice = POSIX_FADV_SEQUENTIAL;
+    } else if (advice_name == state->symbol("random")) {
+      advice = POSIX_FADV_RANDOM;
+    } else if (advice_name == state->symbol("willneed")) {
+      advice = POSIX_FADV_WILLNEED;
+    } else if (advice_name == state->symbol("dontneed")) {
+      advice = POSIX_FADV_DONTNEED;
+    } else if (advice_name == state->symbol("noreuse")) {
+      advice = POSIX_FADV_NOREUSE;
+    } else {
+      return Primitives::failure();
     }
 
-    str->num_bytes(state, Fixnum::from(cnt));
+    int erno = posix_fadvise(to_fd(), offset->to_long_long(), len->to_long_long(), advice);
 
-    return str;
+    if (erno) {
+      Exception::errno_error(state, "posfix_fadvise(2) failed", erno);
+    }
+
+#endif
+
+    return cNil;
   }
 
   Array* ipaddr(STATE, struct sockaddr* addr, socklen_t len) {
@@ -790,8 +826,8 @@ namespace rubinius {
     native_int t = type->to_native();
 
   retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state, calling_environment);
@@ -801,8 +837,8 @@ namespace rubinius {
                             (struct sockaddr*)buf, &alen);
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     buffer->unpin();
 
@@ -830,7 +866,7 @@ namespace rubinius {
       if(alen && alen != sizeof(buf)) {
         ary->set(state, 1, ipaddr(state, (struct sockaddr*)buf, alen));
       } else {
-        ary->set(state, 1, Qnil);
+        ary->set(state, 1, cNil);
       }
       break;
 #ifndef RBX_WINDOWS
@@ -851,14 +887,14 @@ namespace rubinius {
     native_int fd = to_fd();
 
     if(op == state->symbol("tty?")) {
-      return isatty(fd) ? Qtrue : Qfalse;
+      return isatty(fd) ? cTrue : cFalse;
 #ifndef RBX_WINDOWS
     } else if(op == state->symbol("ttyname")) {
       return String::create(state, ttyname(fd));
 #endif
     }
 
-    return Qnil;
+    return cNil;
   }
 
   // Stole/ported from 1.8.7. The system fnmatch doesn't support
@@ -1045,10 +1081,10 @@ failed: /* try next '*' position */
 
   Object* IO::fnmatch(STATE, String* pattern, String* path, Fixnum* flags) {
     if(mri_fnmatch(pattern->c_str(state), path->c_str(state), flags->to_native())) {
-      return Qtrue;
+      return cTrue;
     }
 
-    return Qfalse;
+    return cFalse;
   }
 
 
@@ -1062,8 +1098,8 @@ failed: /* try next '*' position */
     socklen_t sock_len = sizeof(socka);
 
   retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state, calling_environment);
@@ -1071,8 +1107,8 @@ failed: /* try next '*' position */
       set = true;
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     if(new_fd == -1) {
       if(errno == EAGAIN || errno == EINTR) {
@@ -1084,7 +1120,7 @@ failed: /* try next '*' position */
       return NULL;
     }
 
-    if(!set) return Qnil;
+    if(!set) return cNil;
     return Fixnum::from(new_fd);
   }
 
@@ -1130,7 +1166,7 @@ failed: /* try next '*' position */
       return Primitives::failure();
     }
 
-    return Qnil;
+    return cNil;
 #endif
   }
 
@@ -1174,16 +1210,16 @@ failed: /* try next '*' position */
     int code = -1;
 
     retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state);
       code = recvmsg(read_fd, &msg, 0);
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     if(code == -1) {
       if(errno == EAGAIN || errno == EINTR) {
@@ -1224,15 +1260,11 @@ failed: /* try next '*' position */
 /* IOBuffer methods */
   IOBuffer* IOBuffer::create(STATE, size_t bytes) {
     IOBuffer* buf = state->new_object<IOBuffer>(G(iobuffer));
-    buf->storage(state, CharArray::create(state, bytes));
-    buf->channel(state, Channel::create(state));
+    buf->storage(state, ByteArray::create(state, bytes));
     buf->total(state, Fixnum::from(bytes));
     buf->used(state, Fixnum::from(0));
     buf->reset(state);
-    buf->write_synced(state, Qtrue);
-
-    // Prime the channel
-    buf->channel()->send(state, Qtrue);
+    buf->write_synced(state, cTrue);
 
     return buf;
   }
@@ -1242,10 +1274,10 @@ failed: /* try next '*' position */
   }
 
   Object* IOBuffer::unshift(STATE, String* str, Fixnum* start_pos) {
-    write_synced(state, Qfalse);
+    write_synced(state, cFalse);
     native_int start_pos_native = start_pos->to_native();
-    native_int str_size = str->size();
-    native_int data_size = as<CharArray>(str->data())->size();
+    native_int str_size = str->byte_size();
+    native_int data_size = as<ByteArray>(str->data())->size();
     if(unlikely(str_size > data_size)) {
       str_size = data_size;
     }
@@ -1276,16 +1308,16 @@ failed: /* try next '*' position */
     if(self->left() < count) count = self->left();
 
   retry:
-    state->interrupt_with_signal();
-    state->thread->sleep(state, Qtrue);
+    state->vm()->interrupt_with_signal();
+    state->vm()->thread->sleep(state, cTrue);
 
     {
       GCIndependent guard(state, calling_environment);
       bytes_read = read(fd, temp_buffer, count);
     }
 
-    state->thread->sleep(state, Qfalse);
-    state->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
+    state->vm()->clear_waiter();
 
     if(bytes_read == -1) {
       switch(errno) {
@@ -1321,7 +1353,7 @@ failed: /* try next '*' position */
   void IOBuffer::reset(STATE) {
     used(state, Fixnum::from(0));
     start(state, Fixnum::from(0));
-    eof(state, Qfalse);
+    eof(state, cFalse);
   }
 
   void IOBuffer::read_bytes(STATE, size_t bytes) {

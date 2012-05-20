@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 #--
 # Be very careful about calling raise in here! Thread has its own
 # raise which, if you're calling raise, you probably don't want. Use
@@ -11,7 +13,7 @@ class Thread
   # Implementation note: ideally, the recursive_objects
   # lookup table would be different per method call.
   # Currently it doesn't cause problems, but if ever
-  # a method :foo calls a method :bar which could 
+  # a method :foo calls a method :bar which could
   # recurse back to :foo, it could require making
   # the tables independant.
 
@@ -95,7 +97,7 @@ class Thread
 
     if rec[:__detect_outermost_recursion__]
       if detect_recursion(obj, paired_obj, &block)
-        raise InnerRecursionDetected.new
+        raise InnerRecursionDetected
       end
       false
     else
@@ -112,6 +114,21 @@ class Thread
       ensure
         rec.delete :__detect_outermost_recursion__
       end
+    end
+  end
+
+  def randomizer
+    @randomizer ||= Rubinius::Randomizer.new
+  end
+
+  def backtrace
+    mri_backtrace.map do |tup|
+      cm = tup[0]
+      line = tup[1]
+      is_block = tup[2]
+      name = tup[3]
+
+      "#{cm.active_path}:#{line}:in `#{name}'"
     end
   end
 

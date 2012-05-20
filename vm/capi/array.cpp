@@ -48,7 +48,7 @@ namespace rubinius {
      */
     void flush_cached_rarray(NativeMethodEnvironment* env, Handle* handle) {
       if(handle->is_rarray()) {
-        Array* array = as<Array>(handle->object());
+        Array* array = c_as<Array>(handle->object());
         Tuple* tuple = array->tuple();
         RArray* rarray = handle->as_rarray(env);
 
@@ -153,7 +153,7 @@ namespace rubinius {
         flush_ = flush_cached_rarray;
         update_ = update_cached_rarray;
 
-        env->state()->shared.make_handle_cached(env->state(), this);
+        env->state()->vm()->shared.make_handle_cached(env->state(), this);
       }
 
       return as_.rarray;
@@ -325,7 +325,7 @@ extern "C" {
     return env->get_handle(obj);
   }
 
-  size_t rb_ary_size(VALUE self) {
+  long rb_ary_size(VALUE self) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     return capi_get_array(env, self)->size();
@@ -380,7 +380,7 @@ extern "C" {
 
     // Minor optimization.
     if(ifunc == rb_each && kind_of<Array>(env->get_object(ary))) {
-      for(size_t i = 0; i < rb_ary_size(ary); i++) {
+      for(long i = 0; i < rb_ary_size(ary); i++) {
         (*cb)(rb_ary_entry(ary, i), cb_data, Qnil);
       }
 
@@ -418,7 +418,7 @@ extern "C" {
       return (*func)(h_obj, h_arg);
     }
 
-    rectbl->store(state, id, RBX_Qtrue);
+    rectbl->store(state, id, cTrue);
 
     VALUE ret = Qnil;
 

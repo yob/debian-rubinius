@@ -8,6 +8,9 @@
 #include "vm.hpp"
 #include "vm/object_utils.hpp"
 #include "primitives.hpp"
+#include "configuration.hpp"
+
+#include "ontology.hpp"
 
 #include <gdtoa.h>
 
@@ -18,10 +21,12 @@
 
 #include "missing/math.h"
 
+#include "util/local_buffer.hpp"
+
 namespace rubinius {
 
   void Float::init(STATE) {
-    GO(floatpoint).set(state->new_class("Float", G(numeric)));
+    GO(floatpoint).set(ontology::new_class(state, "Float", G(numeric)));
     G(floatpoint)->set_object_type(state, FloatType);
 
     G(floatpoint)->set_const(state, "RADIX",      Fixnum::from(FLT_RADIX));
@@ -39,7 +44,7 @@ namespace rubinius {
   }
 
   Float* Float::create(STATE, double val) {
-    Float* flt = state->new_struct<Float>(G(floatpoint));
+    Float* flt = state->vm()->new_struct<Float>(G(floatpoint));
     flt->val = val;
     return flt;
   }
@@ -62,6 +67,133 @@ namespace rubinius {
     /* FIXME this used to just return value, but this wants to coerce, so
      * we give a default float value of 0.0 back instead. */
     return Float::create(state, 0.0);
+  }
+
+  Float* Float::from_cstr(STATE, const char* str, Object* strict) {
+    // Skip leading whitespace and underscores.
+    while(isspace(*str) || *str == '_') {
+      if(*str == '_') {
+        // Leading underscores are not allowed in strict mode.
+        if(strict == cTrue) {
+          return nil<Float>();
+        }
+
+        // And they return 0.0 in Ruby 1.9.
+        if(!LANGUAGE_18_ENABLED(state)) {
+          return Float::create(state, 0.0);
+        }
+      }
+
+      str++;
+    }
+
+    LocalBuffer b(strlen(str) + 1);
+    char* buffer = (char*)b.buffer;
+    char* p = buffer;
+    char prev = '\0';
+
+    while(*str) {
+      // Remove underscores between digits.
+      if(*str == '_') {
+        if(strict == cTrue) {
+          // Underscores are only allowed to be used as separators in strict mode.
+          char next = *++str;
+
+          if(!isdigit(prev) || !isdigit(next)) {
+            return nil<Float>();
+          }
+        } else {
+          // Else eat up all the underscores.
+          while(*++str == '_');
+          continue;
+        }
+      }
+
+      // Ensure there is a digit to the right side of the decimal in strict mode.
+      if(*str == '.' && !isdigit(str[1]) && strict == cTrue)  {
+        return nil<Float>();
+      }
+
+      prev = *str++;
+      *p++ = prev;
+    }
+
+    *p = '\0';
+    p = buffer;
+
+    // Check for the hex prefix.
+    if(p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+      if(strict == cTrue) {
+        // Only allow hex in Ruby > 1.8.
+        if(LANGUAGE_18_ENABLED(state)) {
+          return nil<Float>();
+        }
+      } else {
+        // Disallow hex values when not in strict mode.
+        return Float::create(state, 0.0);
+      }
+    }
+
+    // Check for special values like +/-Inf[inity] and NaN.
+    const char* svalue;
+    bool special = true;
+
+    // Ignore number signs.
+    if(*p == '+' || *p == '-') {
+      p++;
+    }
+
+    if(*p == 'I' || *p == 'i') {
+      svalue = "inf";
+    } else if(*p == 'N' || *p == 'n') {
+      svalue = "nan";
+    } else {
+      special = false;
+    }
+
+    // The string just might be either Infinity or NaN.
+    if(special) {
+      // Case-insensitive string comparison for the special value.
+      // Only check the next two characters.
+      while(*++svalue && *++p) {
+        if(tolower(*p) != *svalue) {
+          special = false;
+          break;
+        }
+      }
+
+      // Disallow if the string is indeed a special value.
+      if(special) {
+        if(strict == cTrue) {
+          return nil<Float>();
+        } else {
+          return Float::create(state, 0.0);
+        }
+      }
+    }
+
+    p = buffer;
+
+    char *rest;
+    double value = ruby_strtod(p, &rest);
+
+    if(strict == cTrue) {
+      // Disallow empty strings in strict mode.
+      if(p == rest) {
+        return nil<Float>();
+      }
+
+      // Only trailing spaces are allowed in strict mode.
+      while(*rest) {
+        if(!isspace(*rest)) {
+          return nil<Float>();
+        }
+
+        rest++;
+      }
+    }
+
+    return Float::create(state, value);
   }
 
   Float* Float::add(STATE, Float* other) {
@@ -88,7 +220,10 @@ namespace rubinius {
     return Float::create(state, this->val * Float::coerce(state, other)->val);
   }
 
-  Float* Float::fpow(STATE, Float* other) {
+  Object* Float::fpow(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED(state) && this->val < 0 && other->val != round(other->val)) {
+      return Primitives::failure();
+    }
     return Float::create(state, pow(this->val, other->val));
   }
 
@@ -105,6 +240,12 @@ namespace rubinius {
   }
 
   Float* Float::mod(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      if(other->val == 0.0) {
+        Exception::zero_division_error(state, "divided by 0");
+      }
+    }
+
     double res = fmod(this->val, other->val);
     if((other->val < 0.0 && this->val > 0.0 && res != 0) ||
        (other->val > 0.0 && this->val < 0.0 && res != 0)) {
@@ -118,6 +259,12 @@ namespace rubinius {
   }
 
   Array* Float::divmod(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      if(other->val == 0.0) {
+        Exception::zero_division_error(state, "divided by 0");
+      }
+    }
+
     Array* ary = Array::create(state, 2);
     ary->set(state, 0, Bignum::from_double(state, floor(this->val / other->val) ));
     ary->set(state, 1, mod(state, other));
@@ -134,28 +281,28 @@ namespace rubinius {
 
   Object* Float::equal(STATE, Float* other) {
     if(this->val == other->val) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Float::equal(STATE, Integer* other) {
     Float* o = Float::coerce(state, other);
     if(this->val == o->val) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Float::eql(STATE, Float* other) {
     if(this->val == other->val) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Float::eql(STATE, Integer* other) {
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Float::compare(STATE, Float* other) {
@@ -166,7 +313,7 @@ namespace rubinius {
     } else if(this->val < other->val){
       return Fixnum::from(-1);
     } else {
-      return Qnil;
+      return cNil;
     }
   }
 
@@ -186,52 +333,52 @@ namespace rubinius {
     } else if(this->val < o->val){
       return Fixnum::from(-1);
     } else {
-      return Qnil;
+      return cNil;
     }
   }
 
   Object* Float::gt(STATE, Float* other) {
-    return this->val > other->val ? Qtrue : Qfalse;
+    return this->val > other->val ? cTrue : cFalse;
   }
 
   Object* Float::gt(STATE, Integer* other) {
-    return this->val > Float::coerce(state, other)->val ? Qtrue : Qfalse;
+    return this->val > Float::coerce(state, other)->val ? cTrue : cFalse;
   }
 
   Object* Float::ge(STATE, Float* other) {
-    return this->val >= other->val ? Qtrue : Qfalse;
+    return this->val >= other->val ? cTrue : cFalse;
   }
 
   Object* Float::ge(STATE, Integer* other) {
-    return this->val >= Float::coerce(state, other)->val ? Qtrue : Qfalse;
+    return this->val >= Float::coerce(state, other)->val ? cTrue : cFalse;
   }
 
   Object* Float::lt(STATE, Float* other) {
-    return this->val < other->val ? Qtrue : Qfalse;
+    return this->val < other->val ? cTrue : cFalse;
   }
 
   Object* Float::lt(STATE, Integer* other) {
-    return this->val < Float::coerce(state, other)->val ? Qtrue : Qfalse;
+    return this->val < Float::coerce(state, other)->val ? cTrue : cFalse;
   }
 
   Object* Float::le(STATE, Float* other) {
-    return this->val <= other->val ? Qtrue : Qfalse;
+    return this->val <= other->val ? cTrue : cFalse;
   }
 
   Object* Float::le(STATE, Integer* other) {
-    return this->val <= Float::coerce(state, other)->val ? Qtrue : Qfalse;
+    return this->val <= Float::coerce(state, other)->val ? cTrue : cFalse;
   }
 
   Object* Float::fisinf(STATE) {
     if(isinf(this->val) != 0) {
       return this->val < 0 ? Fixnum::from(-1) : Fixnum::from(1);
     } else {
-      return Qnil;
+      return cNil;
     }
   }
 
   Object* Float::fisnan(STATE) {
-    return isnan(this->val) == 1 ? Qtrue : Qfalse;
+    return isnan(this->val) == 1 ? cTrue : cFalse;
   }
 
   Integer* Float::fround(STATE) {
@@ -280,7 +427,7 @@ namespace rubinius {
     char str[FLOAT_TO_S_STRLEN];
 
     if(g_dfmt(str, &val, 0, FLOAT_TO_S_STRLEN) == 0) {
-      return reinterpret_cast<String*>(kPrimitiveFailed);
+      return force_as<String>(Primitives::failure());
     }
 
     String* s = String::create(state, str);
@@ -293,7 +440,7 @@ namespace rubinius {
     char str[sizeof(double)];
     int sz;
 
-    if (want_double == Qtrue) {
+    if (want_double == cTrue) {
       double* p = (double *)str;
       *p = this->val;
       sz = 8;

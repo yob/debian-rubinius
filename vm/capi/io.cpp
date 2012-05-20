@@ -77,6 +77,9 @@ namespace rubinius {
         rf->handle = as_value();
         rf->fd = fd;
         rf->f = f;
+        rf->f2 = NULL;
+        rf->stdio_file = NULL;
+        rf->finalize = NULL;
 
         // Disable all buffering so that it doesn't get out of sync with
         // the normal IO buffer.
@@ -94,6 +97,8 @@ namespace rubinius {
 
       RIO* rio = as_.rio;
 
+      if(rio->finalize) rio->finalize(rio, true);
+
       bool ok = (fclose(rio->f) == 0);
       rio->f = NULL;
 
@@ -109,6 +114,22 @@ extern "C" {
 
   void rb_eof_error() {
     rb_raise(rb_eEOFError, "end of file reached");
+  }
+
+  VALUE rb_io_addstr(VALUE io, VALUE str) {
+    return rb_io_write(io, str);
+  }
+
+  VALUE rb_io_print(int argc, VALUE *argv, VALUE io) {
+    return rb_funcall2(io, rb_intern("print"), argc, argv);
+  }
+
+  VALUE rb_io_printf(int argc, VALUE *argv, VALUE io) {
+    return rb_funcall2(io, rb_intern("printf"), argc, argv);
+  }
+
+  VALUE rb_io_puts(int argc, VALUE *argv, VALUE io) {
+    return rb_funcall2(io, rb_intern("puts"), argc, argv);
   }
 
   VALUE rb_io_write(VALUE io, VALUE str) {
@@ -131,13 +152,13 @@ extern "C" {
 
     long ret;
 
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
     {
       GCIndependent guard(env);
       ret = fread(ptr, 1, len, f);
     }
 
-    env->state()->shared.enter_capi(env->state());
+    ENTER_CAPI(env->state());
 
     return ret;
   }
@@ -169,21 +190,21 @@ extern "C" {
     FD_ZERO(&fds);
     FD_SET((int_fd_t)fd, &fds);
 
-    int ready = 0;
+    int count = 0;
 
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
     {
       GCIndependent guard(env);
 
-      while(!ready) {
-        ready = select(fd+1, &fds, 0, 0, 0);
+      while(count == 0) {
+        count = select(fd+1, &fds, 0, 0, 0);
         if(!retry) break;
       }
     }
 
-    env->state()->shared.enter_capi(env->state());
+    ENTER_CAPI(env->state());
 
     return Qtrue;
   }
@@ -212,24 +233,23 @@ extern "C" {
     }
 
     fd_set fds;
+
     FD_ZERO(&fds);
     FD_SET((int_fd_t)fd, &fds);
 
-    int ready = 0;
+    int count = 0;
 
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
     {
-      GCIndependent guard(env->state());
+      GCIndependent guard(env);
 
-      while(!ready) {
-        ready = select(fd+1, 0, &fds, 0, 0);
+      while(count == 0) {
+        count = select(fd+1, &fds, 0, 0, 0);
         if(!retry) break;
       }
     }
-
-    env->state()->shared.enter_capi(env->state());
-
+    ENTER_CAPI(env->state());
     return Qtrue;
   }
 
@@ -243,17 +263,18 @@ extern "C" {
     FD_ZERO(&fds);
     FD_SET((int_fd_t)fd, &fds);
 
-    int ready = 0;
+    int count = 0;
 
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
     {
       GCIndependent guard(env);
 
-      while(!ready) {
-        ready = select(fd+1, &fds, 0, 0, 0);
+      while(count == 0) {
+        count = select(fd+1, &fds, 0, 0, 0);
       }
     }
+    ENTER_CAPI(env->state());
   }
 
   /*
@@ -269,6 +290,7 @@ extern "C" {
     int ready = 0;
 
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    LEAVE_CAPI(env->state());
     {
       GCIndependent guard(env);
 
@@ -277,7 +299,7 @@ extern "C" {
       }
     }
 
-    env->state()->shared.enter_capi(env->state());
+    ENTER_CAPI(env->state());
   }
 
   void rb_io_set_nonblock(rb_io_t* iot) {

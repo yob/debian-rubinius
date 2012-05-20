@@ -72,7 +72,7 @@ namespace immix {
 
   /// The size of a Line; should be a multiple of the processor cache line size,
   /// and sufficient to hold several typical objects; we use 128 bytes.
-  /// @todo Check imapct of different line sizes
+  /// @todo Check impact of different line sizes
   const int cLineSize  = 1 << cLineBits;
 
   /// Line mask used to convert an objects Address to the Address of the start
@@ -223,7 +223,7 @@ namespace immix {
      * This is not the same as the start of the Block, as the Block maintains
      * some metadata (i.e. a BlockHeader) in the first line.
      */
-    Address first_address() {
+    Address first_address() const {
       return address_ + cLineSize; // skip line 0
     }
 
@@ -280,7 +280,7 @@ namespace immix {
     /**
      * Returns true if +line+ is currently free.
      */
-    bool is_line_free(int line) {
+    bool is_line_free(int line) const {
       return lines_[line] == 0;
     }
 
@@ -288,7 +288,7 @@ namespace immix {
      * Returns the offset in bytes from the start of the block to the start of
      * the specified +line+.
      */
-    int offset_of_line(int line) {
+    int offset_of_line(int line) const {
       return line * cLineSize;
     }
 
@@ -333,17 +333,20 @@ namespace immix {
       mark_line(line);
 
       // Next, determine how many lines this object is occupying.
-      // The immix paper talks about doing conservative line marking
-      // here. We're going to do accurate for now.
-      // @todo Implement conservative marking, as the immix paper finds
-      // that accurate marking is considerably more expensive.
-      int line_offset = (addr & cLineMask).as_int();
-      int additional_lines = ((line_offset + size - 1) >> cLineBits);
+      // We're doing conservative marking here, according to the
+      // immix paper. This means that for small objects we always
+      // mark the current and the next page, only in case of a big
+      // object we exactly determine the number of lines it uses.
+      if(size <= cLineSize && line + 1 < cLineTableSize) {
+        mark_line(line + 1);
+      } else {
+        int line_offset = (addr & cLineMask).as_int();
+        int additional_lines = ((line_offset + size - 1) >> cLineBits);
 
-      for(int i = 1; i <= additional_lines; i++) {
-        mark_line(line + i);
+        for(int i = 1; i <= additional_lines; i++) {
+          mark_line(line + i);
+        }
       }
-
       // Track how many times this was called, ie, how many objects this
       // block contains.
       objects_++;
@@ -385,21 +388,21 @@ namespace immix {
      * unavailable. This differs from object_bytes in that it includes the
      * cost of wasted bytes in lines that are only partially filled.
      */
-    int bytes_from_lines() {
+    int bytes_from_lines() const {
       return lines_used_ * cLineSize;
     }
 
     /**
      * Returns true if the Block has free space available for allocations.
      */
-    bool usable() {
+    bool usable() const {
       return status_ == cFree || status_ == cRecyclable;
     }
 
     /**
      * Returns the status of the block as a string.
      */
-    const char* status_string() {
+    const char* status_string() const {
       switch(status_) {
       case cFree:
         return "free";
@@ -420,7 +423,7 @@ namespace immix {
      * likelihood of wasted space on lines that are marked in use but not
      * fully occupied.
      */
-    double fragmentation_ratio() {
+    double fragmentation_ratio() const {
       // We subtract the size of the first line because thats not data available to
       // use for objects, so we shouldn't count it.
       return ((double)object_bytes_) / ((double)(cBlockSize - cLineSize));
@@ -483,15 +486,15 @@ namespace immix {
       vfree(system_base_, system_size_);
     }
 
-    Address base() {
+    Address base() const {
       return base_;
     }
 
-    std::size_t size() {
+    std::size_t size() const {
       return system_size_;
     }
 
-    Address last_address() {
+    Address last_address() const {
       return system_base_ + system_size_;
     }
 
@@ -531,7 +534,7 @@ namespace immix {
     /**
      * Returns true if this Chunk contains the specified +addr+ Address.
      */
-    bool contains_address(Address addr) {
+    bool contains_address(Address addr) const {
       return addr > base_ && addr <= last_address();
     }
   };
@@ -637,6 +640,7 @@ namespace immix {
           ++i) {
         Chunk* chunk = *i;
         chunk->free();
+        delete chunk;
       }
     }
 
@@ -767,14 +771,14 @@ namespace immix {
     /**
      * Returns the next available address from which allocations can be made.
      */
-    Address cursor() {
+    Address cursor() const {
       return cursor_;
     }
 
     /**
      * Returns the first non-free byte past the current cursor position.
      */
-    Address limit() {
+    Address limit() const {
       return limit_;
     }
 
@@ -782,7 +786,7 @@ namespace immix {
      * Returns the current line the seach is at.
      * Used for testing.
      */
-    int hole_start_line() {
+    int hole_start_line() const {
       return hole_start_line_;
     }
 
@@ -1090,8 +1094,10 @@ namespace immix {
     /**
      * Calls the Describer to scan from each of the Addresses in the mark stack.
      */
-    void process_mark_stack(Allocator& alloc) {
+    bool process_mark_stack(Allocator& alloc) {
       Marker<Describer> mark(this, alloc);
+
+      if(mark_stack_.empty()) return false;
 
       // Use while() since mark_stack_ is modified as we walk it.
       while(!mark_stack_.empty()) {
@@ -1099,6 +1105,8 @@ namespace immix {
         mark_stack_.pop_back();
         desc.walk_pointers(addr, mark);
       }
+
+      return true;
     }
 
     /**

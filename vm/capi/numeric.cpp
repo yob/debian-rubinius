@@ -2,6 +2,9 @@
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/object.hpp"
+#include "builtin/integer.hpp"
+
+#include "object_utils.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
@@ -20,7 +23,7 @@ extern "C" {
     String* str;
     char chr;
 
-    if((str = try_as<String>(object)) && str->size() >= 1) {
+    if((str = try_as<String>(object)) && str->byte_size() >= 1) {
       chr = str->c_str(env->state())[0];
     } else {
       chr = (char)(NUM2INT(obj) & 0xff);
@@ -128,13 +131,18 @@ extern "C" {
     return capi_native2num<unsigned long>(number);
   }
 
-  VALUE rb_cstr2inum(const char* string, int base) {
-    return rb_str2inum(rb_str_new2(string), base);
+  VALUE rb_cstr2inum(const char* str, int base) {
+    return rb_cstr_to_inum(str, base, base == 0);
   }
 
   VALUE rb_cstr_to_inum(const char* str, int base, int badcheck) {
-    // TODO don't ignore badcheck
-    return rb_cstr2inum(str, base);
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    Integer* i = Integer::from_cstr(env->state(), str, base,
+                                    badcheck ? cTrue : cFalse);
+    if(i->nil_p()) {
+      rb_raise(rb_eArgError, "invalid string for Integer");
+    }
+    return env->get_handle(i);
   }
 
   VALUE rb_ll2inum(long long val) {
@@ -153,6 +161,10 @@ extern "C" {
 
   VALUE rb_num_coerce_cmp(VALUE x, VALUE y, ID func) {
     return rb_funcall(rb_mCAPI, rb_intern("rb_num_coerce_cmp"), 3, x, y, ID2SYM(func));
+  }
+
+  VALUE rb_num_coerce_relop(VALUE x, VALUE y, ID func) {
+    return rb_funcall(rb_mCAPI, rb_intern("rb_num_coerce_relop"), 3, x, y, ID2SYM(func));
   }
 
   double rb_num2dbl(VALUE val) {
@@ -240,8 +252,23 @@ extern "C" {
     }
     return d;
   }
-  
+
   VALUE rb_Integer(VALUE object_handle) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    Object* object = env->get_object(object_handle);
+
+    if(kind_of<Fixnum>(object) || kind_of<Bignum>(object)) {
+      return object_handle;
+    } else if(String* str = try_as<String>(object)) {
+      Object* ret = str->to_i(env->state(), Fixnum::from(0), cTrue);
+      if(ret->nil_p()) {
+        rb_raise(rb_eArgError, "invalid value for Integer");
+      }
+
+      return env->get_handle(ret);
+    }
+
     return rb_convert_type(object_handle, 0, "Integer", "to_i");
   }
 

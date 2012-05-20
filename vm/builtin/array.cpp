@@ -8,8 +8,11 @@
 #include "objectmemory.hpp"
 #include "primitives.hpp"
 
+#include "configuration.hpp"
 #include "arguments.hpp"
 #include "dispatch.hpp"
+
+#include "ontology.hpp"
 
 #include <iostream>
 #include <math.h>
@@ -22,12 +25,16 @@
 namespace rubinius {
 
   void Array::init(STATE) {
-    GO(array).set(state->new_class("Array", G(object)));
+    GO(array).set(ontology::new_class(state, "Array", G(object)));
     G(array)->set_object_type(state, ArrayType);
   }
 
   size_t Array::size() {
     return total_->to_native();
+  }
+
+  size_t Array::offset() {
+    return start_->to_native();
   }
 
   Array* Array::create(STATE, size_t idx) {
@@ -41,7 +48,7 @@ namespace rubinius {
 
   // 'self' is passed in automatically by the primitive glue
   Array* Array::allocate(STATE, Object* self) {
-    Array* ary = Array::create(state, 0U);
+    Array* ary = Array::create(state, 0);
     ary->klass(state, (Class*)self);
     return ary;
   }
@@ -94,7 +101,7 @@ namespace rubinius {
   Array* Array::to_ary(STATE, Object* value, CallFrame* call_frame) {
     if(Tuple* tup = try_as<Tuple>(value)) {
       return Array::from_tuple(state, tup);
-    } else if(RTEST(value->respond_to(state, state->symbol("to_ary"), Qtrue))) {
+    } else if(CBOOL(value->respond_to(state, state->symbol("to_ary"), cTrue))) {
       Arguments args(state->symbol("to_ary"), value, 0, 0);
       Dispatch dis(args.name());
 
@@ -138,7 +145,7 @@ namespace rubinius {
     }
 
     // Off either end, return nil
-    if(index >= total || index < start) return Qnil;
+    if(index >= total || index < start) return cNil;
 
     return tuple_->at(state, index);
   }
@@ -157,10 +164,16 @@ namespace rubinius {
   }
 
   Array* Array::concat(STATE, Array* other) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    }
+
     size_t osize = other->size();
 
     if(osize == 0) return this;
-    if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    if(LANGUAGE_18_ENABLED(state)) {
+      if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    }
 
     if(osize == 1) {
       set(state, size(), other->get(state, 0));
@@ -181,7 +194,7 @@ namespace rubinius {
 
   Object* Array::get(STATE, size_t idx) {
     if(idx >= (size_t)total_->to_native()) {
-      return Qnil;
+      return cNil;
     }
 
     idx += start_->to_native();
@@ -243,9 +256,9 @@ namespace rubinius {
   Object* Array::shift(STATE) {
     size_t cnt = total_->to_native();
 
-    if(cnt == 0) return Qnil;
+    if(cnt == 0) return cNil;
     Object* obj = get(state, 0);
-    set(state, 0, Qnil);
+    set(state, 0, cNil);
     start(state, Fixnum::from(start_->to_native() + 1));
     total(state, Fixnum::from(cnt - 1));
     return obj;
@@ -269,9 +282,9 @@ namespace rubinius {
   Object* Array::pop(STATE) {
     size_t cnt = total_->to_native();
 
-    if(cnt == 0) return Qnil;
+    if(cnt == 0) return cNil;
     Object *obj = get(state, cnt - 1);
-    set(state, cnt-1, Qnil);
+    set(state, cnt-1, cNil);
     total(state, Fixnum::from(cnt - 1));
     return obj;
   }

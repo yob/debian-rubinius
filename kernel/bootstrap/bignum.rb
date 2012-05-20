@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Bignum < Integer
 
   # unary operators
@@ -94,11 +96,6 @@ class Bignum < Integer
     self >> other
   end
 
-  def **(o)
-    Rubinius.primitive :bignum_pow
-    redo_coerced :**, o
-  end
-
   # comparison operators
 
   def <(other)
@@ -134,8 +131,9 @@ class Bignum < Integer
     # raise if any part of the coercion or comparison raises
     # an exception.
     begin
-      a, b = other.coerce self
-      a <=> b
+      coerced = other.coerce self
+      return nil unless coerced
+      coerced[0] <=> coerced[1]
     rescue
       return nil
     end

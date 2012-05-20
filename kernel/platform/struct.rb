@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module FFI
   ##
   # Represents a C struct as ruby class.
@@ -59,6 +61,7 @@ module FFI
       end
 
       alias_method :to_str, :to_s
+      alias_method :inspect, :to_s
     end
 
     def self.find_nested_parent
@@ -85,7 +88,7 @@ module FFI
       return @layout if spec.size == 0
 
       # Pick up a enclosing FFI::Library
-      @enclosing_module = find_nested_parent
+      @enclosing_module ||= find_nested_parent
 
       cspec = Rubinius::LookupTable.new
       i = 0
@@ -121,6 +124,9 @@ module FFI
 
           type = FFI::Type::Array.new(type_code, ary_size, klass)
           element_size = type_size * ary_size
+        elsif f.kind_of?(Class) and f < FFI::Struct
+          type = FFI::Type::StructByValue.new(f)
+          element_size = type_size = f.size
         else
           if @enclosing_module
             type_code = @enclosing_module.find_type(f)
@@ -129,7 +135,7 @@ module FFI
           type_code ||= FFI.find_type(f)
 
           type = type_code
-          element_size = FFI.type_size(type_code)
+          element_size = type_size = FFI.type_size(type_code)
         end
 
         offset = spec[i + 2]
@@ -139,10 +145,10 @@ module FFI
         else
           offset = @size
 
-          mod = offset % element_size
+          mod = offset % type_size
           unless mod == 0
             # we need to align it.
-            offset += (element_size - mod)
+            offset += (type_size - mod)
           end
 
           i += 2
@@ -223,6 +229,10 @@ module FFI
       @pointer.free
     end
 
+    def ==(other)
+      @pointer == other.pointer
+    end
+
     def initialize_copy(ptr)
       @pointer = ptr.pointer.dup
     end
@@ -257,6 +267,8 @@ module FFI
         (@pointer + offset).read_string
       when FFI::Type::Array
         type.implementation.new(type, @pointer + offset)
+      when FFI::Type::StructByValue
+        type.implementation.new(@pointer + offset)
       when Rubinius::NativeFunction
         ptr = @pointer.get_at_offset(offset, FFI::TYPE_PTR)
         if ptr

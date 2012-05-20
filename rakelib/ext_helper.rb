@@ -11,7 +11,7 @@ end
 # Common settings. These can be augmented or overridden
 # by the particular extension Rakefile.
 #
-DEFAULT = RbConfig::CONFIG
+DEFAULT_CONFIG = RbConfig::CONFIG.dup
 
 # Don't like the globals? Too bad, they are simple and the
 # duration of this process is supposed to be short.
@@ -31,8 +31,8 @@ $LIBS     = env "LIBS"
 $LDDIRS   = env "LDDIRS"
 $LDFLAGS  = env "LDFLAGS", Rubinius::BUILD_CONFIG[:user_ldflags]
 
-$DLEXT    = env "DLEXT", DEFAULT["DLEXT"]
-$LIBEXT   = env "LIBEXT", DEFAULT["LIBEXT"]
+$DLEXT    = env "DLEXT", DEFAULT_CONFIG["DLEXT"]
+$LIBEXT   = env "LIBEXT", DEFAULT_CONFIG["LIBEXT"]
 
 $BITS        = 1.size == 8 ? 64 : 32
 
@@ -90,28 +90,35 @@ def add_external_lib(*libs)
 end
 
 def add_mri_capi
-  add_cflag DEFAULT["DEFS"]
-  add_cflag DEFAULT["CFLAGS"]
+  add_cflag DEFAULT_CONFIG["DEFS"]
+  add_cflag DEFAULT_CONFIG["CFLAGS"]
 
-  add_cxxflag DEFAULT["DEFS"]
-  add_cxxflag DEFAULT["CFLAGS"]
+  add_cxxflag DEFAULT_CONFIG["DEFS"]
+  add_cxxflag DEFAULT_CONFIG["CFLAGS"]
 
-  $LIBS << " #{DEFAULT["LIBS"]}"
-  $LIBS << " #{DEFAULT["DLDLIBS"]}"
+  $LIBS << " #{DEFAULT_CONFIG["LIBS"]}"
+  $LIBS << " #{DEFAULT_CONFIG["DLDLIBS"]}"
 
-  unless RUBY_PLATFORM =~ /mingw/
-    add_ldflag DEFAULT["LDSHARED"].split[1..-1].join(' ')
+  case RUBY_PLATFORM
+  when /mingw/
+    # do nothing
+  when /darwin/
+    # necessary to avoid problems with RVM injecting flags into the MRI build
+    # process.
+    add_ldflag DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ').gsub(/-dynamiclib/, "")
+  else
+    add_ldflag DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ')
   end
 
-  add_ldflag DEFAULT["LDFLAGS"]
-  rubyhdrdir = DEFAULT["rubyhdrdir"]
-  if RUBY_VERSION =~ /\A1\.9\./
-    arch_hdrdir = "#{rubyhdrdir}/#{DEFAULT['arch']}"
+  add_ldflag DEFAULT_CONFIG["LDFLAGS"]
+  rubyhdrdir = DEFAULT_CONFIG["rubyhdrdir"]
+  if rubyhdrdir
+    arch_hdrdir = "#{rubyhdrdir}/#{DEFAULT_CONFIG['arch']}"
     add_include_dir rubyhdrdir
     add_include_dir arch_hdrdir
-    add_link_dir DEFAULT["archdir"]
+    add_link_dir DEFAULT_CONFIG["archdir"]
   else
-    add_include_dir DEFAULT["archdir"]
+    add_include_dir DEFAULT_CONFIG["archdir"]
   end
 end
 
@@ -124,8 +131,8 @@ def include19_dir
 end
 
 def add_rbx_capi
-  add_cflag "-ggdb3"
-  add_cxxflag "-ggdb3"
+  add_cflag "-g -ggdb3"
+  add_cxxflag "-g -ggdb3"
   if ENV['DEV']
     add_cflag "-O0"
     add_cxxflag "-O0"
@@ -133,14 +140,28 @@ def add_rbx_capi
     add_cflag "-O2"
     add_cxxflag "-O2"
   end
-  add_include_dir include18_dir
-  add_include_dir include19_dir
+
+  if ENV['BUILD_VERSION'] == "18"
+    add_include_dir include18_dir
+  else
+    add_include_dir include19_dir
+  end
 end
 
 # Setup some initial computed values
 #
 add_include_dir "."
 add_link_dir "."
+
+Rubinius::BUILD_CONFIG[:include_dirs].each do |i|
+  add_include_dir i
+end
+
+Rubinius::BUILD_CONFIG[:lib_dirs].each do |l|
+  add_include_dir l
+end
+
+add_define *Rubinius::BUILD_CONFIG[:defines]
 
 # Setup platform-specific values
 #
@@ -160,6 +181,7 @@ when /mswin/, /mingw/, /bccwin32/
 
 when /solaris/
   add_define "OS_SOLARIS8"
+  add_flag "-fPIC"
 
   if $CC == "cc" and `cc -flags 2>&1` =~ /Sun/ # detect SUNWspro compiler
     # SUN CHAIN
@@ -169,7 +191,7 @@ when /solaris/
   else
     # GNU CHAIN
     # on Unix we need a g++ link, not gcc.
-    $LDSHARED = "#{$CXX} -shared"
+    $LDSHARED = "#{$CXX} -shared -G -fPIC"
   end
 
 when /openbsd/
@@ -183,7 +205,7 @@ when /openbsd/
 when /darwin/
   # on Unix we need a g++ link, not gcc.
   # Ff line contributed by Daniel Harple.
-  $LDSHARED = "#{$CXX} -dynamic -bundle -undefined suppress -flat_namespace -lstdc++"
+  $LDSHARED = "#{$CXX} -bundle -undefined suppress -flat_namespace -lstdc++"
 
 when /aix/
   $LDSHARED = "#{$CXX} -shared -Wl,-G -Wl,-brtl"

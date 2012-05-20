@@ -5,6 +5,9 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <assert.h>
+#ifdef HAVE_ALLOCA_H
+#include <alloca.h>
+#endif
 
 #include "config.h"
 #include "object_types.hpp"
@@ -26,6 +29,9 @@ namespace rubinius {
  *  00 == rest is an object reference
  * 010 == rest is a boolean literal
  * 110 == rest is a symbol
+ *
+ * NOTE: If these definitions change, the definitions for the C-API must be
+ * updated in the configure script.
 */
 
 #define TAG_REF          0x0
@@ -48,9 +54,13 @@ namespace rubinius {
 #define APPLY_SYMBOL_TAG(v) ((Object*)(((intptr_t)(v) << TAG_SYMBOL_SHIFT) | TAG_SYMBOL))
 #define STRIP_SYMBOL_TAG(v) (((intptr_t)v) >> TAG_SYMBOL_SHIFT)
 
-#define REFERENCE_P(v) (((intptr_t)(v) & TAG_REF_MASK) == TAG_REF)
-#define FIXNUM_P(v)    (((intptr_t)(v) & TAG_FIXNUM_MASK) == TAG_FIXNUM)
-#define SYMBOL_P(v)    (((intptr_t)(v) & TAG_SYMBOL_MASK) == TAG_SYMBOL)
+/* Do not use these macros in code. They define the bit patterns for the
+ * various object types and are used to define predicates. Use the predicates
+ * (ie reference_p(), fixnum_p(), symbol_p()) directly.
+ */
+#define __REFERENCE_P__(v) (((intptr_t)(v) & TAG_REF_MASK) == TAG_REF)
+#define __FIXNUM_P__(v)    (((intptr_t)(v) & TAG_FIXNUM_MASK) == TAG_FIXNUM)
+#define __SYMBOL_P__(v)    (((intptr_t)(v) & TAG_SYMBOL_MASK) == TAG_SYMBOL)
 
 /* How many bits of data are available in fixnum, not including the sign. */
 #define FIXNUM_WIDTH ((8 * sizeof(native_int)) - TAG_FIXNUM_SHIFT - 1)
@@ -78,54 +88,37 @@ namespace rubinius {
  * to be a simple test for that bit pattern.
  */
 
-/* NOTE if these change, be sure to update vm/capi/include/ruby.h, it contains
- * a private copy of these constants */
-
 /* NOTE ALSO! the special class array uses this bit pattern, so
  * if you change this, be sure to update the special class array! */
-const int cFalse = 0x0aL;
-#define Qfalse ((Object*)0x0aL)
-const int cNil   = 0x1aL;
-#define Qnil   ((Object*)0x1aL)
-const int cTrue  = 0x12L;
-#define Qtrue  ((Object*)0x12L)
-const int cUndef = 0x22L;
-#define Qundef ((Object*)0x22L)
-
+Object* const cFalse = reinterpret_cast<Object*>(0x0aL);
+Object* const cNil   = reinterpret_cast<Object*>(0x1aL);
+Object* const cTrue  = reinterpret_cast<Object*>(0x12L);
+Object* const cUndef = reinterpret_cast<Object*>(0x22L);
 
 // Indicates the mask to use to check if a value is ruby false.
 // This mask matches both false and nil ONLY.
 #define FALSE_MASK 0xf
 
-#define FALSE_P(v) (((Object*)(v)) == Qfalse)
-#define TRUE_P(v)  (((Object*)(v)) == Qtrue)
-#define NIL_P(v)   (((Object*)(v)) == Qnil)
-#define UNDEF_P(v) ((Object*)(v) == Qundef)
-#define RTEST(v)   (((uintptr_t)(v) & FALSE_MASK) != (uintptr_t)Qfalse)
+#define CBOOL(v)                    (((uintptr_t)(v) & FALSE_MASK) != (uintptr_t)cFalse)
+#define RBOOL(v)                    ((v) ? cTrue : cFalse)
 
-#define SIZE_OF_OBJECT ((size_t)(sizeof(ObjectHeader*)))
+#define SIZE_OF_OBJECT              ((size_t)(sizeof(ObjectHeader*)))
 
-#define NUM_FIELDS(obj)                 ((obj)->num_fields())
-#define SIZE_IN_BYTES_FIELDS(fel)       ((size_t)(sizeof(ObjectHeader) + \
-      ((fel)*SIZE_OF_OBJECT)))
-#define SIZE_IN_WORDS_FIELDS(fel)       (sizeof(ObjectHeader)/SIZE_OF_OBJECT + (fel))
-#define SIZE_IN_BYTES(obj)              SIZE_IN_BYTES_FIELDS(obj->num_fields())
-#define SIZE_OF_BODY(obj)               (obj->num_fields() * SIZE_OF_OBJECT)
+#define NUM_FIELDS(obj)             ((obj)->num_fields())
+#define SIZE_IN_BYTES_FIELDS(fel)   ((size_t)(sizeof(ObjectHeader) + \
+                                        ((fel)*SIZE_OF_OBJECT)))
+#define SIZE_IN_WORDS_FIELDS(fel)   (sizeof(ObjectHeader)/SIZE_OF_OBJECT + (fel))
+#define SIZE_IN_BYTES(obj)          SIZE_IN_BYTES_FIELDS(obj->num_fields())
+#define SIZE_OF_BODY(obj)           (obj->num_fields() * SIZE_OF_OBJECT)
 
 // Some configuration flags
-//
-// Store the object id in the header on 64 bit platforms
-#ifdef IS_X8664
-#define RBX_OBJECT_ID_IN_HEADER
-#endif
 
   /* rubinius_object gc zone, takes up two bits */
   typedef enum
   {
     UnspecifiedZone  = 0,
-    LargeObjectZone  = 1,
-    MatureObjectZone = 2,
-    YoungObjectZone  = 3,
+    MatureObjectZone = 1,
+    YoungObjectZone  = 2,
   } gc_zone;
 
   /* the sizeof(class ObjectHeader) must be a multiple of the platform
@@ -256,15 +249,15 @@ const int cUndef = 0x22L;
       return flags_;
     }
 
-    InflatedHeader* next() {
+    InflatedHeader* next() const {
       return next_;
     }
 
-    ObjectHeader* object() {
+    ObjectHeader* object() const {
       return object_;
     }
 
-    uint32_t object_id() {
+    uint32_t object_id() const {
       return object_id_;
     }
 
@@ -285,7 +278,7 @@ const int cUndef = 0x22L;
       owner_id_ = 0;
     }
 
-    bool used_p() {
+    bool used_p() const {
       return object_ != 0;
     }
 
@@ -298,7 +291,7 @@ const int cUndef = 0x22L;
       return flags_.Marked == which;
     }
 
-    capi::Handle* handle() {
+    capi::Handle* handle() const {
       return handle_;
     }
 
@@ -308,12 +301,12 @@ const int cUndef = 0x22L;
 
     bool update(HeaderWord header);
     void initialize_mutex(int thread_id, int count);
-    LockStatus lock_mutex(STATE, size_t us=0);
-    LockStatus lock_mutex_timed(STATE, const struct timespec* ts);
-    LockStatus try_lock_mutex(STATE);
-    bool locked_mutex_p(STATE);
-    LockStatus unlock_mutex(STATE);
-    void unlock_mutex_for_terminate(STATE);
+    LockStatus lock_mutex(STATE, GCToken gct, size_t us=0);
+    LockStatus lock_mutex_timed(STATE, GCToken gct, const struct timespec* ts);
+    LockStatus try_lock_mutex(STATE, GCToken gct);
+    bool locked_mutex_p(STATE, GCToken gct);
+    LockStatus unlock_mutex(STATE, GCToken gct);
+    void unlock_mutex_for_terminate(STATE, GCToken gct);
 
     void wakeup();
   };
@@ -408,9 +401,9 @@ const int cUndef = 0x22L;
     void copy_body(VM* state, Object* other);
 
     /* Used to make an exact state copy of +this+ into +other* */
-    void initialize_full_state(STATE, Object* other, unsigned int age);
+    void initialize_full_state(VM* vm, Object* other, unsigned int age);
 
-    /* Clear the body of the object, by setting each field to Qnil */
+    /* Clear the body of the object, by setting each field to cNil */
     void clear_fields(size_t bytes);
 
     /* Clear the body of the object, setting it to all 0s */
@@ -430,7 +423,7 @@ const int cUndef = 0x22L;
       set_zone(loc);
 
       klass_ = cls;
-      ivars_ = Qnil;
+      ivars_ = cNil;
     }
 
     // Can only be used when the caller is sure that the object doesn't
@@ -442,7 +435,7 @@ const int cUndef = 0x22L;
       header.f.zone = loc;
 
       klass_ = cls;
-      ivars_ = Qnil;
+      ivars_ = cNil;
     }
 
     void** pointer_to_body() {
@@ -451,19 +444,19 @@ const int cUndef = 0x22L;
 
     /* It's the slow case, should be called only if there's no cached
      * instance size. */
-    size_t slow_size_in_bytes(STATE) const;
+    size_t slow_size_in_bytes(VM* vm) const;
 
     /* The whole point of this is inlining */
-    size_t size_in_bytes(STATE) const {
+    size_t size_in_bytes(VM* vm) const {
       register size_t size = TypeInfo::instance_sizes[type_id()];
       if(size != 0) {
         return size;
       } else {
-        return slow_size_in_bytes(state);
+        return slow_size_in_bytes(vm);
       }
     }
 
-    size_t body_in_bytes(VM* state) {
+    size_t body_in_bytes(VM* state) const {
       return size_in_bytes(state) - sizeof(ObjectHeader);
     }
 
@@ -472,7 +465,7 @@ const int cUndef = 0x22L;
     }
 
     bool reference_p() const {
-      return REFERENCE_P(this);
+      return __REFERENCE_P__(this);
     }
 
     bool young_object_p() const {
@@ -491,15 +484,15 @@ const int cUndef = 0x22L;
       flags().Forwarded = 0;
     }
 
-    Object* forward() {
+    Object* forward() const {
       return ivars_;
     }
 
-    Object* ivars() {
+    Object* ivars() const {
       return ivars_;
     }
 
-    Class* reference_class() {
+    Class* reference_class() const {
       return klass_;
     }
 
@@ -536,7 +529,7 @@ const int cUndef = 0x22L;
       flags().Marked = which;
     }
 
-    int which_mark() {
+    int which_mark() const {
       return flags().Marked;
     }
 
@@ -544,7 +537,7 @@ const int cUndef = 0x22L;
       flags().Marked = 0;
     }
 
-    bool pinned_p() {
+    bool pinned_p() const {
       return flags().Pinned == 1;
     }
 
@@ -560,7 +553,7 @@ const int cUndef = 0x22L;
       flags().Pinned = 0;
     }
 
-    bool in_immix_p() {
+    bool in_immix_p() const {
       return flags().InImmix == 1;
     }
 
@@ -568,7 +561,7 @@ const int cUndef = 0x22L;
       flags().InImmix = 1;
     }
 
-    bool remembered_p() {
+    bool remembered_p() const {
       return flags().Remember == 1;
     }
 
@@ -580,7 +573,7 @@ const int cUndef = 0x22L;
       flags().Remember = 0;
     }
 
-    bool is_frozen_p() {
+    bool is_frozen_p() const {
       return flags().Frozen == 1;
     }
 
@@ -588,16 +581,22 @@ const int cUndef = 0x22L;
       flags().Frozen = val;
     }
 
-    bool is_tainted_p() {
-      return flags().Tainted == 1;
+    bool is_tainted_p() const {
+      if(reference_p()) {
+        return flags().Tainted == 1;
+      }
+      return false;
     }
 
     void set_tainted(int val=1) {
       flags().Tainted = val;
     }
 
-    bool is_untrusted_p() {
-      return flags().Untrusted == 1;
+    bool is_untrusted_p() const {
+      if(reference_p()) {
+        return flags().Untrusted == 1;
+      }
+      return false;
     }
 
     void set_untrusted(int val=1) {
@@ -621,30 +620,30 @@ const int cUndef = 0x22L;
 
     void set_object_id(STATE, ObjectMemory* om, uint32_t id);
 
-    LockStatus lock(STATE, size_t us=0);
-    LockStatus try_lock(STATE);
-    bool locked_p(STATE);
-    LockStatus unlock(STATE);
-    void unlock_for_terminate(STATE);
+    LockStatus lock(STATE, GCToken gct, size_t us=0);
+    LockStatus try_lock(STATE, GCToken gct);
+    bool locked_p(STATE, GCToken gct);
+    LockStatus unlock(STATE, GCToken gct);
+    void unlock_for_terminate(STATE, GCToken gct);
 
     // Abort if unable to lock
-    void hard_lock(STATE, size_t us=0);
+    void hard_lock(STATE, GCToken gct, size_t us=0);
 
     // Abort if unable to unlock
-    void hard_unlock(STATE);
+    void hard_unlock(STATE, GCToken gct);
 
     void wait(STATE);
 
     bool nil_p() const {
-      return this == reinterpret_cast<ObjectHeader*>(Qnil);
+      return this == reinterpret_cast<ObjectHeader*>(cNil);
     }
 
     bool true_p() const {
-      return this == reinterpret_cast<ObjectHeader*>(Qtrue);
+      return this == reinterpret_cast<ObjectHeader*>(cTrue);
     }
 
     bool false_p() const {
-      return this == reinterpret_cast<ObjectHeader*>(Qfalse);
+      return this == reinterpret_cast<ObjectHeader*>(cFalse);
     }
 
     object_type type_id() const {

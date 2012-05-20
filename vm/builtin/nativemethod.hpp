@@ -21,7 +21,6 @@
 
 namespace rubinius {
   class ExceptionPoint;
-  class Message;
   class NativeMethodFrame;
   class Pointer;
 
@@ -32,8 +31,9 @@ namespace rubinius {
    * Thread-local info about native method calls. @see NativeMethodFrame.
    */
   class NativeMethodEnvironment {
-    /** VM in which executing. */
-    VM*                 state_;
+    State state_obj_;
+    State* state_;
+
     /** Current callframe in Ruby-land. */
     CallFrame*          current_call_frame_;
     /** Current native callframe. */
@@ -44,7 +44,8 @@ namespace rubinius {
 
   public:   /* Class Interface */
     NativeMethodEnvironment(STATE)
-      : state_(state)
+      : state_obj_(state->vm())
+      , state_(&state_obj_)
       , current_call_frame_(0)
       , current_native_frame_(0)
       , current_ep_(0)
@@ -76,7 +77,7 @@ namespace rubinius {
 
     /** Obtain the Object the VALUE represents. */
     Object* get_object(VALUE val) {
-      if(CAPI_REFERENCE_P(val)) {
+      if(REFERENCE_P(val)) {
         capi::Handle* handle = capi::Handle::from(val);
         if(!handle->valid_p()) {
           handle->debug_print();
@@ -86,18 +87,18 @@ namespace rubinius {
         return handle->object();
       } else if(FIXNUM_P(val) || SYMBOL_P(val)) {
         return reinterpret_cast<Object*>(val);
-      } else if(CAPI_FALSE_P(val)) {
-        return Qfalse;
-      } else if(CAPI_TRUE_P(val)) {
-        return Qtrue;
-      } else if(CAPI_NIL_P(val)) {
-        return Qnil;
-      } else if(CAPI_UNDEF_P(val)) {
-        return Qundef;
+      } else if(FALSE_P(val)) {
+        return cFalse;
+      } else if(TRUE_P(val)) {
+        return cTrue;
+      } else if(NIL_P(val)) {
+        return cNil;
+      } else if(UNDEF_P(val)) {
+        return cUndef;
       }
 
       rubinius::bug("requested Object for unknown NativeMethod handle type");
-      return Qnil; // keep compiler happy
+      return cNil; // keep compiler happy
     }
 
 
@@ -105,11 +106,7 @@ namespace rubinius {
 
     Object* block();
 
-    void set_state(VM* vm) {
-      state_ = vm;
-    }
-
-    VM* state() {
+    State* state() {
       return state_;
     }
 
@@ -179,7 +176,7 @@ namespace rubinius {
     NativeMethodFrame(NativeMethodFrame* prev)
       : previous_(prev)
       , check_handles_(false)
-      , block_(cCApiHandleQnil)
+      , block_(Qnil)
     {}
 
     ~NativeMethodFrame();
@@ -192,7 +189,7 @@ namespace rubinius {
     }
 
     /** Create or retrieve a VALUE for the Object. */
-    VALUE get_handle(VM*, Object* obj);
+    VALUE get_handle(STATE, Object* obj);
 
     void check_tracked_handle(capi::Handle* hdl, bool need_update=true);
 
@@ -226,6 +223,10 @@ namespace rubinius {
 
     VALUE block() {
       return block_;
+    }
+
+    void set_block(VALUE blk) {
+      block_ = blk;
     }
 
     VALUE receiver() {
@@ -316,14 +317,14 @@ namespace rubinius {
     const static object_type type = NativeMethodType;
 
     /** Set class up in the VM. @see vm/ontology.cpp. */
-    static void init(VM* state);
+    static void init(State* state);
 
     // Called when starting a new native thread, initializes any thread
     // local data.
-    static void init_thread(VM* state);
+    static void init_thread(State* state);
 
     // Called when a thread is exiting, to cleanup the thread local data.
-    static void cleanup_thread(VM* state);
+    static void cleanup_thread(State* state);
 
 
   public:   /* Ctors */
@@ -334,7 +335,7 @@ namespace rubinius {
      *  Takes a function to call in the form of a void*. +arity+ is used
      *  to figure out how to call the function properly.
      */
-    static NativeMethod* create(VM* state, String* file_name,
+    static NativeMethod* create(State* state, String* file_name,
                                 Module* module, Symbol* method_name,
                                 void* func, Fixnum* arity);
 
@@ -357,7 +358,7 @@ namespace rubinius {
      *  entered.
      */
     // Rubinius.primitive :nativemethod_load_extension_entry_point
-    static NativeMethod* load_extension_entry_point(STATE, Pointer* ptr);
+    static NativeMethod* load_extension_entry_point(STATE, String* library, Symbol* name, Pointer* ptr);
 
 
   public:   /* Instance methods */

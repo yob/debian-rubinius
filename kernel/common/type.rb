@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Namespace for coercion functions between various ruby objects.
 
@@ -16,7 +18,10 @@ module Rubinius
 
     def self.coerce_to(obj, cls, meth)
       return obj if object_kind_of?(obj, cls)
+      execute_coerce_to(obj, cls, meth)
+    end
 
+    def self.execute_coerce_to(obj, cls, meth)
       begin
         ret = obj.__send__(meth)
       rescue Exception => orig
@@ -38,7 +43,10 @@ module Rubinius
     def self.check_convert_type(obj, cls, meth)
       return obj if object_kind_of?(obj, cls)
       return nil unless obj.respond_to?(meth)
+      execute_check_convert_type(obj, cls, meth)
+    end
 
+    def self.execute_check_convert_type(obj, cls, meth)
       begin
         ret = obj.__send__(meth)
       rescue Exception
@@ -57,7 +65,10 @@ module Rubinius
     def self.try_convert(obj, cls, meth)
       return obj if object_kind_of?(obj, cls)
       return nil unless obj.respond_to?(meth)
+      execute_try_convert(obj, cls, meth)
+    end
 
+    def self.execute_try_convert(obj, cls, meth)
       ret = obj.__send__(meth)
 
       return ret if ret.nil? || object_kind_of?(ret, cls)
@@ -66,29 +77,11 @@ module Rubinius
       raise TypeError, msg
     end
 
-    def self.coerce_to_symbol(obj)
-      if object_kind_of?(obj, Fixnum)
-        raise ArgumentError, "Fixnums (#{obj}) cannot be used as symbols"
-      end
-      obj = obj.to_str if obj.respond_to?(:to_str)
-
-      coerce_to(obj, Symbol, :to_sym)
-    end
-
     def self.coerce_to_comparison(a, b)
       unless cmp = (a <=> b)
         raise ArgumentError, "comparison of #{a.inspect} with #{b.inspect} failed"
       end
       cmp
-    end
-
-    # Maps to rb_num2long in MRI
-    def self.num2long(obj)
-      if obj == nil
-        raise TypeError, "no implicit conversion from nil to integer"
-      else
-        Integer(obj)
-      end
     end
 
     def self.each_ancestor(mod)
@@ -109,21 +102,38 @@ module Rubinius
       end
     end
 
-    def self.ivar_validate(name)
-      # adapted from rb_to_id
-      case name
-      when String
-        return name.to_sym if name[0] == ?@
-      when Symbol
-        return name if name.is_ivar?
-      when Fixnum
-        raise ArgumentError, "#{name.inspect} is not a symbol"
-      else
-        name = Rubinius::Type.coerce_to(name, String, :to_str)
-        return name.to_sym if name[0] == ?@
+    def self.coerce_to_constant_name(name)
+      name = Rubinius::Type.coerce_to_symbol(name)
+
+      unless name.is_constant?
+        raise NameError, "wrong constant name #{name}"
       end
 
-      raise NameError, "`#{name}' is not allowed as an instance variable name"
+      name
+    end
+
+    def self.coerce_to_regexp(pattern, quote=false)
+      case pattern
+      when Regexp
+        return pattern
+      when String
+        # nothing
+      else
+        pattern = StringValue(pattern)
+      end
+
+      pattern = Regexp.quote(pattern) if quote
+      Regexp.new(pattern)
+    end
+
+    # Taint host if source is tainted.
+    def self.infect(host, source)
+      Rubinius.primitive :object_infect
+      raise PrimitiveFailure, "Object.infect primitive failed"
+    end
+
+    def self.check_null_safe(string)
+      Rubinius.invoke_primitive(:string_check_null_safe, string)
     end
   end
 end

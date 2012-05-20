@@ -12,13 +12,15 @@
 #include "dispatch.hpp"
 #include "arguments.hpp"
 
+#include "ontology.hpp"
+
 namespace rubinius {
 
   void AccessVariable::init(STATE) {
     // HACK test superclass of AccessVariable
-    GO(access_variable).set(state->new_class("AccessVariable", G(executable), G(rubinius)));
+    GO(access_variable).set(ontology::new_class(state,
+          "AccessVariable", G(executable), G(rubinius)));
     G(access_variable)->set_object_type(state, AccessVariableType);
-    G(access_variable)->name(state, state->symbol("Rubinius::AccessVariable"));
   }
 
   AccessVariable* AccessVariable::allocate(STATE) {
@@ -57,7 +59,7 @@ namespace rubinius {
 
     Object* recv = args.recv();
 
-    if(RTEST(recv->frozen_p(state))) {
+    if(CBOOL(recv->frozen_p(state))) {
       Exception::frozen_error(state, call_frame);
       return 0;
     }
@@ -79,7 +81,7 @@ namespace rubinius {
 
     /* The writer case. */
     if(access->write()->true_p()) {
-      if(RTEST(self->frozen_p(state))) {
+      if(CBOOL(self->frozen_p(state))) {
         Exception::frozen_error(state, call_frame);
         return 0;
       }
@@ -89,9 +91,9 @@ namespace rubinius {
         return NULL;
       }
 
-      if(self->reference_p()) {
+      if(kind_of<Class>(mod) && self->reference_p()) {
         // Promote this to use a direct accessor
-        if(TypeInfo* ti = state->om->find_type_info(self)) {
+        if(TypeInfo* ti = state->memory()->find_type_info(self)) {
           TypeInfo::Slots::iterator it = ti->slots.find(access->name()->index());
           if(it != ti->slots.end()) {
             // Found one!
@@ -115,9 +117,9 @@ namespace rubinius {
       return NULL;
     }
 
-    if(self->reference_p()) {
+    if(kind_of<Class>(mod) && self->reference_p()) {
       // Promote this to use a direct accessor
-      if(TypeInfo* ti = state->om->find_type_info(self)) {
+      if(TypeInfo* ti = state->memory()->find_type_info(self)) {
         TypeInfo::Slots::iterator it = ti->slots.find(access->name()->index());
         if(it != ti->slots.end()) {
           // Found one!

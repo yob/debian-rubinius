@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 TOPLEVEL_BINDING = binding()
 
 # Default kcode
@@ -19,8 +21,15 @@ module Rubinius
       @input_loop_split = false
       @simple_options = false
       @early_option_stop = false
+      @check_syntax = false
 
-      @gem_bin = File.join Rubinius::GEMS_PATH, "bin"
+      @enable_gems = Rubinius.ruby19?
+      @load_gemfile = false
+
+      version = RUBY_VERSION.split(".").first(2).join(".")
+      @gem_bins = ["#{version}/bin", "bin"].map do |dir|
+        File.join Rubinius::GEMS_PATH, dir
+      end
     end
 
     def self.debugger
@@ -43,7 +52,7 @@ module Rubinius
         begin
           `which tput &> /dev/null`
           if $?.exitstatus == 0
-            res = `tput cols 2>&1`.to_i
+            res = `tput cols`.to_i
             width = res if res > 0
           end
         end
@@ -51,23 +60,28 @@ module Rubinius
       Rubinius.const_set 'TERMINAL_WIDTH', width
 
       $VERBOSE = false
+
+      # We export the language mode into the environment so subprocesses like
+      # extension compiling during gem installs use the correct mode.
+      options = ENV["RBXOPT"]
+      language_mode = "-X#{Rubinius::RUBY_LIB_VERSION}"
+      unless options and options.include? language_mode
+        ENV["RBXOPT"] = "#{options} #{language_mode}".strip
+      end
     end
 
     # Setup $LOAD_PATH.
     def system_load_path
       @stage = "setting up system load path"
 
-      @main_lib = nil
+      if env_lib = ENV['RBX_LIB'] and File.exists?(env_lib)
+        @main_lib = File.expand_path(env_lib)
+      else
+        # use configured library path and check its existence
+        @main_lib = Rubinius::LIB_PATH
 
-      if env_lib = ENV['RBX_LIB']
-        @main_lib = File.expand_path(env_lib) if File.exists?(env_lib)
-      end
-
-      # Use the env version if it's set.
-      @main_lib = Rubinius::LIB_PATH unless @main_lib
-
-      unless @main_lib
-        STDERR.puts <<-EOM
+        unless File.exists?(@main_lib)
+          STDERR.puts <<-EOM
 Rubinius was configured to find standard library files at:
 
   #{@main_lib}
@@ -76,7 +90,8 @@ but that directory does not exist.
 
 Set the environment variable RBX_LIB to the directory
 containing the Rubinius standard library files.
-        EOM
+          EOM
+        end
       end
 
       @main_lib_bin = File.join @main_lib, "bin"
@@ -84,15 +99,14 @@ containing the Rubinius standard library files.
 
       # This conforms more closely to MRI. It is necessary to support
       # paths that mkmf adds when compiling and installing native exts.
-      additions = []
-      additions << "#{Rubinius::SITE_PATH}/#{Rubinius::LIB_VERSION}-rbx/#{Rubinius::CPU}-#{Rubinius::OS}"
-      additions << "#{Rubinius::SITE_PATH}/#{Rubinius::LIB_VERSION}-rbx"
-      additions << Rubinius::SITE_PATH
-      additions << "#{Rubinius::VENDOR_PATH}/#{Rubinius::LIB_VERSION}-rbx/#{Rubinius::CPU}-#{Rubinius::OS}"
-      additions << "#{Rubinius::VENDOR_PATH}/#{Rubinius::LIB_VERSION}-rbx"
-      additions << Rubinius::VENDOR_PATH
-      additions << "#{@main_lib}/#{Rubinius::RUBY_LIB_VERSION}"
-      additions << @main_lib
+      additions = [
+        Rubinius::SITE_PATH,
+        "#{Rubinius::SITE_PATH}/#{Rubinius::CPU}-#{Rubinius::OS}",
+        Rubinius::VENDOR_PATH,
+        "#{Rubinius::VENDOR_PATH}/#{Rubinius::CPU}-#{Rubinius::OS}",
+        "#{@main_lib}/#{Rubinius::RUBY_LIB_VERSION}",
+        @main_lib,
+      ]
       additions.uniq!
 
       $LOAD_PATH.unshift(*additions)
@@ -145,7 +159,7 @@ containing the Rubinius standard library files.
       end
     end
 
-    # Checks if a subcammand with basename +base+ exists. Returns the full
+    # Checks if a subcommand with basename +base+ exists. Returns the full
     # path to the subcommand if it does; otherwise, returns nil.
     def find_subcommand(base)
       command = File.join @main_lib_bin, "#{base}.rb"
@@ -156,8 +170,10 @@ containing the Rubinius standard library files.
     # Checks if a gem wrapper named +base+ exists. Returns the full path to
     # the gem wrapper if it does; otherwise, returns nil.
     def find_gem_wrapper(base)
-      wrapper = File.join @gem_bin, base
-      return wrapper if File.exists? wrapper
+      @gem_bins.each do |dir|
+        wrapper = File.join dir, base
+        return wrapper if File.exists? wrapper
+      end
       return nil
     end
 
@@ -239,36 +255,11 @@ containing the Rubinius standard library files.
 
       options.on "-a", "Used with -n and -p, splits $_ into $F" do
         @input_loop_split = true
+        Rubinius::Globals.set!(:$-a, true)
       end
 
-      options.on "-c", "FILE", "Check the syntax of FILE" do |file|
-        if File.exists?(file)
-          case
-          when Rubinius.ruby18?
-            parser = Rubinius::Melbourne
-          when Rubinius.ruby19?
-            parser = Rubinius::Melbourne19
-          when Rubinius.ruby20?
-            parser = Rubinius::Melbourne20
-          else
-            raise "no parser available for this ruby version"
-          end
-
-          mel = parser.new file, 1, []
-
-          begin
-            mel.parse_file
-          rescue SyntaxError => e
-            show_syntax_errors(mel.syntax_errors)
-            exit 1
-          end
-
-          puts "Syntax OK"
-          exit 0
-        else
-          puts "rbx: Unable to find file -- #{file} (LoadError)"
-          exit 1
-        end
+      options.on "-c", "Only check the syntax" do
+        @check_syntax = true
       end
 
       options.on "-C", "DIR", "Change directory to DIR before running scripts" do |dir|
@@ -279,10 +270,20 @@ containing the Rubinius standard library files.
         $DEBUG = true
       end
 
+      if Rubinius.ruby19?
+        options.on "--disable-gems", "Do not automatically load rubygems on startup" do
+          @enable_gems = false
+        end
+      end
+
       options.on "-e", "CODE", "Compile and execute CODE" do |code|
         @run_irb = false
         $0 = "(eval)"
         @evals << code
+      end
+
+      options.on '-G', '--gemfile', 'Respect a Gemfile in the current path' do
+        @load_gemfile = true
       end
 
       options.on "-h", "--help", "Display this help" do
@@ -301,18 +302,30 @@ containing the Rubinius standard library files.
         @load_paths << dir
       end
 
-      options.on "-K", "[code]", "Set $KCODE" do |k|
-        case k
-        when 'a', 'A', 'n', 'N', nil
-          $KCODE = "NONE"
-        when 'e', 'E'
-          $KCODE = "EUC"
-        when 's', 'S'
-          $KCODE = "SJIS"
-        when 'u', 'U'
-          $KCODE = "UTF8"
-        else
-          $KCODE = "NONE"
+      if Rubinius.ruby18?
+        options.on "-K", "[code]", "Set $KCODE" do |k|
+          case k
+          when 'a', 'A', 'n', 'N', nil
+            $KCODE = "NONE"
+          when 'e', 'E'
+            $KCODE = "EUC"
+          when 's', 'S'
+            $KCODE = "SJIS"
+          when 'u', 'U'
+            $KCODE = "UTF8"
+          else
+            $KCODE = "NONE"
+          end
+        end
+      else
+        options.on "-U", "Set Encoding.default_internal to UTF-8" do
+          Encoding.default_internal = "UTF-8"
+        end
+
+        options.on "-E", "ENC", "Set external:internal character encoding to ENC" do |enc|
+          ext, int = enc.split(":")
+          Encoding.default_external = ext if ext and !ext.empty?
+          Encoding.default_internal = int if int and !int.empty?
         end
       end
 
@@ -323,6 +336,7 @@ containing the Rubinius standard library files.
       options.on "-p", "Same as -n, but also print $_" do
         @input_loop = true
         @input_loop_print = true
+        Rubinius::Globals.set!(:$-p, true)
       end
 
       options.on "-r", "LIBRARY", "Require library before execution" do |file|
@@ -337,6 +351,10 @@ containing the Rubinius standard library files.
                  "Run SCRIPT using PATH environment variable to find it") do |script|
         options.stop_parsing
         @run_irb = false
+
+        # Load a gemfile now if we need to so that -S can see binstubs
+        # internal to the Gemfile
+        gemfile
 
         # First, check if any existing gem wrappers match.
         unless file = find_gem_wrapper(script)
@@ -358,9 +376,6 @@ containing the Rubinius standard library files.
 
         # if missing, let it die a natural death
         @script = file ? file : script
-      end
-
-      options.on "-T", "[level]", "Set $SAFE level (NOT IMPLEMENTED)" do |l|
       end
 
       options.on "-v", "Display the version and set $VERBOSE to true" do
@@ -396,27 +411,6 @@ containing the Rubinius standard library files.
       options.on "--version", "Display the version" do
         @run_irb = false
         puts Rubinius.version
-      end
-
-
-      # TODO: convert all these to -X options
-      options.doc "\nRubinius options"
-
-      @profile = Rubinius::Config['profile'] || Rubinius::Config['jit.profile']
-
-      options.on "--vv", "Display version and extra info" do
-        @run_irb = false
-
-        $VERBOSE = true
-        puts Rubinius.version
-        puts "Options:"
-        puts "  Interpreter type: #{INTERPRETER}"
-        if jit = JIT
-          puts "  JIT enabled: #{jit.join(', ')}"
-        else
-          puts "  JIT disabled"
-        end
-        puts
       end
 
       options.doc <<-DOC
@@ -475,8 +469,12 @@ VM Options
         end
       end
 
-      if @profile
+      if Rubinius::Config['profile'] || Rubinius::Config['jit.profile']
         require 'profile'
+      end
+
+      if @check_syntax
+        check_syntax
       end
     end
 
@@ -563,7 +561,17 @@ to rebuild the compiler.
     def rubygems
       @stage = "loading Rubygems"
 
-      require "rubygems" if Rubinius.ruby19?
+      require "rubygems" if @enable_gems
+    end
+
+    def gemfile
+      @stage = "loading Gemfile"
+
+      if @load_gemfile
+        require 'rubygems'
+        require 'bundler/setup'
+        @load_gemfile = false
+      end
     end
 
     # Require any -r arguments
@@ -583,7 +591,7 @@ to rebuild the compiler.
         while gets
           $F = $_.split if @input_loop_split
           eval @evals.join("\n"), TOPLEVEL_BINDING, "-e", 1
-          puts $_ if @input_loop_print
+          print $_ if @input_loop_print
         end
       else
         eval @evals.join("\n"), TOPLEVEL_BINDING, "-e", 1
@@ -618,6 +626,55 @@ to rebuild the compiler.
 
       $0 = @script
       CodeLoader.load_script @script, @debugging
+    end
+
+    #Check Ruby syntax of source
+    def check_syntax
+      syntax_ok = false
+
+      case
+      when Rubinius.ruby18?
+        parser = Rubinius::Melbourne
+      when Rubinius.ruby19?
+        parser = Rubinius::Melbourne19
+      when Rubinius.ruby20?
+        parser = Rubinius::Melbourne20
+      else
+        raise "no parser available for this ruby version"
+      end
+
+      if @script
+        if File.exists?(@script)
+          mel = parser.new @script, 1, []
+
+          begin
+            mel.parse_file
+          rescue SyntaxError => e
+            show_syntax_errors(mel.syntax_errors)
+            exit 1
+          end
+        else
+          puts "rbx: Unable to find file -- #{@script} (LoadError)"
+          exit 1
+        end
+      elsif not @evals.empty?
+        begin
+          mel = parser.parse_string @evals.join("\n")
+        rescue SyntaxError => e
+          show_syntax_errors(mel.syntax_errors)
+          exit 1
+        end
+      else
+        begin
+          mel = parser.parse_string STDIN.read
+        rescue SyntaxError => e
+          show_syntax_errors(mel.syntax_errors)
+          exit 1
+        end
+      end
+
+      puts "Syntax OK"
+      exit 0
     end
 
     # Run IRB unless we were passed -e, -S arguments or a script to run.
@@ -769,6 +826,7 @@ to rebuild the compiler.
           debugger
           agent
           rubygems
+          gemfile
           requires
           evals
           script

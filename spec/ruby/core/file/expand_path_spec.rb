@@ -3,6 +3,10 @@ require File.expand_path('../fixtures/common', __FILE__)
 
 describe "File.expand_path" do
   before :each do
+    ruby_version_is "1.9" do
+      @extenc = Encoding.default_external
+    end
+
     platform_is :windows do
       @base = `cd`.chomp.tr '\\', '/'
       @tmpdir = "c:/tmp"
@@ -13,6 +17,12 @@ describe "File.expand_path" do
       @base = Dir.pwd
       @tmpdir = "/tmp"
       @rootdir = "/"
+    end
+  end
+
+  after :each do
+    ruby_version_is "1.9" do
+      Encoding.default_external = @extenc if Encoding.default_external != @extenc
     end
   end
 
@@ -145,12 +155,17 @@ describe "File.expand_path" do
     end
   end
 
-  ruby_version_is "1.9" do
+  ruby_version_is "1.9"..."2.0" do
     it "produces a String in the default external encoding" do
-      old_external = Encoding.default_external
       Encoding.default_external = Encoding::SHIFT_JIS
       File.expand_path("./a").encoding.should == Encoding::SHIFT_JIS
-      Encoding.default_external = old_external
+    end
+  end
+
+  ruby_version_is "2.0" do
+    it "produces a String in the default external encoding" do
+      Encoding.default_external = Encoding::SHIFT_JIS
+      File.expand_path("./a").encoding.should == Encoding::US_ASCII
     end
   end
 
@@ -187,6 +202,11 @@ platform_is_not :windows do
     it "raises an ArgumentError when passed '~' if HOME is nil" do
       ENV.delete "HOME"
       lambda { File.expand_path("~") }.should raise_error(ArgumentError)
+    end
+
+    it "raises an ArgumentError when passed '~/' if HOME is nil" do
+      ENV.delete "HOME"
+      lambda { File.expand_path("~/") }.should raise_error(ArgumentError)
     end
 
     ruby_version_is ""..."1.8.7" do

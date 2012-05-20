@@ -9,6 +9,8 @@
 #include "objectmemory.hpp"
 #include "configuration.hpp"
 
+#include "on_stack.hpp"
+
 #include <assert.h>
 #include <sys/time.h>
 
@@ -120,14 +122,17 @@ namespace rubinius {
     }
   }
 
-  LockStatus ObjectHeader::lock(STATE, size_t us) {
+  LockStatus ObjectHeader::lock(STATE, GCToken gct, size_t us) {
     // #1 Attempt to lock an unlocked object using CAS.
+
+    ObjectHeader* self = this;
+    OnStack<1> os(state, self);
 
 step1:
     // Construct 2 new headers: one is the version we hope that
     // is in use and the other is what we want it to be. The CAS
     // the new one into place.
-    HeaderWord orig = header;
+    HeaderWord orig = self->header;
 
     orig.f.meaning = eAuxWordEmpty;
     orig.f.aux_word = 0;
@@ -135,15 +140,15 @@ step1:
     HeaderWord new_val = orig;
 
     new_val.f.meaning = eAuxWordLock;
-    new_val.f.aux_word = state->thread_id() << cAuxLockTIDShift;
+    new_val.f.aux_word = state->vm()->thread_id() << cAuxLockTIDShift;
 
-    if(header.atomic_set(orig, new_val)) {
+    if(self->header.atomic_set(orig, new_val)) {
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " locked with CAS]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " locked with CAS]\n";
       }
 
       // wonderful! Locked! weeeee!
-      state->add_locked_object(this);
+      state->vm()->add_locked_object(this);
       return eLocked;
     }
 
@@ -152,7 +157,7 @@ step1:
     // #2 See if we're locking the object recursively.
 
 step2:
-    orig = header;
+    orig = self->header;
     switch(orig.f.meaning) {
     case eAuxWordEmpty:
       // O_o why is it empty? must be some weird concurrency stuff going
@@ -160,7 +165,7 @@ step2:
       goto step1;
 
     case eAuxWordLock:
-      if(orig.f.aux_word >> cAuxLockTIDShift == state->thread_id()) {
+      if(orig.f.aux_word >> cAuxLockTIDShift == state->vm()->thread_id()) {
         // We're going to do this over and over until we get the new
         // header CASd into place.
 
@@ -171,28 +176,28 @@ step2:
         // Inflate the lock then.
         if(++count > cAuxLockRecCountMax) {
           // If we can't inflate the lock, try the whole thing over again.
-          if(!state->om->inflate_lock_count_overflow(state, this, count)) {
+          if(!state->memory()->inflate_lock_count_overflow(state, self, count)) {
             goto step1;
           }
           // The header is now set to inflated, and the current thread
           // is holding the inflated lock.
         } else {
           new_val = orig;
-          new_val.f.aux_word = (state->thread_id() << cAuxLockTIDShift) | count;
+          new_val.f.aux_word = (state->vm()->thread_id() << cAuxLockTIDShift) | count;
 
           // Because we've got the object already locked to use, no other
           // thread is going to be trying to lock this thread, but another
           // thread might ask for an object_id and the header will
           // be inflated. So if we can't swap in the new header, we'll start
           // this step over.
-          if(!header.atomic_set(orig, new_val)) goto step2;
+          if(!self->header.atomic_set(orig, new_val)) goto step2;
 
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id() << " recursively locked with CAS]\n";
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " recursively locked with CAS]\n";
           }
 
           // wonderful! Locked! weeeee!
-          state->add_locked_object(this);
+          state->vm()->add_locked_object(self);
         }
         return eLocked;
 
@@ -202,7 +207,7 @@ step2:
         // We weren't able to contend for it, probably because the header changed.
         // Do it all over again.
         bool error = false;
-        LockStatus ret = state->om->contend_for_lock(state, this, &error, us);
+        LockStatus ret = state->memory()->contend_for_lock(state, gct, self, &error, us);
         if(error) goto step1;
         return ret;
       }
@@ -210,7 +215,7 @@ step2:
     // The header is inflated, use the full lock.
     case eAuxWordInflated: {
       InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-      return ih->lock_mutex(state, us);
+      return ih->lock_mutex(state, gct, us);
     }
 
     // The header is being used for something other than locking, so we need to
@@ -219,18 +224,18 @@ step2:
       // If we couldn't inflate the lock, that means the header was in some
       // weird state that we didn't detect and handle properly. So redo
       // the whole locking procedure again.
-      if(!state->om->inflate_and_lock(state, this)) goto step1;
+      if(!state->memory()->inflate_and_lock(state, self)) goto step1;
       return eLocked;
     }
 
     return eUnlocked;
   }
 
-  void ObjectHeader::hard_lock(STATE, size_t us) {
-    if(lock(state, us) != eLocked) rubinius::bug("Unable to lock object");
+  void ObjectHeader::hard_lock(STATE, GCToken gct, size_t us) {
+    if(lock(state, gct, us) != eLocked) rubinius::bug("Unable to lock object");
   }
 
-  LockStatus ObjectHeader::try_lock(STATE) {
+  LockStatus ObjectHeader::try_lock(STATE, GCToken gct) {
     // #1 Attempt to lock an unlocked object using CAS.
 
 step1:
@@ -245,11 +250,11 @@ step1:
     HeaderWord new_val = orig;
 
     new_val.f.meaning = eAuxWordLock;
-    new_val.f.aux_word = state->thread_id() << cAuxLockTIDShift;
+    new_val.f.aux_word = state->vm()->thread_id() << cAuxLockTIDShift;
 
     if(header.atomic_set(orig, new_val)) {
       // wonderful! Locked! weeeee!
-      state->add_locked_object(this);
+      state->vm()->add_locked_object(this);
       return eLocked;
     }
 
@@ -266,7 +271,7 @@ step2:
       goto step1;
 
     case eAuxWordLock:
-      if(orig.f.aux_word >> cAuxLockTIDShift == state->thread_id()) {
+      if(orig.f.aux_word >> cAuxLockTIDShift == state->vm()->thread_id()) {
         // We're going to do this over and over until we get the new
         // header CASd into place.
 
@@ -277,14 +282,14 @@ step2:
         // Inflate the lock then.
         if(++count > cAuxLockRecCountMax) {
           // If we can't inflate the lock, try the whole thing over again.
-          if(!state->om->inflate_lock_count_overflow(state, this, count)) {
+          if(!state->memory()->inflate_lock_count_overflow(state, this, count)) {
             goto step1;
           }
           // The header is now set to inflated, and the current thread
           // is holding the inflated lock.
         } else {
           new_val = orig;
-          new_val.f.aux_word = (state->thread_id() << cAuxLockTIDShift) | count;
+          new_val.f.aux_word = (state->vm()->thread_id() << cAuxLockTIDShift) | count;
 
           // Because we've got the object already locked to use, no other
           // thread is going to be trying to lock this thread, but another
@@ -294,7 +299,7 @@ step2:
           if(!header.atomic_set(orig, new_val)) goto step2;
 
           // wonderful! Locked! weeeee!
-          state->add_locked_object(this);
+          state->vm()->add_locked_object(this);
         }
 
         return eLocked;
@@ -307,7 +312,7 @@ step2:
     // The header is inflated, use the full lock.
     case eAuxWordInflated: {
       InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-      return ih->try_lock_mutex(state);
+      return ih->try_lock_mutex(state, gct);
     }
 
     // The header is being used for something other than locking, so we need to
@@ -316,14 +321,14 @@ step2:
       // If we couldn't inflate the lock, that means the header was in some
       // weird state that we didn't detect and handle properly. So redo
       // the whole locking procedure again.
-      if(!state->om->inflate_and_lock(state, this)) goto step1;
+      if(!state->memory()->inflate_and_lock(state, this)) goto step1;
       return eLocked;
     }
 
     return eUnlocked;
   }
 
-  bool ObjectHeader::locked_p(STATE) {
+  bool ObjectHeader::locked_p(STATE, GCToken gct) {
     // Construct 2 new headers: one is the version we hope that
     // is in use and the other is what we want it to be. The CAS
     // the new one into place.
@@ -338,13 +343,13 @@ step2:
     case eAuxWordInflated:
       {
         InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-        return ih->locked_mutex_p(state);
+        return ih->locked_mutex_p(state, gct);
       }
     }
     return false;
   }
 
-  LockStatus ObjectHeader::unlock(STATE) {
+  LockStatus ObjectHeader::unlock(STATE, GCToken gct) {
     // This case is slightly easier than locking.
 
     for(;;) {
@@ -354,35 +359,35 @@ step2:
       case eAuxWordEmpty:
       case eAuxWordObjID:
         // Um. well geez. We don't have this object locked.
-        if(state->shared.config.thread_debug) {
+        if(state->shared().config.thread_debug) {
           std::cerr << "[THREAD] Attempted to unlock an unlocked object.\n";
         }
 
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " attempted to unlock an unlocked header]\n";
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " attempted to unlock an unlocked header]\n";
         }
         return eLockError;
 
       case eAuxWordInflated: {
         InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-        return ih->unlock_mutex(state);
+        return ih->unlock_mutex(state, gct);
       }
 
       case eAuxWordLock: {
         unsigned int locker_tid = orig.f.aux_word >> cAuxLockTIDShift;
-        if(locker_tid != state->thread_id()) {
+        if(locker_tid != state->vm()->thread_id()) {
           if(cDebugThreading) {
             std::cerr
-              << "[LOCK " << state->thread_id() << " attempted to unlock an object locked by other thread."
+              << "[LOCK " << state->vm()->thread_id() << " attempted to unlock an object locked by other thread."
               << "locker=" << locker_tid
               << "]\n";
           }
 
-          if(state->shared.config.thread_debug) {
+          if(state->shared().config.thread_debug) {
             std::cerr
               << "[THREAD] Attempted to unlock an object locked by other thread."
               << "locker=" << locker_tid
-              << ", current=" << state->thread_id()
+              << ", current=" << state->vm()->thread_id()
               << "\n";
           }
           return eLockError;
@@ -396,10 +401,10 @@ step2:
           if(orig.f.LockContended == 1) {
             // unlock and inflate as one step to keep things
             // consistent.
-            if(!state->om->inflate_for_contention(state, this)) continue;
+            if(!state->memory()->inflate_for_contention(state, this)) continue;
 
-            state->del_locked_object(this);
-            state->om->release_contention(state);
+            state->vm()->del_locked_object(this);
+            state->memory()->release_contention(state, gct);
 
             return eUnlocked;
           }
@@ -407,7 +412,7 @@ step2:
           new_val.f.meaning = eAuxWordEmpty;
           new_val.f.aux_word = 0;
         } else {
-          new_val.f.aux_word = (state->thread_id() << cAuxLockTIDShift) | (count - 1);
+          new_val.f.aux_word = (state->vm()->thread_id() << cAuxLockTIDShift) | (count - 1);
         }
 
         // Try it all over again if it fails.
@@ -416,18 +421,18 @@ step2:
         if(new_val.f.meaning == eAuxWordEmpty) {
           // Since we no longer have any association with this lock,
           // remove it from the current threads lock list
-          state->del_locked_object(this);
+          state->vm()->del_locked_object(this);
 
           if(cDebugThreading) {
             if(new_val.f.LockContended == 1) {
-              std::cerr << "[LOCK " << state->thread_id() << " invalid state. CAS unlocking with contention, no inflation]\n";
+              std::cerr << "[LOCK " << state->vm()->thread_id() << " invalid state. CAS unlocking with contention, no inflation]\n";
             } else {
-              std::cerr << "[LOCK " << state->thread_id() << " unlocked with CAS]\n";
+              std::cerr << "[LOCK " << state->vm()->thread_id() << " unlocked with CAS]\n";
             }
           }
         } else {
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id() << " unlocked with CAS via count decrement]\n";
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " unlocked with CAS via count decrement]\n";
           }
         }
 
@@ -437,17 +442,17 @@ step2:
     }
 
     // We shouldn't even get here, all cases are handled.
-    if(state->shared.config.thread_debug) {
+    if(state->shared().config.thread_debug) {
       std::cerr << "[THREAD] Detected unknown header lock state.\n";
     }
     return eLockError;
   }
 
-  void ObjectHeader::hard_unlock(STATE) {
-    if(unlock(state) != eUnlocked) rubinius::bug("Unable to unlock object");
+  void ObjectHeader::hard_unlock(STATE, GCToken gct) {
+    if(unlock(state, gct) != eUnlocked) rubinius::bug("Unable to unlock object");
   }
 
-  void ObjectHeader::unlock_for_terminate(STATE) {
+  void ObjectHeader::unlock_for_terminate(STATE, GCToken gct) {
     // This case is slightly easier than locking.
 
     for(;;) {
@@ -461,12 +466,12 @@ step2:
 
       case eAuxWordInflated: {
         InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-        ih->unlock_mutex_for_terminate(state);
+        ih->unlock_mutex_for_terminate(state, gct);
         return;
       }
 
       case eAuxWordLock: {
-        if(orig.f.aux_word >> cAuxLockTIDShift != state->thread_id()) {
+        if(orig.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
           return;
         }
 
@@ -486,8 +491,8 @@ step2:
 
         if(new_val.f.LockContended == 1) {
           // If we couldn't inflate for contention, redo.
-          if(!state->om->inflate_for_contention(state, this)) continue;
-          state->om->release_contention(state);
+          if(!state->memory()->inflate_for_contention(state, this)) continue;
+          state->memory()->release_contention(state, gct);
         }
 
         return;
@@ -496,8 +501,8 @@ step2:
     }
   }
 
-  size_t ObjectHeader::slow_size_in_bytes(STATE) const {
-    return state->om->type_info[type_id()]->object_size(this);
+  size_t ObjectHeader::slow_size_in_bytes(VM* vm) const {
+    return vm->om->type_info[type_id()]->object_size(this);
   }
 
   void ObjectHeader::initialize_copy(ObjectMemory* om, Object* other, unsigned int new_age) {
@@ -516,11 +521,9 @@ step2:
     ivars_ = other->ivars_;
 
     clear_forwarded();
-
-    if(other->is_tainted_p()) set_tainted();
   }
 
-  void ObjectHeader::initialize_full_state(STATE, Object* other, unsigned int age) {
+  void ObjectHeader::initialize_full_state(VM* state, Object* other, unsigned int age) {
     assert(type_id() == other->type_id());
     set_age(age);
     klass_ = other->klass_;
@@ -554,16 +557,16 @@ step2:
     flags().Tainted = other->flags().Tainted;
   }
 
-  void ObjectHeader::copy_body(STATE, Object* other) {
+  void ObjectHeader::copy_body(VM* state, Object* other) {
     void* src = other->__body__;
     void* dst = this->__body__;
 
     memcpy(dst, src, other->body_in_bytes(state));
   }
 
-  /* Clear the body of the object, by setting each field to Qnil */
+  /* Clear the body of the object, by setting each field to cNil */
   void ObjectHeader::clear_fields(size_t bytes) {
-    ivars_ = Qnil;
+    ivars_ = cNil;
 
     /* HACK: this case seems like a reasonable exception
      * to using accessor functions
@@ -572,7 +575,7 @@ step2:
     size_t field_count = bytes_to_fields(bytes);
 
     for(register size_t counter = 0; counter < field_count; ++counter) {
-      dst[counter] = Qnil;
+      dst[counter] = cNil;
     }
   }
 
@@ -589,6 +592,9 @@ step2:
   void InflatedHeader::set_object(ObjectHeader* obj) {
     flags_ = obj->flags();
     object_ = obj;
+
+    flags_.meaning = eAuxWordEmpty;
+    flags_.aux_word = 0;
   }
 
   void InflatedHeader::initialize_mutex(int thread_id, int count) {
@@ -596,8 +602,8 @@ step2:
     rec_lock_count_ = count;
   }
 
-  LockStatus InflatedHeader::lock_mutex(STATE, size_t us) {
-    if(us == 0) return lock_mutex_timed(state, 0);
+  LockStatus InflatedHeader::lock_mutex(STATE, GCToken gct, size_t us) {
+    if(us == 0) return lock_mutex_timed(state, gct, 0);
 
     struct timeval tv;
     struct timespec ts;
@@ -607,12 +613,16 @@ step2:
     ts.tv_sec = tv.tv_sec + (us / 1000000);
     ts.tv_nsec = (us % 10000000) * 1000;
 
-    return lock_mutex_timed(state, &ts);
+    return lock_mutex_timed(state, gct, &ts);
   }
 
-  LockStatus InflatedHeader::lock_mutex_timed(STATE, const struct timespec* ts) {
+  LockStatus InflatedHeader::lock_mutex_timed(STATE, GCToken gct,
+                                              const struct timespec* ts)
+  {
+    OnStack<1> os(state, object_);
+
     // Gain exclusive access to the insides of the InflatedHeader.
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     // We've got exclusive access to the lock parts of the InflatedHeader now.
     //
@@ -621,12 +631,12 @@ step2:
     // If we're not the owner, then block on mutex_.lock in a loop until the
     // owner_id_ is 0 and we can therefore be the owner.
 
-    if(owner_id_ == state->thread_id()) {
+    if(owner_id_ == state->vm()->thread_id()) {
       // We're already the owner, easy.
       rec_lock_count_++;
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id()
+        std::cerr << "[LOCK " << state->vm()->thread_id()
                   << " recursively locked inflated: " << rec_lock_count_ << "\n";
       }
 
@@ -641,11 +651,11 @@ step2:
       GCIndependent gc_guard(state);
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " locking native mutex]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " locking native mutex: " << this << "]\n";
       }
 
-      state->set_sleeping();
-      state->wait_on_inflated_lock(this);
+      state->vm()->set_sleeping();
+      state->vm()->wait_on_inflated_lock(this);
 
       // Loop until there is no owner.
       while(owner_id_ != 0) {
@@ -658,27 +668,27 @@ step2:
         }
 
         // Someone is interrupting us trying to lock.
-        if(state->check_local_interrupts) {
-          state->check_local_interrupts = false;
+        if(state->vm()->check_local_interrupts) {
+          state->vm()->check_local_interrupts = false;
 
-          if(!state->interrupted_exception()->nil_p()) {
+          if(!state->vm()->interrupted_exception()->nil_p()) {
             if(cDebugThreading) {
-              std::cerr << "[LOCK " << state->thread_id() << " detected interrupt]\n";
+              std::cerr << "[LOCK " << state->vm()->thread_id() << " detected interrupt]\n";
             }
 
-            state->clear_sleeping();
+            state->vm()->clear_sleeping();
             return eLockInterrupted;
           }
         }
       }
 
-      state->clear_sleeping();
-      state->clear_waiter();
+      state->vm()->clear_sleeping();
+      state->vm()->clear_waiter();
     }
 
     if(timeout) {
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " locking timed out]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " locking timed out]\n";
       }
 
       return eLockTimeout;
@@ -686,19 +696,21 @@ step2:
 
     // OWNED.
 
-    owner_id_ = state->thread_id();
-    state->add_locked_object(object_);
+    owner_id_ = state->vm()->thread_id();
+    state->vm()->add_locked_object(object_);
 
     if(cDebugThreading) {
-      std::cerr << "[LOCK " << state->thread_id() << " locked inflated header]\n";
+      std::cerr << "[LOCK " << state->vm()->thread_id() << " locked inflated header: " << this << "]\n";
     }
 
     return eLocked;
   }
 
-  LockStatus InflatedHeader::try_lock_mutex(STATE) {
+  LockStatus InflatedHeader::try_lock_mutex(STATE, GCToken gct) {
+    OnStack<1> os(state, object_);
+
     // Gain exclusive access to the insides of the InflatedHeader.
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     // We've got exclusive access to the lock parts of the InflatedHeader now.
     //
@@ -709,12 +721,12 @@ step2:
 
     bool locked = false;
 
-    if(owner_id_ == state->thread_id()) {
+    if(owner_id_ == state->vm()->thread_id()) {
       // We're already the owner, easy.
       rec_lock_count_++;
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id()
+        std::cerr << "[LOCK " << state->vm()->thread_id()
                   << " recursively locked ih: " << rec_lock_count_ << "\n";
       }
 
@@ -722,35 +734,39 @@ step2:
 
     // No owner! It's ours!
     } else if(owner_id_ == 0) {
-      owner_id_ = state->thread_id();
+      owner_id_ = state->vm()->thread_id();
       locked = true;
-      state->add_locked_object(object_);
+      state->vm()->add_locked_object(object_);
 
       // OWNED.
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " locked inflated header]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " locked inflated header]\n";
       }
     }
 
     return locked ? eLocked : eUnlocked;
   }
 
-  bool InflatedHeader::locked_mutex_p(STATE) {
+  bool InflatedHeader::locked_mutex_p(STATE, GCToken gct) {
+    OnStack<1> os(state, object_);
+
     // Gain exclusive access to the insides of the InflatedHeader.
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     return owner_id_ != 0;
   }
 
-  LockStatus InflatedHeader::unlock_mutex(STATE) {
+  LockStatus InflatedHeader::unlock_mutex(STATE, GCToken gct) {
+    OnStack<1> os(state, object_);
+
     // Gain exclusive access to the insides of the InflatedHeader.
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     // Sanity check.
-    if(owner_id_ != state->thread_id()) {
+    if(owner_id_ != state->vm()->thread_id()) {
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " inflated unlock consistence error, not the owner:" << owner_id_ << "]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " inflated unlock consistence error, not the owner:" << owner_id_ << "]\n";
       }
       return eLockError;
     }
@@ -758,16 +774,16 @@ step2:
     // If the count has dropped to 0, we're truly done, so tell anyone
     // blocking on mutex_.
     if(rec_lock_count_ == 0) {
-      state->del_locked_object(object_);
+      state->vm()->del_locked_object(object_);
 
       owner_id_ = 0;
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " unlocked native]\n";
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " unlocked native: " << this << "]\n";
       }
     } else {
       rec_lock_count_--;
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id()
+        std::cerr << "[LOCK " << state->vm()->thread_id()
                   << " unlocked via dec rec_lock_count: " << rec_lock_count_ << "]\n";
       }
     }
@@ -778,23 +794,25 @@ step2:
     return eUnlocked;
   }
 
-  void InflatedHeader::unlock_mutex_for_terminate(STATE) {
+  void InflatedHeader::unlock_mutex_for_terminate(STATE, GCToken gct) {
+    OnStack<1> os(state, object_);
+
     // Gain exclusive access to the insides of the InflatedHeader.
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     // We've got exclusive access to the lock parts of the InflatedHeader now.
 
     // Sanity check.
-    if(owner_id_ != state->thread_id()) {
+    if(owner_id_ != state->vm()->thread_id()) {
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id()
+        std::cerr << "[LOCK " << state->vm()->thread_id()
                   << " (term) inflated unlock consistence error, not the owner: "
                   << owner_id_ << "]\n";
       }
       return;
     }
 
-    // Don't call state->del_locked_object() here. We iterate over
+    // Don't call state->vm()->del_locked_object() here. We iterate over
     // that list to call this function, so we don't want to invalidate
     // the iterators. Plus, we don't need to cleanup the list anyway, this
     // is only used when the Thread is exiting.
@@ -803,7 +821,7 @@ step2:
     condition_.signal();
 
     if(cDebugThreading) {
-      std::cerr << "[LOCK " << state->thread_id() << " (term) unlocked native]\n";
+      std::cerr << "[LOCK " << state->vm()->thread_id() << " (term) unlocked native]\n";
     }
   }
 

@@ -77,6 +77,7 @@ namespace rubinius {
 
     Specialization specializations[cMaxSpecializations];
     executor unspecialized;
+    executor fallback;
 
   private:
     ExecuteStatus execute_status_;
@@ -161,12 +162,10 @@ namespace rubinius {
     Object* execute_as_script(STATE, CompiledMethod*cm, CallFrame* previous);
 
     struct InterpreterState {
-      bool allow_private;
       int call_flags;
 
       InterpreterState()
-        : allow_private(false)
-        , call_flags(0)
+        : call_flags(0)
       {}
     };
 

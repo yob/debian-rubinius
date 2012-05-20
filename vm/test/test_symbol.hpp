@@ -22,7 +22,6 @@ public:
   void test_to_str() {
     Symbol* sym = state->symbol("blah");
     String* str = sym->to_str(state);
-
     TS_ASSERT(!strncmp("blah", str->c_str(state), 4));
   }
 
@@ -30,6 +29,6 @@ public:
     Array* symbols = Symbol::all_symbols(state);
 
     TS_ASSERT(kind_of<Array>(symbols));
-    TS_ASSERT(state->shared.symbols.size() > 0);
+    TS_ASSERT(state->shared().symbols.size() > 0);
   }
 };

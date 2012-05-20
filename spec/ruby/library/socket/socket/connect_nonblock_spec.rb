@@ -29,8 +29,10 @@ describe "Socket#connect_nonblock" do
           @socket.connect_nonblock(@addr)
         rescue Errno::EINPROGRESS
           r = @socket.getsockopt(Socket::SOL_SOCKET, Socket::SO_ERROR)
-          if r.int == Errno::ECONNREFUSED::Errno
+          if r.unpack('i').first == Errno::ECONNREFUSED::Errno
             raise Errno::ECONNREFUSED.new
+          else
+            raise r.inspect
           end
         end
       }.should raise_error(Errno::ECONNREFUSED)

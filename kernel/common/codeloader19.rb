@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class CodeLoader
 
@@ -14,6 +16,27 @@ module Rubinius
       return name if loading and loadable? "./#{name}"
 
       return nil
+    end
+
+    # requires files relative to the current directory. We do one interesting
+    # check to make sure it's not called inside of an eval.
+    def self.require_relative(name, scope)
+      script = scope.current_script
+      if script
+        require File.expand_path(name, File.dirname(script.data_path))
+      else
+        raise LoadError.new "Something is wrong in trying to get relative path"
+      end
+    end
+
+    # Sets +@feature+, +@file_path+, +@load_path+ with the correct format.
+    # Used by #verify_load_path, #check_path and #check_file.
+    def update_paths(file, path)
+      path = File.expand_path path
+
+      @feature = path
+      @file_path = path
+      @load_path = path
     end
   end
 end

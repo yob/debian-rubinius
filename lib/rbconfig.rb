@@ -55,19 +55,17 @@ module RbConfig
 
   CONFIG["LIBS"]               = ""
 
-  rubinius_version             = 'rbx-' + Rubinius::LIB_VERSION
-  # arch identification
-  CONFIG["arch"]               = "#{Rubinius::CPU}-#{Rubinius::OS}"
-  CONFIG["sitearch"]           = '$(arch)'
-  # paths
-  CONFIG["rubylibdir"]         = "$(libdir)/rubinius/#{rubinius_version}"
-  CONFIG["archdir"]            = '$(rubylibdir)/$(arch)'
-  CONFIG["sitedir"]            = Rubinius::SITE_PATH
-  CONFIG["sitelibdir"]         = "$(sitedir)/#{rubinius_version}"
-  CONFIG["sitearchdir"]        = "$(sitelibdir)/$(arch)"
-  CONFIG["vendordir"]          = Rubinius::VENDOR_PATH
-  CONFIG["vendorlibdir"]       = "$(vendordir)/#{rubinius_version}"
-  CONFIG["vendorarchdir"]      = '$(vendorlibdir)/$(arch)'
+  sitedir                      = Rubinius::SITE_PATH
+  sitelibdir                   = sitedir
+  arch                         = "#{Rubinius::CPU}-#{Rubinius::OS}"
+
+  CONFIG["sitedir"]            = sitedir
+  CONFIG["sitelibdir"]         = sitelibdir
+  CONFIG["arch"]               = arch
+  CONFIG["sitearch"]           = arch
+  CONFIG["rubylibdir"]         = sitelibdir
+  CONFIG["archdir"]            = "#{sitelibdir}/#{arch}"
+  CONFIG["sitearchdir"]        = "#{sitelibdir}/#{arch}"
   CONFIG["topdir"]             = File.dirname(__FILE__)
   # some of these only relevant to cross-compiling
   cpu                          = Rubinius::CPU
@@ -124,16 +122,29 @@ module RbConfig
   # used by mkmf to compile extensions, be sure PIC is in
   # there
   CONFIG["CFLAGS"]             = "-ggdb3 -fPIC"
+  CONFIG["LDFLAGS"]            = ""
   if ENV['DEV']
     CONFIG["CFLAGS"] << " -O0"
   else
     CONFIG["CFLAGS"] << " -O2"
   end
+
+  if include_dirs = Rubinius::BUILD_CONFIG[:include_dirs]
+    include_dirs.each do |include_dir|
+      CONFIG["CFLAGS"] << " -I#{include_dir}"
+    end
+  end
+
+  if lib_dirs = Rubinius::BUILD_CONFIG[:lib_dirs]
+    lib_dirs.each do |lib_dir|
+      CONFIG["LDFLAGS"] << " -L#{lib_dir}"
+    end
+  end
+
   if user = Rubinius::BUILD_CONFIG[:user_cflags]
     CONFIG["CFLAGS"] << " #{user}" unless user.empty?
   end
 
-  CONFIG["LDFLAGS"]            = ""
   if user = Rubinius::BUILD_CONFIG[:user_ldflags]
     CONFIG["LDFLAGS"] << " #{user}" unless user.empty?
   end

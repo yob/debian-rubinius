@@ -15,14 +15,19 @@ namespace rubinius {
 
   class VMMethod;
   class CompiledMethod;
+  class ObjectMemory;
 
   class Inliners : public CodeResource {
     std::list<CompiledMethod*> inliners_;
 
   public:
+    Inliners(ObjectMemory* om);
+
     std::list<CompiledMethod*>& inliners() {
       return inliners_;
     }
+
+    void cleanup(State* state, CodeManager* cm);
   };
 
   class Executable : public Object {
@@ -76,10 +81,8 @@ namespace rubinius {
       BASIC_TYPEINFO(TypeInfo)
 
       virtual void mark(Object* obj, ObjectMark& mark);
-      virtual void visit(Object* obj, ObjectVisitor& visit);
 
       void mark_inliners(Object* obj, ObjectMark& mark);
-      void visit_inliners(Object* obj, ObjectVisitor& visit);
     };
 
     friend class Info;

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
 
   class CompileError < RuntimeError
@@ -21,7 +23,7 @@ module Rubinius
         hash = Rubinius.invoke_primitive :sha1_hash, full
         dir = hash[0,2]
 
-        path = "#{RBC_DB}/#{dir}/#{hash}"
+        "#{RBC_DB}/#{dir}/#{hash}"
       end
     else
       def self.compiled_cache_writable?(db, dir)
@@ -48,6 +50,10 @@ module Rubinius
         dir = Rubinius::OS_STARTUP_DIR
         db = "#{dir}/.rbx"
         unless name.prefix?(dir) and compiled_cache_writable?(db, dir)
+          # Yes, this retarded shit is necessary because people actually
+          # run under fucked environments with no HOME set.
+          return unless ENV["HOME"]
+
           dir = File.expand_path "~/"
           db = "#{dir}/.rbx"
           return unless compiled_cache_writable?(db, dir)
@@ -56,7 +62,7 @@ module Rubinius
         full = "#{name}#{Rubinius::RUBY_LIB_VERSION}"
         hash = Rubinius.invoke_primitive :sha1_hash, full
 
-        path = "#{db}/#{hash[0, 2]}/#{hash}"
+        "#{db}/#{hash[0, 2]}/#{hash}"
       end
     end
 
@@ -180,14 +186,12 @@ module Rubinius
         @tail.insert_after(@head)
 
         @misses = 0
-        @lock = Rubinius::Channel.new
-        @lock << nil # prime
       end
 
       attr_reader :current, :misses
 
       def clear!
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           @cache = {}
           @current = 0
 
@@ -213,7 +217,7 @@ module Rubinius
       end
 
       def retrieve(key)
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           if entry = @cache[key]
             entry.inc!
 
@@ -230,7 +234,7 @@ module Rubinius
       end
 
       def set(key, value)
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           if entry = @cache[key]
             entry.value = value
 
@@ -281,7 +285,7 @@ module Rubinius
     def self.compile_eval(string, variable_scope, file="(eval)", line=1)
       if ec = @eval_cache
         layout = variable_scope.local_layout
-        if cm = ec.retrieve([string, layout])
+        if cm = ec.retrieve([string, layout, line])
           return cm
         end
       end
@@ -300,7 +304,7 @@ module Rubinius
       cm.add_metadata :for_eval, true
 
       if ec and parser.should_cache?
-        ec.set([string.dup, layout], cm)
+        ec.set([string.dup, layout, line], cm)
       end
 
       return cm

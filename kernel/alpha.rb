@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 #
 # This is the beginning of loading Ruby code. At this point, the VM
 # is bootstrapped and the fundamental data structures, primitive
@@ -169,7 +171,7 @@ module Kernel
   # This method may be overridden, and is often used to provide dynamic
   # behaviour. An overriding version should call super if it fails to
   # resolve the message. This practice ensures that the default version
-  # will called if all else fails.
+  # will be called if all else fails.
   #
   def method_missing(meth, *args)
     raise NoMethodError, "Unable to send '#{meth}' on '#{self}' (#{self.class})"
@@ -451,7 +453,7 @@ class Module
 
   # Set Module's direct superclass.
   #
-  # The corresponding 'getter' #superclass method defined
+  # The corresponding 'getter' #superclass method is defined
   # in class.rb, because it is more complex than a mere
   # accessor
   #

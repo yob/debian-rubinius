@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius::CType
   def self.toprint(num)
     # The character literals (?x) are Fixnums in 1.8 and Strings in 1.9
@@ -16,11 +18,7 @@ module Rubinius::CType
     when 92; '\\\\'
     else
       if num < 32 || num > 126
-        str = "\\000"
-        str.modify!
-
-        c = num.to_s 8
-        str.copy_from c, 0, c.size, 4-c.size
+        unprintable_chr(num)
       else
         num.chr
       end

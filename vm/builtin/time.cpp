@@ -12,20 +12,33 @@
 #include "builtin/string.hpp"
 #include "builtin/time.hpp"
 
+#include "ontology.hpp"
+
 #include "util/time.h"
 
 #include <sys/time.h>
 #include <time.h>
 
 #include "windows_compat.h"
+#include "configuration.hpp"
 
 namespace rubinius {
   void Time::init(STATE) {
-    GO(time_class).set(state->new_class("Time", G(object)));
+    GO(time_class).set(ontology::new_class(state, "Time", G(object)));
     G(time_class)->set_object_type(state, TimeType);
   }
 
   Time* Time::now(STATE, Object* self) {
+    Time* tm = state->new_object<Time>(as<Class>(self));
+
+#ifdef HAVE_CLOCK_GETTIME
+    struct timespec ts;
+
+    ::clock_gettime(CLOCK_REALTIME, &ts);
+
+    tm->seconds_ = ts.tv_sec;
+    tm->nanoseconds_ = ts.tv_nsec;
+#else
     struct timeval tv;
 
     /* don't fill in the 2nd argument here. getting the timezone here
@@ -33,12 +46,11 @@ namespace rubinius {
      */
     ::gettimeofday(&tv, NULL);
 
-    Time* tm = state->new_object<Time>(as<Class>(self));
-
     tm->seconds_ = tv.tv_sec;
-    tm->microseconds_ = tv.tv_usec;
+    tm->nanoseconds_ = tv.tv_usec * 1000;
+#endif
 
-    tm->is_gmt(state, Qfalse);
+    tm->is_gmt(state, cFalse);
 
     return tm;
   }
@@ -47,39 +59,45 @@ namespace rubinius {
 #define NDIV(x,y) (-(-((x)+1)/(y))-1)
 #define NMOD(x,y) ((y)-(-((x)+1)%(y))-1)
 
-  Time* Time::specific(STATE, Object* self, Integer* sec, Integer* usec,
-                       Object* gmt)
+  Time* Time::specific(STATE, Object* self, Integer* sec, Integer* nsec,
+                       Object* gmt, Object* offset)
   {
     Time* tm = state->new_object<Time>(as<Class>(self));
 
     if(sizeof(time_t) == sizeof(long long)) {
       tm->seconds_ = sec->to_long_long();
-      tm->microseconds_ = usec->to_long_long();
+      tm->nanoseconds_ = nsec->to_long_long();
     } else {
       tm->seconds_ = sec->to_native();
-      tm->microseconds_ = usec->to_native();
+      tm->nanoseconds_ = nsec->to_native();
     }
 
     // Do a little overflow cleanup.
-    if(tm->microseconds_ >= 1000000) {
-      tm->seconds_ += tm->microseconds_ / 1000000;
-      tm->microseconds_ %= 1000000;
+    if(tm->nanoseconds_ >= 1000000000) {
+      tm->seconds_ += tm->nanoseconds_ / 1000000000;
+      tm->nanoseconds_ %= 1000000000;
     }
 
-    if(tm->microseconds_ < 0) {
-      tm->seconds_ += NDIV(tm->microseconds_,1000000);
-      tm->microseconds_ = NMOD(tm->microseconds_, 1000000);
+    if(tm->nanoseconds_ < 0) {
+      tm->seconds_ += NDIV(tm->nanoseconds_, 1000000000);
+      tm->nanoseconds_ = NMOD(tm->nanoseconds_, 1000000000);
     }
 
-    tm->is_gmt(state, RTEST(gmt) ? Qtrue : Qfalse);
+    if(LANGUAGE_18_ENABLED(state)) {
+      tm->nanoseconds_ -= (tm->nanoseconds_ % 1000);
+    }
+
+    tm->is_gmt(state, CBOOL(gmt) ? cTrue : cFalse);
+    tm->offset(state, offset);
 
     return tm;
   }
 
-  Time* Time::from_array(STATE, Object* self, 
-                      Fixnum* sec, Fixnum* min, Fixnum* hour,
-                      Fixnum* mday, Fixnum* mon, Fixnum* year, Fixnum* usec,
-                      Fixnum* isdst, Object* from_gmt) {
+  Time* Time::from_array(STATE, Object* self,
+                         Fixnum* sec, Fixnum* min, Fixnum* hour,
+                         Fixnum* mday, Fixnum* mon, Fixnum* year, Fixnum* nsec,
+                         Fixnum* isdst, Object* from_gmt, Object* offset,
+                         Fixnum* offset_sec, Fixnum* offset_nsec) {
     struct tm tm;
 
     tm.tm_sec = sec->to_native();
@@ -108,8 +126,10 @@ namespace rubinius {
     }
 
     tm.tm_wday = -1;
-#ifndef RBX_WINDOWS
+#ifdef HAVE_TM_GMTOFF
     tm.tm_gmtoff = 0;
+#endif
+#ifdef HAVE_TM_ZONE
     tm.tm_zone = 0;
 #endif
     tm.tm_year = year->to_native() - 1900;
@@ -118,7 +138,7 @@ namespace rubinius {
 
     time_t seconds = -1;
 
-    if(RTEST(from_gmt)) {
+    if(CBOOL(from_gmt) || !offset->nil_p()) {
       seconds = ::timegm(&tm);
     } else {
       tzset();
@@ -128,40 +148,110 @@ namespace rubinius {
     int err = 0;
 
     if(seconds == -1) {
-      int utc_p = from_gmt->true_p() ? 1 : 0;
+      int utc_p = (CBOOL(from_gmt) || !offset->nil_p()) ? 1 : 0;
       seconds = mktime_extended(&tm, utc_p, &err);
     }
 
-    if(err) return (Time*)Primitives::failure();
+    if(err) Exception::argument_error(state, "time out of range");
 
     Time* obj = state->new_object<Time>(as<Class>(self));
     obj->seconds_ = seconds;
-    obj->microseconds_ = usec->to_native();
-    obj->is_gmt(state, RTEST(from_gmt) ? Qtrue : Qfalse);
+    obj->nanoseconds_ = nsec->to_native();
+    obj->is_gmt(state, CBOOL(from_gmt) ? cTrue : cFalse);
+
+    if(!offset->nil_p()) {
+      obj->seconds_ -= offset_sec->to_native();
+      obj->nanoseconds_ -= offset_nsec->to_native();
+
+      // Deal with underflow wrapping
+      if(obj->nanoseconds_ < 0) {
+        obj->seconds_ += NDIV(obj->nanoseconds_, 1000000000);
+        obj->nanoseconds_ = NMOD(obj->nanoseconds_, 1000000000);
+      }
+
+      obj->offset(state, offset);
+    }
 
     return obj;
   }
 
-  Time* Time::dup(STATE) {
-    Time* tm = state->new_object<Time>(class_object(state));
-    tm->seconds_ = seconds_;
-    tm->microseconds_ = microseconds_;
-    tm->is_gmt(state, is_gmt_);
+  Time* Time::dup(STATE, Object* self, Time* other) {
+    Time* tm = state->new_object<Time>(as<Class>(self));
+    tm->seconds_ = other->seconds_;
+    tm->nanoseconds_ = other->nanoseconds_;
+    tm->is_gmt(state, other->is_gmt_);
     return tm;
   }
 
-  Array* Time::calculate_decompose(STATE, Object* use_gmt) {
-    if(!decomposed_->nil_p()) return decomposed_;
-
+  struct tm Time::get_tm() {
     time_t seconds = seconds_;
     struct tm tm = {0};
 
-    if(RTEST(use_gmt)) {
+    if(Fixnum* off = try_as<Fixnum>(offset_)) {
+      seconds += off->to_native();
+      gmtime_r(&seconds, &tm);
+    } else if(CBOOL(is_gmt_)) {
       gmtime_r(&seconds, &tm);
     } else {
       tzset();
       localtime_r(&seconds, &tm);
     }
+
+    return tm;
+  }
+
+  Object* Time::utc_offset(STATE) {
+    if(CBOOL(is_gmt_)) {
+      return Fixnum::from(0);
+    } else if(!offset_->nil_p()) {
+      return offset_;
+    }
+
+    native_int off;
+
+#ifdef HAVE_TM_NAME
+    struct tm tm = get_tm();
+    off = -tm.tm_tzadj;
+#else /* !HAVE_TM_NAME */
+#ifdef HAVE_TM_ZONE
+#ifdef HAVE_TM_GMTOFF
+    struct tm tm = get_tm();
+    off = tm.tm_gmtoff;
+#else
+    off = _timezone;
+#endif
+#else /* !HAVE_TM_ZONE */
+#if HAVE_VAR_TIMEZONE
+#if HAVE_VAR_ALTZONE
+    off = -(daylight ? timezone : altzone);
+#else
+    off = -timezone;
+#endif
+#else /* !HAVE_VAR_TIMEZONE */
+#ifdef HAVE_GETTIMEOFDAY
+    gettimeofday(&tv, &zone);
+    off = -zone.tz_minuteswest * 60;
+#else
+    /* no timezone info, then calc by myself */
+    {
+      struct tm utc;
+      time_t now;
+      time(&now);
+      utc = *gmtime(&now);
+      off = (now - mktime(&utc));
+    }
+#endif
+#endif /* !HAVE_VAR_TIMEZONE */
+#endif /* !HAVE_TM_ZONE */
+#endif /* !HAVE_TM_NAME */
+
+    return Fixnum::from(off);
+  }
+
+  Array* Time::calculate_decompose(STATE) {
+    if(!decomposed_->nil_p()) return decomposed_;
+
+    struct tm tm = get_tm();
 
     /* update Time::TM_FIELDS when changing order of fields */
     Array* ary = Array::create(state, 11);
@@ -173,42 +263,68 @@ namespace rubinius {
     ary->set(state, 5, Integer::from(state, tm.tm_year + 1900));
     ary->set(state, 6, Integer::from(state, tm.tm_wday));
     ary->set(state, 7, Integer::from(state, tm.tm_yday + 1));
-    ary->set(state, 8, tm.tm_isdst ? Qtrue : Qfalse);
+    ary->set(state, 8, tm.tm_isdst ? cTrue : cFalse);
 
-#ifdef HAVE_STRUCT_TM_TM_ZONE
-    ary->set(state, 9, String::create(state, tm.tm_zone));
-#else
-    ary->set(state, 9, Qnil);
-#endif
+    const char* tmzone;
+    if(offset_->nil_p() && (tmzone = timezone_extended(&tm))) {
+      ary->set(state, 9, String::create(state, tmzone));
+    } else {
+      ary->set(state, 9, cNil);
+    }
 
     // Cache it.
     decomposed(state, ary);
     return ary;
   }
 
-#define MAX_STRFTIME_OUTPUT 128
+#define STRFTIME_STACK_BUF 128
 
   String* Time::strftime(STATE, String* format) {
-    struct tm tm;
-    char str[MAX_STRFTIME_OUTPUT];
-    int is_gmt = 0;
+    struct tm tm = get_tm();
 
-    time_t seconds = seconds_;
+    struct timespec ts;
+    ts.tv_sec = seconds_;
+    ts.tv_nsec = nanoseconds_;
 
-    if(RTEST(is_gmt_)) {
-      is_gmt = 1;
-      gmtime_r(&seconds, &tm);
-    } else {
-      tzset();
-      localtime_r(&seconds, &tm);
+    int off = 0;
+    if(Fixnum* offset = try_as<Fixnum>(utc_offset(state))) {
+      off = offset->to_int();
     }
 
-    struct timespec ts = { seconds, 0 };
+    char stack_str[STRFTIME_STACK_BUF];
+    char* malloc_str = 0;
 
-    size_t chars = ::strftime_extended(str, MAX_STRFTIME_OUTPUT,
-                       format->c_str(state), &tm, &ts, is_gmt);
-    str[MAX_STRFTIME_OUTPUT-1] = 0;
+    size_t chars = ::strftime_extended(stack_str, STRFTIME_STACK_BUF,
+                       format->c_str(state), &tm, &ts, CBOOL(is_gmt_) ? 1 : 0,
+                       off);
 
-    return String::create(state, str, chars);
+    size_t buf_size = format->byte_size() * 2;
+
+    String* result = 0;
+
+    if (chars == 0 && format->byte_size() > 0) {
+      malloc_str = (char*)malloc(buf_size);
+
+      chars = ::strftime_extended(malloc_str, buf_size,
+                  format->c_str(state), &tm, &ts, CBOOL(is_gmt_) ? 1 : 0,
+                  off);
+
+      while (chars == 0 && format->byte_size() > 0) {
+        buf_size *= 2;
+        malloc_str = (char*)realloc(malloc_str, buf_size);
+
+        chars = ::strftime_extended(malloc_str, buf_size,
+                    format->c_str(state), &tm, &ts, CBOOL(is_gmt_) ? 1 : 0,
+                    off);
+      }
+
+      result = String::create(state, malloc_str, chars);
+
+      free(malloc_str);
+    } else {
+      result = String::create(state, stack_str, chars);
+    }
+
+    return result;
   }
 }

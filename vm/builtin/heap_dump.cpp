@@ -13,7 +13,6 @@
 #include "builtin/object.hpp"
 #include "builtin/array.hpp"
 #include "builtin/bytearray.hpp"
-#include "builtin/chararray.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/module.hpp"
 #include "builtin/string.hpp"
@@ -102,13 +101,13 @@ namespace rubinius {
 
       symbols_[sym] = id;
 
-      const char* str = sym->c_str(state);
-      int sz = strlen(str);
+      std::string str = sym->cpp_str(state);
+      int sz = str.size();
 
       write1(cSymbolCode);
       write4(id);
       write4(sz);
-      write_raw(str, sz);
+      write_raw(str.data(), sz);
 
       return id;
     }
@@ -230,7 +229,7 @@ namespace rubinius {
 
   static Layout* find_layout(STATE, Object* obj, Layout* root, Array* ary, SymbolList& syms) {
     // Collect all the ivar names that we want to pull out
-    TypeInfo* ti = state->om->type_info[obj->type_id()];
+    TypeInfo* ti = state->memory()->type_info[obj->type_id()];
     for(TypeInfo::Slots::iterator i = ti->slots.begin();
         i != ti->slots.end();
         ++i) {
@@ -319,7 +318,7 @@ namespace rubinius {
 
       enc.start_object(id);
 
-      enc.write4(obj->size_in_bytes(state));
+      enc.write4(obj->size_in_bytes(state->vm()));
 
       enc.write4(layout->id());
 
@@ -353,13 +352,6 @@ namespace rubinius {
         enc.write1(cBytesCode);
         enc.write4(ba->size());
         enc.write_raw((const char*)ba->raw_bytes(), ba->size());
-      } else if(CharArray* ca = try_as<CharArray>(obj)) {
-        enc.write2(syms.size() + 1);
-        dump_ivars(state, obj, syms);
-
-        enc.write1(cCharsCode);
-        enc.write4(ca->size());
-        enc.write_raw((const char*)ca->raw_bytes(), ca->size());
       } else {
         enc.write2(syms.size());
         dump_ivars(state, obj, syms);
@@ -388,14 +380,14 @@ namespace rubinius {
   };
 
   Object* System::vm_dump_heap(STATE, String* path) {
-    ObjectWalker walker(state->om);
-    GCData gc_data(state);
+    ObjectWalker walker(state->memory());
+    GCData gc_data(state->vm());
 
     // Seed it with the root objects.
     walker.seed(gc_data);
 
     int fd = open(path->c_str(state), O_CREAT | O_TRUNC | O_WRONLY, 0666);
-    if(fd < 0) return Qnil;
+    if(fd < 0) return cNil;
 
     HeapDump dump(fd);
 
@@ -413,6 +405,6 @@ namespace rubinius {
     std::cout << "Heap dumped to " << path->c_str(state) << "\n";
     close(fd);
 
-    return Qnil;
+    return cNil;
   }
 }

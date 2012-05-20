@@ -18,21 +18,21 @@ section "Push primitive values"
 #   The special object `nil` is pushed onto the stack.
 
 instruction push_nil() [ -- nil ]
-  stack_push(Qnil);
+  stack_push(cNil);
 end
 
 # [Description]
 #   The special value `true` is pushed onto the stack.
 
 instruction push_true() [ -- true ]
-  stack_push(Qtrue);
+  stack_push(cTrue);
 end
 
 # [Description]
 #   The special object `false` is pushed onto the stack.
 
 instruction push_false() [ -- false ]
-  stack_push(Qfalse);
+  stack_push(cFalse);
 end
 
 # [Description]
@@ -100,7 +100,6 @@ section "Flow control"
 instruction goto(location) [ -- ] => branch
   call_frame->set_ip(location);
   cache_ip(location);
-  DISPATCH;
 end
 
 # [Description]
@@ -112,10 +111,9 @@ end
 
 instruction goto_if_false(location) [ value -- ] => branch
   Object* t1 = stack_pop();
-  if(!RTEST(t1)) {
+  if(!CBOOL(t1)) {
     call_frame->set_ip(location);
     cache_ip(location);
-    DISPATCH;
   }
 end
 
@@ -128,10 +126,9 @@ end
 
 instruction goto_if_true(location) [ value -- ] => branch
   Object* t1 = stack_pop();
-  if(RTEST(t1)) {
+  if(CBOOL(t1)) {
     call_frame->set_ip(location);
     cache_ip(location);
-    DISPATCH;
   }
 end
 
@@ -219,9 +216,7 @@ end
 #   ...
 
 instruction pop_many(count) [ +count -- ]
-  for(intptr_t i = 0; i < count; i++) {
-    (void)stack_pop();
-  }
+  stack_clear(count);
 end
 
 # [Description]
@@ -413,11 +408,7 @@ instruction passed_arg(index) [ -- boolean ]
     RUN_EXCEPTION();
   }
 
-  if(index < (int)call_frame->arguments->total() - vmm->post_args) {
-    stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(index < (int)call_frame->arguments->total() - vmm->post_args));
 end
 
 section "Manipulate exceptions"
@@ -436,14 +427,14 @@ section "Manipulate exceptions"
 #     end
 
 instruction push_current_exception() [ -- exception ]
-  stack_push(state->thread_state()->current_exception());
+  stack_push(state->vm()->thread_state()->current_exception());
 end
 
 # [Description]
 #   Clears any exceptions from the current thread.
 
 instruction clear_exception() [ -- ]
-  state->thread_state()->clear_raise();
+  state->vm()->thread_state()->clear_raise();
 end
 
 # [Description]
@@ -452,7 +443,7 @@ end
 #   For instance, when handling an ensure while an exception is being raised
 
 instruction push_exception_state() [ -- exc_state ]
-  stack_push(state->thread_state()->state_as_object(state));
+  stack_push(state->vm()->thread_state()->state_as_object(state));
 end
 
 # [Description]
@@ -465,9 +456,9 @@ end
 instruction restore_exception_state() [ exception -- ]
     Object* top = stack_pop();
     if(top->nil_p()) {
-      state->thread_state()->clear();
+      state->vm()->thread_state()->clear();
     } else {
-      state->thread_state()->set_state(state, top);
+      state->vm()->thread_state()->set_state(state, top);
     }
 end
 
@@ -480,7 +471,7 @@ end
 instruction raise_exc() [ value -- ] => raise
   flush_ip();
   Object* t1 = stack_pop();
-  state->thread_state()->raise_exception(as<Exception>(t1));
+  state->raise_exception(as<Exception>(t1));
   RUN_EXCEPTION();
 end
 
@@ -541,12 +532,12 @@ instruction raise_return() [ value -- value ] => raise
      !call_frame->scope_still_valid(call_frame->top_scope(state))) {
     Exception* exc = Exception::make_exception(state, G(jump_error), "unexpected return");
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
   } else {
     if(call_frame->flags & CallFrame::cIsLambda) {
-      state->thread_state()->raise_return(stack_top(), call_frame->promote_scope(state));
+      state->vm()->thread_state()->raise_return(stack_top(), call_frame->promote_scope(state));
     } else {
-      state->thread_state()->raise_return(stack_top(), call_frame->top_scope(state));
+      state->vm()->thread_state()->raise_return(stack_top(), call_frame->top_scope(state));
     }
   }
   RUN_EXCEPTION();
@@ -564,7 +555,7 @@ end
 
 instruction ensure_return() [ value -- value ] => raise
   flush_ip();
-  state->thread_state()->raise_return(stack_top(), call_frame->promote_scope(state));
+  state->vm()->thread_state()->raise_return(stack_top(), call_frame->promote_scope(state));
   RUN_EXCEPTION();
 end
 
@@ -577,11 +568,11 @@ instruction raise_break() [ value -- value ] => raise
   if(call_frame->flags & CallFrame::cIsLambda) {
     return stack_top();
   } else if(call_frame->scope_still_valid(call_frame->scope->parent())) {
-    state->thread_state()->raise_break(stack_top(), call_frame->scope->parent());
+    state->vm()->thread_state()->raise_break(stack_top(), call_frame->scope->parent());
   } else {
     Exception* exc = Exception::make_exception(state, G(jump_error), "attempted to break to exited method");
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
   }
   RUN_EXCEPTION();
 end
@@ -591,7 +582,7 @@ end
 #   is a current exception, then begin the unwinding process again.
 
 instruction reraise() [ -- ] => raise
-  interp_assert(state->thread_state()->raise_reason() != cNone);
+  interp_assert(state->vm()->thread_state()->raise_reason() != cNone);
   RUN_EXCEPTION();
 end
 
@@ -617,6 +608,11 @@ section "Manipulate arrays"
 instruction make_array(count) [ +count -- array ]
   Object* t2;
   Array* ary = Array::create(state, count);
+#ifdef RBX_ALLOC_TRACKING
+  if(unlikely(state->vm()->allocation_tracking())) {
+    ary->setup_allocation_site(state, call_frame);
+  }
+#endif
   int j = count - 1;
   for(; j >= 0; j--) {
     t2 = stack_pop();
@@ -634,7 +630,7 @@ end
 #   2. If the input is an array, it is unmodified.
 #   3. If in 1.9 mode and the input is nil, an empty Array is returned
 #
-#   If the input is any other type, call `Array.coerce_into_array(value)`.
+#   If the input is any other type, call `Rubinius::Type.coerce_to_array(value)`.
 #   If the return value of the method call is an `Array`, make it the result.
 #   Otherwise make the result an 1 element `Array` contain the original value.
 #
@@ -644,14 +640,14 @@ instruction cast_array() [ value -- array ]
   // Use stack_top and not stack_pop because we may need
   // to preserve and reread the value from the stack below.
   Object* t1 = stack_top();
-  if(LANGUAGE_19_ENABLED(state) && t1->nil_p()) {
+  if(!LANGUAGE_18_ENABLED(state) && t1->nil_p()) {
     t1 = Array::create(state, 0);
   } else if(Tuple* tup = try_as<Tuple>(t1)) {
     t1 = Array::from_tuple(state, tup);
   } else if(!kind_of<Array>(t1)) {
-    Object* recv = G(array);
-    Arguments args(G(sym_coerce_into_array), recv, 1, &t1);
-    Dispatch dis(G(sym_coerce_into_array));
+    Object* recv = G(type);
+    Arguments args(G(sym_coerce_to_array), recv, 1, &t1);
+    Dispatch dis(G(sym_coerce_to_array));
 
     Object* res = dis.send(state, call_frame, args);
 
@@ -692,7 +688,7 @@ instruction shift_array() [ array -- array value ]
 
   if(size == 0) {
     stack_push(array);
-    stack_push(Qnil);
+    stack_push(cNil);
   } else {
     size_t j = size - 1;
     Object* shifted_value = array->get(state, 0);
@@ -715,7 +711,7 @@ section "Manipulate instance variables"
 #   value popped off the stack is then pushed back on again.
 
 instruction set_ivar(index) [ value -- value ]
-  if(RTEST(call_frame->self()->frozen_p(state))) {
+  if(CBOOL(call_frame->self()->frozen_p(state))) {
     Exception::frozen_error(state, call_frame);
     RUN_EXCEPTION();
   }
@@ -831,42 +827,37 @@ end
 #     engine = RUBY_ENGINE # RUBY_ENGINE is a constant defined by Rubinius
 
 instruction push_const_fast(literal association) [ -- constant ]
-  bool found;
   Object* res = 0;
 
   Object* val = call_frame->cm->literals()->at(state, association);
-  StaticScope* sc = call_frame->static_scope();
 
   // See if the cache is present, if so, validate it and use the value
   GlobalCacheEntry* cache;
+
   if((cache = try_as<GlobalCacheEntry>(val)) != NULL) {
-    if(cache->valid_p(state, sc)) {
+    if(cache->valid_p(state, call_frame->static_scope())) {
       res = cache->value();
-    } else {
-      Symbol* sym = as<Symbol>(call_frame->cm->literals()->at(state, literal));
-      flush_ip();
-      res = Helpers::const_get(state, call_frame, sym, &found);
-      if(found) {
-        cache->update(state, res, sc);
-      }
     }
   } else {
+    cache = GlobalCacheEntry::empty(state);
+    call_frame->cm->literals()->put(state, association, cache);
+  }
+
+  if(!res) {
+    bool found = false;
     flush_ip();
+
     Symbol* sym = as<Symbol>(call_frame->cm->literals()->at(state, literal));
     res = Helpers::const_get(state, call_frame, sym, &found);
+
     if(found) {
       if(Autoload* autoload = try_as<Autoload>(res)) {
         flush_ip();
         res = autoload->resolve(state, call_frame);
-        if(res) {
-          // resolve might run the GC, refetch static_scope
-          sc = call_frame->static_scope();
-          cache = GlobalCacheEntry::create(state, res, sc);
-          call_frame->cm->literals()->put(state, association, cache);
-        }
-      } else {
-        cache = GlobalCacheEntry::create(state, res, sc);
-        call_frame->cm->literals()->put(state, association, cache);
+      }
+
+      if(res) {
+        cache->update(state, res, call_frame->static_scope());
       }
     } else {
       res = Helpers::const_missing(state, sym, call_frame);
@@ -894,7 +885,6 @@ end
 #   Indicate that the next send is allowed to see `private` methods.
 
 instruction allow_private() [ -- ]
-  SET_ALLOW_PRIVATE(true);
 end
 
 # [Description]
@@ -912,9 +902,7 @@ instruction send_method(literal) [ receiver -- value ] => send
   Object* recv = stack_top();
   InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
 
-  SET_ALLOW_PRIVATE(false);
-
-  Arguments args(cache->name, recv, Qnil, 0, 0);
+  Arguments args(cache->name, recv, cNil, 0, 0);
   Object* ret = cache->execute(state, call_frame, args);
 
   (void)stack_pop();
@@ -951,9 +939,7 @@ instruction send_stack(literal count) [ receiver +count -- value ] => send
   Object* recv = stack_back(count);
   InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
 
-  SET_ALLOW_PRIVATE(false);
-
-  Arguments args(cache->name, recv, Qnil, count,
+  Arguments args(cache->name, recv, cNil, count,
                  stack_back_position(count));
 
   Object* ret = cache->execute(state, call_frame, args);
@@ -996,8 +982,6 @@ instruction send_stack_with_block(literal count) [ block receiver +count -- valu
 
   Arguments args(cache->name, recv, block, count,
                  stack_back_position(count));
-
-  SET_ALLOW_PRIVATE(false);
 
   Object* ret = cache->execute(state, call_frame, args);
 
@@ -1051,7 +1035,6 @@ instruction send_stack_with_splat(literal count) [ block array receiver +count -
   }
 
   SET_CALL_FLAGS(0);
-  SET_ALLOW_PRIVATE(false);
 
   Object* ret = cache->execute(state, call_frame, args);
 
@@ -1085,16 +1068,7 @@ instruction send_super_stack_with_block(literal count) [ block +count -- value ]
   Arguments new_args(cache->name, recv, block, count,
                      stack_back_position(count));
 
-  SET_ALLOW_PRIVATE(false);
-
-  Symbol* current_name = call_frame->original_name();
-  if(cache->name != current_name) {
-    cache->name = current_name;
-  }
-
-  Object* ret;
-
-  ret = InlineCache::empty_cache_super(state, cache, call_frame, new_args);
+  Object* ret = cache->execute(state, call_frame, new_args);
 
   stack_clear(count);
 
@@ -1136,7 +1110,6 @@ instruction send_super_stack_with_splat(literal count) [ block array +count -- v
   }
 
   SET_CALL_FLAGS(0);
-  SET_ALLOW_PRIVATE(false);
 
   Symbol* current_name = call_frame->original_name();
   if(cache->name != current_name) {
@@ -1174,11 +1147,7 @@ instruction passed_blockarg(count) [ -- boolean ]
     RUN_EXCEPTION();
   }
 
-  if(count == (int)call_frame->arguments->total()) {
-    stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(count == (int)call_frame->arguments->total()));
 end
 
 # [Description]
@@ -1192,8 +1161,7 @@ instruction create_block(literal) [ -- block ]
   // TODO: We do not need to be doing this everytime.
   cm->scope(state, call_frame->static_scope());
 
-  Object* be = BlockEnvironment::under_call_frame(state, cm, vmm, call_frame,
-                                                  literal);
+  Object* be = BlockEnvironment::under_call_frame(state, gct, cm, vmm, call_frame);
 
   CHECK_AND_PUSH(be);
 end
@@ -1225,7 +1193,7 @@ instruction cast_for_single_block_arg() [ -- argument ]
 
   int k = call_frame->arguments->total();
   if(k == 0) {
-    stack_push(Qnil);
+    stack_push(cNil);
   } else if(k == 1) {
     stack_push(call_frame->arguments->get_argument(0));
   } else {
@@ -1279,7 +1247,7 @@ instruction cast_for_multi_block_arg() [ -- array ]
     Object* obj = call_frame->arguments->get_argument(0);
     if(kind_of<Array>(obj)) {
       stack_push(obj);
-    } else if(RTEST(obj->respond_to(state, state->symbol("to_ary"), Qfalse))) {
+    } else if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
       obj = obj->send(state, call_frame, state->symbol("to_ary"));
       if(kind_of<Array>(obj)) {
         stack_push(obj);
@@ -1321,9 +1289,9 @@ instruction cast_for_splat_block_arg() [ -- arguments ]
        * to be called and its return value ignored. Ultimately, the original
        * object itself is wrapped in an Array and passed to the block.
        */
-      if(RTEST(obj->respond_to(state, state->symbol("to_ary"), Qfalse))) {
+      if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
         Object* ignored = obj->send(state, call_frame, state->symbol("to_ary"));
-        if(!kind_of<Array>(ignored)) {
+        if(!ignored->nil_p() && !kind_of<Array>(ignored)) {
           Exception::type_error(state, "to_ary must return an Array", call_frame);
           RUN_EXCEPTION();
         }
@@ -1366,7 +1334,7 @@ instruction yield_stack(count) [ +count -- value ] => yield
   } else if(Proc* proc = try_as<Proc>(t1)) {
     ret = proc->yield(state, call_frame, args);
   } else if(t1->nil_p()) {
-    state->thread_state()->raise_exception(Exception::make_lje(state, call_frame));
+    state->raise_exception(Exception::make_lje(state, call_frame));
     ret = NULL;
   } else {
     Dispatch dis(G(sym_call));
@@ -1411,7 +1379,7 @@ instruction yield_splat(count) [ array +count -- value ] => yield
   } else if(Proc* proc = try_as<Proc>(t1)) {
     ret = proc->yield(state, call_frame, args);
   } else if(t1->nil_p()) {
-    state->thread_state()->raise_exception(Exception::make_lje(state, call_frame));
+    state->raise_exception(Exception::make_lje(state, call_frame));
     ret = NULL;
   } else {
     Dispatch dis(G(sym_call));
@@ -1461,6 +1429,10 @@ instruction string_build(count) [ +count -- string ]
   size_t size = 0;
 
   bool tainted = false;
+  bool untrusted = false;
+
+  bool check_encoding = false;
+  Encoding* enc = nil<Encoding>();
 
   // Figure out the total size
   for(int i = 0; i < count; i++) {
@@ -1468,13 +1440,14 @@ instruction string_build(count) [ +count -- string ]
 
     if(obj->reference_p()) {
       tainted |= obj->is_tainted_p();
+      untrusted |= obj->is_untrusted_p();
     }
 
     String* str = try_as<String>(obj);
 
     if(str) {
-      native_int cur_size = str->size();
-      native_int data_size = as<CharArray>(str->data())->size();
+      native_int cur_size = str->byte_size();
+      native_int data_size = as<ByteArray>(str->data())->size();
       if(unlikely(cur_size > data_size)) {
         cur_size = data_size;
       }
@@ -1486,9 +1459,11 @@ instruction string_build(count) [ +count -- string ]
       // this way instead.
 
       str = obj->to_s(state, false);
+
       tainted |= str->is_tainted_p();
-      native_int cur_size = str->size();
-      native_int data_size = as<CharArray>(str->data())->size();
+      untrusted |= str->is_untrusted_p();
+      native_int cur_size = str->byte_size();
+      native_int data_size = as<ByteArray>(str->data())->size();
       if(unlikely(cur_size > data_size)) {
         cur_size = data_size;
       }
@@ -1497,26 +1472,83 @@ instruction string_build(count) [ +count -- string ]
       // TRICKY! Reuse the stack to store our new String value.
       stack_back(i) = str;
     }
+
+    if(!LANGUAGE_18_ENABLED(state)) {
+      /* The String::encoding() accessor (without state) returns the raw
+       * Encoding attribute. If it is only ever cNil or all values are the
+       * same, we don't need to check Encoding compatibility later.
+       *
+       * TODO: Consider the case when -K is set (not implemented yet).
+       */
+      if(!check_encoding) {
+        Encoding* str_enc = str->encoding();
+        if(!str_enc->nil_p()) {
+          if(enc->nil_p()) {
+            enc = str_enc;
+          } else if(str_enc != enc) {
+            check_encoding = true;
+            enc = nil<Encoding>();
+          }
+        }
+      }
+    }
   }
 
   String* str = String::create(state, 0, size);
+#ifdef RBX_ALLOC_TRACKING
+  if(unlikely(state->vm()->allocation_tracking())) {
+    str->setup_allocation_site(state, call_frame);
+  }
+#endif
+
   uint8_t* pos = str->byte_address();
+  native_int str_size = 0;
 
   for(int i = count - 1; i >= 0; i--) {
     Object* obj = stack_back(i);
-    String* sub = as<String>(obj);
-    native_int sub_size = sub->size();
-    native_int data_size = as<CharArray>(sub->data())->size();
+
+    // We can force here because we've typed check them above.
+    String* sub = force_as<String>(obj);
+
+    native_int sub_size = sub->byte_size();
+    native_int data_size = as<ByteArray>(sub->data())->size();
     if(unlikely(sub_size > data_size)) {
       sub_size = data_size;
     }
 
+    if(!LANGUAGE_18_ENABLED(state)) {
+      if(check_encoding) {
+        if(i < count - 1) {
+          str->num_bytes(state, Fixnum::from(str_size));
 
-    memcpy(pos, sub->byte_address(), sub_size);
-    pos += sub_size;
+          Encoding* enc = Encoding::compatible_p(state, str, sub);
+
+          if(enc->nil_p()) {
+            Exception::encoding_compatibility_error(state, str, sub);
+            RUN_EXCEPTION();
+          } else {
+            str->encoding(state, enc);
+          }
+        } else {
+          str->encoding(state, sub->encoding());
+        }
+      }
+    }
+
+    memcpy(pos + str_size, sub->byte_address(), sub_size);
+    str_size += sub_size;
+  }
+
+  if(!LANGUAGE_18_ENABLED(state)) {
+    /* We had to set the size of the result String before every Encoding check
+     * so we have to set it to the final size here.
+     */
+    if(check_encoding) str->num_bytes(state, Fixnum::from(size));
+    if(!enc->nil_p()) str->encoding(state, enc);
   }
 
   if(tainted) str->set_tainted();
+  if(untrusted) str->set_untrusted();
 
   stack_clear(count);
   stack_push(str);
@@ -1530,7 +1562,13 @@ end
 instruction string_dup() [ string -- string ]
   flush_ip();
   String *s1 = as<String>(stack_pop());
-  stack_push(s1->string_dup(state));
+  String *dup = s1->string_dup(state);
+#ifdef RBX_ALLOC_TRACKING
+  if(unlikely(state->vm()->allocation_tracking())) {
+    dup->setup_allocation_site(state, call_frame);
+  }
+#endif
+  stack_push(dup);
 end
 
 section "Manipulate scope"
@@ -1582,20 +1620,9 @@ instruction check_interrupts() [ -- ]
   // This is used in loops, and allows loops to heat a method up.
   if(vmm->call_count >= 0) vmm->call_count++;
 
-  // The | here reduces the number of branches to check
-  if(unlikely(state->interrupts.check)) {
-    state->interrupts.checked();
-
-    if(state->interrupts.perform_gc) {
-      state->interrupts.perform_gc = false;
-      state->collect_maybe(call_frame);
-    }
-  }
-
   if(!state->check_async(call_frame)) RUN_EXCEPTION();
 
-  state->set_call_frame(call_frame);
-  state->shared.checkpoint(state);
+  state->checkpoint(gct, call_frame);
 end
 
 # [Description]
@@ -1606,7 +1633,7 @@ end
 
 instruction yield_debugger() [ -- ]
   flush_ip();
-  Helpers::yield_debugger(state, call_frame, Qnil);
+  Helpers::yield_debugger(state, gct, call_frame, cNil);
 end
 
 # [Description]
@@ -1614,7 +1641,7 @@ end
 #   whether the consumed value was the special value `nil`.
 
 instruction is_nil() [ value -- boolean ]
-  stack_push(stack_pop() == Qnil ? Qtrue : Qfalse);
+  stack_push(RBOOL(stack_pop() == cNil));
 end
 
 # [Description]
@@ -1645,11 +1672,7 @@ instruction check_serial(literal serial) [ receiver -- boolean ]
   MethodCacheEntry* mce =
       cache->update_and_validate(state, call_frame, recv);
 
-  if(mce && mce->method()->serial()->to_native() == serial) {
-     stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(mce && mce->method()->serial()->to_native() == serial));
 end
 
 # [Description]
@@ -1665,11 +1688,7 @@ instruction check_serial_private(literal serial) [ receiver -- boolean ]
   MethodCacheEntry* mce =
       cache->update_and_validate_private(state, call_frame, recv);
 
-  if(mce && mce->method()->serial()->to_native() == serial) {
-     stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(mce && mce->method()->serial()->to_native() == serial));
 end
 
 section "Access object fields"
@@ -1713,11 +1732,7 @@ section "Type checks"
 instruction kind_of() [ object class -- boolean ]
   Object* t1 = stack_pop();
   Object* mod = stack_pop();
-  if(t1->kind_of_p(state, mod)) {
-    stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(t1->kind_of_p(state, mod)));
 end
 
 # [Description]
@@ -1731,11 +1746,7 @@ end
 instruction instance_of() [ object class -- boolean ]
   Object* t1 = stack_pop();
   Class* cls = as<Class>(stack_pop());
-  if(t1->class_object(state) == cls) {
-    stack_push(Qtrue);
-  } else {
-    stack_push(Qfalse);
-  }
+  stack_push(RBOOL(t1->class_object(state) == cls));
 end
 
 section "Optimizations"
@@ -1847,7 +1858,7 @@ instruction meta_send_op_equal(literal) [ value1 value2 -- boolean ] => send
   /* If both are not references, compare them directly. */
   if(!t1->reference_p() && !t2->reference_p()) {
     (void)stack_pop();
-    stack_set_top((t1 == t2) ? Qtrue : Qfalse);
+    stack_set_top(RBOOL(t1 == t2));
   } else {
     flush_ip();
 
@@ -1874,7 +1885,7 @@ instruction meta_send_op_lt(literal) [ value1 value2 -- boolean ]
     native_int j = as<Integer>(t1)->to_native();
     native_int k = as<Integer>(t2)->to_native();
     (void)stack_pop();
-    stack_set_top((j < k) ? Qtrue : Qfalse);
+    stack_set_top(RBOOL(j < k));
   } else {
     flush_ip();
     InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
@@ -1901,7 +1912,7 @@ instruction meta_send_op_gt(literal) [ value1 value2 -- boolean ]
     native_int j = as<Integer>(t1)->to_native();
     native_int k = as<Integer>(t2)->to_native();
     (void)stack_pop();
-    stack_set_top((j > k) ? Qtrue : Qfalse);
+    stack_set_top(RBOOL(j > k));
   } else {
     flush_ip();
     InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
@@ -1930,7 +1941,7 @@ instruction meta_send_op_tequal(literal) [ value1 value2 -- boolean ] => send
   /* If both are fixnums, or both are symbols, compare the ops directly. */
   if((t1->fixnum_p() && t2->fixnum_p()) || (t1->symbol_p() && t2->symbol_p())) {
     (void)stack_pop();
-    stack_set_top((t1 == t2) ? Qtrue : Qfalse);
+    stack_set_top(RBOOL(t1 == t2));
   } else {
     flush_ip();
     InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
@@ -2050,8 +2061,6 @@ instruction zsuper(literal) [ block -- value ]
   Arguments new_args(cache->name, recv, block, arg_count, 0);
   new_args.use_tuple(tup, arg_count);
 
-  SET_ALLOW_PRIVATE(false);
-
   Object* ret;
 
   Symbol* current_name = call_frame->original_name();
@@ -2116,7 +2125,7 @@ end
 #   Used to implement `block_given?` without having to directly expose
 #   the block object itself. This simplifies JIT inlining.
 instruction push_has_block() [ -- value ]
-  stack_push(RTEST(call_frame->scope->block()) ? Qtrue : Qfalse);
+  stack_push(RBOOL(CBOOL(call_frame->scope->block())));
 end
 
 # [Description]
@@ -2135,7 +2144,7 @@ instruction push_proc() [ -- value ]
   }
 
   Object* obj = call_frame->arguments->block();
-  if(RTEST(obj)) {
+  if(CBOOL(obj)) {
     Object* prc = Proc::from_env(state, G(proc), obj);
     if(prc == Primitives::failure()) {
       Exception::internal_error(state, call_frame, "invalid block type");
@@ -2143,7 +2152,7 @@ instruction push_proc() [ -- value ]
     }
     stack_push(prc);
   } else {
-    stack_push(Qnil);
+    stack_push(cNil);
   }
 end
 
@@ -2236,9 +2245,7 @@ instruction call_custom(literal count) [ receiver +count -- value ] => send
   Object* recv = stack_back(count);
   InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
 
-  SET_ALLOW_PRIVATE(false);
-
-  Arguments args(cache->name, recv, Qnil, count,
+  Arguments args(cache->name, recv, cNil, count,
                  stack_back_position(count));
 
   Object* ret = cache->execute(state, call_frame, args);
@@ -2261,9 +2268,7 @@ instruction meta_to_s(literal) [ object -- string ] => send
     flush_ip();
     InlineCache* cache = reinterpret_cast<InlineCache*>(literal);
 
-    SET_ALLOW_PRIVATE(false);
-
-    Arguments args(cache->name, stack_top(), Qnil, 0, 0);
+    Arguments args(cache->name, stack_top(), cNil, 0, 0);
     Object* ret = cache->execute(state, call_frame, args);
     if(ret && !kind_of<String>(ret)) {
       ret = stack_top()->to_s(state, false);

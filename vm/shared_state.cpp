@@ -15,6 +15,13 @@
 
 #include "agent.hpp"
 #include "world_state.hpp"
+#include "builtin/randomizer.hpp"
+#include "builtin/array.hpp"
+#include "builtin/thread.hpp"
+
+#ifdef ENABLE_LLVM
+#include "llvm/state.hpp"
+#endif
 
 namespace rubinius {
 
@@ -33,8 +40,9 @@ namespace rubinius {
     , env_(env)
     , tool_broker_(new tooling::ToolBroker)
     , ruby_critical_set_(false)
-
+    , check_gc_(false)
     , om(0)
+
     , global_cache(new GlobalCache)
     , config(config)
     , user_variables(cp)
@@ -45,12 +53,24 @@ namespace rubinius {
     for(int i = 0; i < Primitives::cTotalPrimitives; i++) {
       primitive_hits_[i] = 0;
     }
+
+    hash_seed = Randomizer::random_uint32();
   }
 
   SharedState::~SharedState() {
     if(!initialized_) return;
 
-    // std::cerr << "Time waiting: " << world_->time_waiting() << "\n";
+    if(config.gc_show) {
+      std::cerr << "Time spent waiting: " << world_->time_waiting() << "\n";
+    }
+
+#ifdef ENABLE_LLVM
+    if(llvm_state) {
+      delete llvm_state;
+    }
+#endif
+
+    delete tool_broker_;
     delete world_;
     delete ic_registry_;
     delete om;
@@ -63,12 +83,12 @@ namespace rubinius {
   }
 
   void SharedState::add_managed_thread(ManagedThread* thr) {
-    SYNC(0);
+    SYNC_TL;
     threads_.push_back(thr);
   }
 
   void SharedState::remove_managed_thread(ManagedThread* thr) {
-    SYNC(0);
+    SYNC_TL;
     threads_.remove(thr);
   }
 
@@ -82,15 +102,15 @@ namespace rubinius {
     if(ss->deref()) delete ss;
   }
 
-  uint32_t SharedState::new_thread_id(THREAD) {
-    SYNC(state);
+  uint32_t SharedState::new_thread_id() {
+    SYNC_TL;
     return ++thread_ids_;
   }
 
   VM* SharedState::new_vm() {
-    uint32_t id = new_thread_id(0);
+    uint32_t id = new_thread_id();
 
-    SYNC(0);
+    SYNC_TL;
 
     // TODO calculate the thread id by finding holes in the
     // field of ids, so we reuse ids.
@@ -106,12 +126,29 @@ namespace rubinius {
   }
 
   void SharedState::remove_vm(VM* vm) {
-    SYNC(0);
+    SYNC_TL;
+    threads_.remove(vm);
     this->deref();
 
     // Don't delete ourself here, it's too problematic.
   }
 
+  Array* SharedState::vm_threads(STATE) {
+    SYNC_TL;
+
+    Array* threads = Array::create(state, 0);
+    for(std::list<ManagedThread*>::iterator i = threads_.begin();
+        i != threads_.end();
+        ++i) {
+      if(VM* vm = (*i)->as_vm()) {
+        Thread *thread = vm->thread.get();
+        if(!thread->signal_handler_thread_p() && CBOOL(thread->alive())) {
+          threads->append(state, (Object*)thread);
+        }
+      }
+    }
+    return threads;
+  }
 
   void SharedState::add_global_handle(STATE, capi::Handle* handle) {
     SYNC(state);
@@ -127,19 +164,19 @@ namespace rubinius {
   QueryAgent* SharedState::autostart_agent(STATE) {
     SYNC(state);
     if(agent_) return agent_;
-    agent_ = new QueryAgent(*this, root_vm_);
+    agent_ = new QueryAgent(*this, state);
     return agent_;
   }
 
-  /**
-   * Create the preemption thread and call scheduler_loop() in the new thread.
-   */
-  void SharedState::enable_preemption() {
-    interrupts.enable_preempt = true;
+  void SharedState::stop_agent(STATE) {
+    if(agent_) {
+      agent_->shutdown_i();
+      agent_ = NULL;
+    }
   }
 
   void SharedState::pre_exec() {
-    SYNC(0);
+    SYNC_TL;
     if(agent_) agent_->cleanup();
   }
 
@@ -151,7 +188,15 @@ namespace rubinius {
 
     env_->state = state;
     threads_.clear();
-    threads_.push_back(state);
+    threads_.push_back(state->vm());
+
+    // Reinit the locks for this object
+    lock_init(state->vm());
+    global_cache->lock_init(state->vm());
+    ic_registry_->lock_init(state->vm());
+    onig_lock_.init();
+    ruby_critical_lock_.init();
+    capi_lock_.init();
 
     world_->reinit();
 
@@ -162,45 +207,36 @@ namespace rubinius {
     }
   }
 
-  void SharedState::ask_for_stopage() {
-    world_->ask_for_stopage();
-  }
-
   bool SharedState::should_stop() {
     return world_->should_stop();
   }
 
-  void SharedState::stop_the_world(THREAD) {
-    world_->wait_til_alone(state);
+  bool SharedState::stop_the_world(THREAD) {
+    return world_->wait_til_alone(state);
+  }
 
-    // Verify that everyone is stopped and we're alone.
-    for(std::list<ManagedThread*>::iterator i = threads_.begin();
-        i != threads_.end();
-        i++) {
-      ManagedThread *th = *i;
-      switch(th->run_state()) {
-      case ManagedThread::eAlone:
-        if(th != state) {
-          rubinius::bug("Tried to stop but someone else is alone!");
-        }
-        break;
-      case ManagedThread::eRunning:
-        rubinius::bug("Tried to stop but threads still running!");
-        break;
-      case ManagedThread::eSuspended:
-      case ManagedThread::eIndependent:
-        // Ok, this is fine.
-        break;
-      }
-    }
+  void SharedState::stop_threads_externally() {
+    world_->stop_threads_externally();
   }
 
   void SharedState::restart_world(THREAD) {
     world_->wake_all_waiters(state);
   }
 
+  void SharedState::restart_threads_externally() {
+    world_->restart_threads_externally();
+  }
+
   bool SharedState::checkpoint(THREAD) {
     return world_->checkpoint(state);
+  }
+
+  void SharedState::gc_dependent(STATE) {
+    world_->become_dependent(state->vm());
+  }
+
+  void SharedState::gc_independent(STATE) {
+    world_->become_independent(state->vm());
   }
 
   void SharedState::gc_dependent(THREAD) {
@@ -236,11 +272,11 @@ namespace rubinius {
     }
   }
 
-  void SharedState::enter_capi(STATE) {
-    capi_lock_.lock(state);
+  void SharedState::enter_capi(STATE, const char* file, int line) {
+    capi_lock_.lock(state->vm(), file, line);
   }
 
   void SharedState::leave_capi(STATE) {
-    capi_lock_.unlock(state);
+    capi_lock_.unlock(state->vm());
   }
 }

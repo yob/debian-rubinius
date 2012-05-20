@@ -3,6 +3,7 @@ class.rbc
 binding.rbc
 proc.rbc
 autoload.rbc
+autoload19.rbc
 module.rbc
 module19.rbc
 enumerable19.rbc
@@ -12,6 +13,7 @@ enumerator19.rbc
 argf.rbc
 tuple.rbc
 exception.rbc
+exception19.rbc
 undefined.rbc
 hash19.rbc
 hash_hamt.rbc
@@ -35,8 +37,7 @@ integer19.rbc
 bignum.rbc
 block_environment.rbc
 bytearray.rbc
-chararray.rbc
-chararray19.rbc
+bytearray19.rbc
 channel.rbc
 executable.rbc
 static_scope.rbc
@@ -55,6 +56,7 @@ lrucache.rbc
 dir_glob.rbc
 encoding.rbc
 env.rbc
+env19.rbc
 errno.rbc
 eval.rbc
 eval19.rbc
@@ -73,9 +75,11 @@ location.rbc
 lookuptable.rbc
 main.rbc
 marshal.rbc
+marshal19.rbc
 math.rbc
 math19.rbc
 method.rbc
+method19.rbc
 method_table.rbc
 native_method.rbc
 nil.rbc
@@ -83,9 +87,12 @@ objectspace.rbc
 string.rbc
 string19.rbc
 range.rbc
+range19.rbc
 struct.rbc
 process.rbc
+process19.rbc
 random.rbc
+random19.rbc
 regexp.rbc
 regexp19.rbc
 signal.rbc
@@ -101,3 +108,4 @@ variable_scope.rbc
 capi.rbc
 complex.rbc
 rational.rbc
+rationalizer.rbc

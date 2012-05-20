@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Proc
   def self.allocate
     Rubinius.primitive :proc_allocate
@@ -19,6 +21,6 @@ class Proc
   end
 
   def lambda?
-    @lambda
+    !!@lambda
   end
 end

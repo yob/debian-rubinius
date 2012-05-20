@@ -12,6 +12,7 @@ namespace rubinius {
 
   class ConfigParser;
   class QueryAgent;
+  class SignalHandler;
 
   /**
    * Thrown when there is a bad signature on a kernel .rbc file.
@@ -44,10 +45,13 @@ namespace rubinius {
     // The Ruby library version with which the .rbc file is compatible.
     int version_;
 
+    SignalHandler* sig_handler_;
+
   public:
     SharedState* shared;
-    VM* state;
+    VM* root_vm;
     QueryAgent* agent;
+    State* state;
 
     ConfigParser  config_parser;
     Configuration config;
@@ -78,8 +82,10 @@ namespace rubinius {
     void run_from_filesystem(std::string root);
     void boot_vm();
 
-    void halt();
-    int exit_code();
+    void halt(STATE);
+    void halt_and_exit(STATE);
+    int exit_code(STATE);
+
     void start_signals();
     void start_agent(int port);
   };

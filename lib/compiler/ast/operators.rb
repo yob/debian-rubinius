@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class And < Node
@@ -365,6 +367,18 @@ module Rubinius
 
       def sexp_name
         :op_asgn_or
+      end
+    end
+
+    class OpAssignOr19 < OpAssignOr
+      def bytecode(g)
+        pos(g)
+
+        g.state.push_op_asgn
+        @left.or_bytecode(g) do
+          g.state.pop_op_asgn
+          @right.bytecode(g)
+        end
       end
     end
   end

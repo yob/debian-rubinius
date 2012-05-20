@@ -9,15 +9,21 @@
 #include "builtin/system.hpp"
 #include "builtin/tuple.hpp"
 
+#include "builtin/fiber.hpp"
+#include "fiber_data.hpp"
+
+#include "ontology.hpp"
+
 namespace rubinius {
   void VariableScope::init(STATE) {
-    GO(variable_scope).set(state->new_class("VariableScope", G(object), G(rubinius)));
+    GO(variable_scope).set(ontology::new_class(state,
+          "VariableScope", G(object), G(rubinius)));
     G(variable_scope)->set_object_type(state, VariableScopeType);
-    G(variable_scope)->name(state, state->symbol("Rubinius::VariableScope"));
   }
 
   void VariableScope::bootstrap_methods(STATE) {
-    System::attach_primitive(state,
+    GCTokenImpl gct;
+    System::attach_primitive(state, gct,
                              G(variable_scope), false,
                              state->symbol("method_visibility"),
                              state->symbol("variable_scope_method_visibility"));
@@ -35,6 +41,35 @@ namespace rubinius {
     return call_frame->promote_scope(state);
   }
 
+  VariableScope* VariableScope::synthesize(STATE, CompiledMethod* method,
+                                           Module* module, Object* parent,
+                                           Object* self, Object* block,
+                                           Tuple* locals)
+  {
+    VariableScope* scope = state->new_object<VariableScope>(G(variable_scope));
+
+    scope->block(state, block);
+    scope->module(state, module);
+    scope->method(state, method);
+
+    if(VariableScope* vs = try_as<VariableScope>(parent)) {
+      scope->parent(state, vs);
+    } else {
+      scope->parent(state, nil<VariableScope>());
+    }
+
+    scope->heap_locals(state, locals);
+    scope->last_match(state, cNil);
+
+    scope->self(state, self);
+    scope->number_of_locals_ = locals->num_fields();
+    scope->isolated_ = true;
+    scope->locals_ = 0;
+    scope->block_as_method_ = 0;
+
+    return scope;
+  }
+
   Tuple* VariableScope::locals(STATE) {
     Tuple* tup = Tuple::create(state, number_of_locals_);
     for(int i = 0; i < number_of_locals_; i++) {
@@ -44,9 +79,22 @@ namespace rubinius {
     return tup;
   }
 
+  Object* VariableScope::set_local_prim(STATE, Fixnum* number, Object* object) {
+    int num = number->to_int();
+
+    if(num < 0) {
+      Exception::argument_error(state, "negative local index");
+    } else if (num >= number_of_locals_) {
+      Exception::argument_error(state, "index larger than number of locals");
+    }
+
+    set_local(state, num, object);
+    return cNil;
+  }
+
   // bootstrap method, replaced with an attr_accessor in kernel.
   Object* VariableScope::method_visibility(STATE) {
-    return Qnil;
+    return cNil;
   }
 
   void VariableScope::Info::mark(Object* obj, ObjectMark& mark) {
@@ -58,26 +106,22 @@ namespace rubinius {
 
     if(!vs->isolated()) {
       Object** ary = vs->stack_locals();
+
+      if(Fiber* fib = try_as<Fiber>(vs->fiber())) {
+        FiberData* data = fib->data();
+
+        AddressDisplacement dis(data->data_offset(),
+                                data->data_lower_bound(),
+                                data->data_upper_bound());
+
+        ary = dis.displace(ary);
+      }
+
       size_t locals = vs->number_of_locals();
 
       for(size_t i = 0; i < locals; i++) {
         Object* tmp = mark.call(ary[i]);
         if(tmp) { ary[i] = tmp; }
-      }
-    }
-  }
-
-  void VariableScope::Info::visit(Object* obj, ObjectVisitor& visit) {
-    auto_visit(obj, visit);
-
-    VariableScope* vs = as<VariableScope>(obj);
-
-    if(!vs->isolated()) {
-      Object** ary = vs->stack_locals();
-      size_t locals = vs->number_of_locals();
-
-      for(size_t i = 0; i < locals; i++) {
-        visit.call(ary[i]);
       }
     }
   }

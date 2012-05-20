@@ -16,6 +16,9 @@
 #include "builtin/float.hpp"
 #include "builtin/string.hpp"
 #include "builtin/bytearray.hpp"
+#include "configuration.hpp"
+
+#include "ontology.hpp"
 
 #include "missing/math.h"
 
@@ -52,16 +55,25 @@ namespace rubinius {
 
     mp_zero(a);
 
-    while(b > MP_DIGIT_MAX) {
-      a->dp[0] |= b >> DIGIT_BIT;
+    int digits = 0;
+    unsigned long tmp = b;
+    do {
+      ++digits;
+    } while((tmp >>= DIGIT_BIT) > MP_DIGIT_MAX);
+
+    for(; digits > 0; --digits) {
+      int digit_bits = DIGIT_BIT * digits;
+
+      a->dp[0] |= (b >> digit_bits);
       a->used += 1;
       if((err = mp_mul_2d(MPST, a, DIGIT_BIT, a)) != MP_OKAY) {
         return err;
       }
-      b &= MP_MASK;
+
+      b &= (1UL << digit_bits) - 1;
     }
 
-    a->dp[0] |= b;
+    a->dp[0] |= (b & MP_MASK);
     a->used += 1;
 
     mp_clamp(a);
@@ -88,7 +100,7 @@ namespace rubinius {
   }
 
   static void twos_complement MPA(mp_int* a) {
-    long i = a->used;
+    int i = a->used;
 
     while(i--) {
       DIGIT(a,i) = (~DIGIT(a,i)) & (DIGIT_RADIX-1);
@@ -115,12 +127,14 @@ namespace rubinius {
     if(y->sign == MP_NEG) {
       mp_copy(MPST, y, &b);
       twos_complement(MPST, &b);
+      b.used = y->used;
       y = &b;
     }
 
     if(x->sign == MP_NEG) {
       mp_copy(MPST, x, &a);
       twos_complement(MPST, &a);
+      a.used = x->used;
       x = &a;
     }
 
@@ -175,7 +189,7 @@ namespace rubinius {
         }
 
         for(; i < l2; i++) {
-          DIGIT(n,i) = (sign == MP_ZPOS) ? 
+          DIGIT(n,i) = (sign == MP_ZPOS) ?
                           DIGIT(d2,i) :
                           (~DIGIT(d2,i) & (DIGIT_RADIX-1));
         }
@@ -192,7 +206,7 @@ namespace rubinius {
   }
 
   void Bignum::init(STATE) {
-    GO(bignum).set(state->new_class("Bignum", G(integer)));
+    GO(bignum).set(ontology::new_class(state, "Bignum", G(integer)));
     G(bignum)->set_object_type(state, BignumType);
   }
 
@@ -219,7 +233,7 @@ namespace rubinius {
   }
 
   Bignum* Bignum::create(STATE) {
-    Bignum* o = state->new_struct<Bignum>(G(bignum));
+    Bignum* o = state->vm()->new_struct<Bignum>(G(bignum));
     mp_init_managed(state, o->mp_val());
     return o;
   }
@@ -359,6 +373,10 @@ namespace rubinius {
     return mp_val()->sign != MP_NEG;
   }
 
+  bool Bignum::even_p() {
+    return mp_iseven(mp_val()) == MP_YES;
+  }
+
   Integer* Bignum::normalize(STATE, Bignum* b) {
     mp_clamp(b->mp_val());
 
@@ -481,7 +499,7 @@ namespace rubinius {
   }
 
   Integer* Bignum::divide(STATE, Bignum* b, Integer** remainder) {
-    if(mp_cmp_d(b->mp_val(), 0) == MP_EQ) {
+    if(mp_iszero(b->mp_val())) {
       Exception::zero_division_error(state, "divided by 0");
     }
 
@@ -489,7 +507,7 @@ namespace rubinius {
     MMP;
 
     mp_div(XST, mp_val(), b->mp_val(), n, m);
-    if(mp_val()->sign != b->mp_val()->sign && mp_cmp_d(m, 0) != MP_EQ) {
+    if(mp_val()->sign != b->mp_val()->sign && !mp_iszero(m)) {
       mp_sub_d(XST, n, 1, n);
       mp_mul(XST, b->mp_val(), n, m);
       mp_sub(XST, mp_val(), m, m);
@@ -563,6 +581,9 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_and(STATE, Float* b) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return bit_and(state, Bignum::from_double(state, b->val));
   }
 
@@ -579,6 +600,9 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_or(STATE, Float* b) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return bit_or(state, Bignum::from_double(state, b->val));
   }
 
@@ -594,24 +618,18 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_xor(STATE, Float* b) {
+    if(!LANGUAGE_18_ENABLED(state)) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return bit_xor(state, Bignum::from_double(state, b->val));
   }
 
   Integer* Bignum::invert(STATE) {
     NMP;
 
-    mp_int a;
-    mp_int b;
-
-    mp_init(&a);
-    mp_init_set_int(XST, &b, 1);
-
     /* inversion by -(a)-1 */
-    mp_neg(XST, mp_val(), &a);
-    mp_sub(XST, &a, &b, n);
-
-    mp_clear(&a);
-    mp_clear(&b);
+    mp_neg(XST, mp_val(), n);
+    mp_sub_d(XST, n, 1, n);
 
     return Bignum::normalize(state, n_obj);
   }
@@ -711,22 +729,30 @@ namespace rubinius {
   Object* Bignum::pow(STATE, Fixnum *exponent) {
     NMP;
 
-    int exp = exponent->to_native();
+    native_int exp = exponent->to_native();
+
+    if(!LANGUAGE_18_ENABLED(state) && exp < 0) {
+      return Primitives::failure();
+    }
+
     if(exp < 0) {
       return this->to_float(state)->fpow(state, exponent);
     }
 
-    mp_int* a = mp_val();
-    mp_expt_d(XST, a, exp, n);
+    mp_expt_d(XST, mp_val(), exp, n);
 
     return Bignum::normalize(state, n_obj);
   }
 
   Object* Bignum::pow(STATE, Bignum *exponent) {
+    if(!LANGUAGE_18_ENABLED(state) && CBOOL(exponent->lt(state, Fixnum::from(0)))) {
+      return Primitives::failure();
+    }
+
     return this->to_float(state)->fpow(state, exponent);
   }
 
-  Float* Bignum::pow(STATE, Float *exponent) {
+  Object* Bignum::pow(STATE, Float *exponent) {
     return this->to_float(state)->fpow(state, exponent);
   }
 
@@ -751,16 +777,16 @@ namespace rubinius {
     }
 
     if(r == MP_EQ) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::equal(STATE, Bignum* b) {
     if(mp_cmp(mp_val(), b->mp_val()) == MP_EQ) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::equal(STATE, Float* b) {
@@ -832,22 +858,22 @@ namespace rubinius {
       mp_clear(&n);
 
       if(r == MP_LT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     } else {
       if(mp_cmp_d(a, bi) == MP_GT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     }
   }
 
   Object* Bignum::gt(STATE, Bignum* b) {
     if(mp_cmp(mp_val(), b->mp_val()) == MP_GT) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::gt(STATE, Float* b) {
@@ -865,15 +891,15 @@ namespace rubinius {
       int r = mp_cmp_d(&n, -bi);
       mp_clear(&n);
       if(r == MP_EQ || r == MP_LT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     } else {
       int r = mp_cmp_d(a, bi);
       if(r == MP_EQ || r == MP_GT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     }
   }
 
@@ -884,9 +910,9 @@ namespace rubinius {
   Object* Bignum::ge(STATE, Bignum* b) {
     int r = mp_cmp(mp_val(), b->mp_val());
     if(r == MP_GT || r == MP_EQ) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::lt(STATE, Fixnum* b) {
@@ -903,22 +929,22 @@ namespace rubinius {
       mp_clear(&n);
 
       if(r == MP_GT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     } else {
       if(mp_cmp_d(a, bi) == MP_LT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     }
   }
 
   Object* Bignum::lt(STATE, Bignum* b) {
     if(mp_cmp(mp_val(), b->mp_val()) == MP_LT) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::lt(STATE, Float* b) {
@@ -936,24 +962,24 @@ namespace rubinius {
       int r = mp_cmp_d(&n, -bi);
       mp_clear(&n);
       if(r == MP_EQ || r == MP_GT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     } else {
       int r = mp_cmp_d(a, bi);
       if(r == MP_EQ || r == MP_LT) {
-        return Qtrue;
+        return cTrue;
       }
-      return Qfalse;
+      return cFalse;
     }
   }
 
   Object* Bignum::le(STATE, Bignum* b) {
     int r = mp_cmp(mp_val(), b->mp_val());
     if(r == MP_LT || r == MP_EQ) {
-      return Qtrue;
+      return cTrue;
     }
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Bignum::le(STATE, Float* b) {
@@ -965,28 +991,25 @@ namespace rubinius {
   }
 
   String* Bignum::to_s(STATE, Fixnum* base) {
-    char *buf;
-    int sz = 1024;
-    int k;
-    native_int b;
-    String* obj;
-
-    b = base->to_native();
+    native_int b = base->to_native();
+    mp_int* self = mp_val();
     if(b < 2 || b > 36) {
       Exception::argument_error(state, "base must be between 2 and 36");
     }
 
-    for(;;) {
-      buf = ALLOC_N(char, sz);
-      mp_toradix_nd(XST, mp_val(), buf, b, sz, &k);
-      if(k < sz - 2) {
-        obj = String::create(state, buf);
-        FREE(buf);
-        return obj;
-      }
-      FREE(buf);
-      sz += 1024;
+    int sz = 0;
+    int digits;
+    mp_radix_size(state, self, b, &sz);
+    if(sz == 0) {
+      Exception::runtime_error(state, "couldn't convert bignum to string");
     }
+
+    String* obj = String::create(state, Fixnum::from(sz));
+    mp_toradix_nd(XST, mp_val(), (char*)obj->byte_address(), b, sz, &digits);
+    if(self->sign == MP_NEG) { digits++; }
+    obj->num_bytes(state, Fixnum::from(digits));
+
+    return obj;
   }
 
   Integer* Bignum::from_string_detect(STATE, const char *str) {
@@ -1083,7 +1106,7 @@ namespace rubinius {
 
     for(int i = sz - 1; i >= 0; i--) {
       Integer* tmp = big->left_shift(state, Fixnum::from(32));
-      big = tmp->fixnum_p() ? 
+      big = tmp->fixnum_p() ?
               Bignum::from(state, tmp->to_native()) :
               as<Bignum>(tmp);
 
@@ -1253,12 +1276,19 @@ namespace rubinius {
        that unused memory.  This might only be a problem if calculations
        are leaving cruft in those unused bits.  However, since Bignums
        are immutable, this shouldn't happen to us. */
-    return String::hash_str((unsigned char *)a->dp, a->used * sizeof(mp_digit));
+    return String::hash_str(state, (unsigned char *)a->dp, a->used * sizeof(mp_digit));
+  }
+
+  size_t Bignum::managed_memory_size(STATE) {
+    mp_int* n = this->mp_val();
+    assert(MANAGED(n));
+    Object* m = static_cast<Object*>(n->managed);
+    return m->size_in_bytes(state->vm());
   }
 
   extern "C" void* MANAGED_REALLOC_MPINT(void* s, mp_int* a, size_t bytes) {
     assert(s);
-    VM* state = reinterpret_cast<VM*>(s);
+    State* state = reinterpret_cast<State*>(s);
 
     ByteArray* storage = ByteArray::create(state, bytes);
     a->managed = reinterpret_cast<void*>(storage);
@@ -1286,15 +1316,6 @@ namespace rubinius {
       ByteArray* ba = force_as<ByteArray>(tmp);
       n->dp = OPT_CAST(mp_digit)ba->raw_bytes();
     }
-  }
-
-  void Bignum::Info::visit(Object* obj, ObjectVisitor& visit) {
-    Bignum* big = force_as<Bignum>(obj);
-
-    mp_int* n = big->mp_val();
-    assert(MANAGED(n));
-
-    visit.call(static_cast<Object*>(n->managed));
   }
 
   void Bignum::Info::show(STATE, Object* self, int level) {

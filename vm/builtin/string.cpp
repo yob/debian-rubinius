@@ -1,14 +1,21 @@
+#include "oniguruma.h" // Must be first.
+#include "transcoder.h"
+#include "regenc.h"
+
 #include "builtin/string.hpp"
+#include "builtin/array.hpp"
 #include "builtin/bytearray.hpp"
 #include "builtin/class.hpp"
+#include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
-#include "builtin/symbol.hpp"
 #include "builtin/float.hpp"
 #include "builtin/integer.hpp"
-#include "builtin/tuple.hpp"
-#include "builtin/array.hpp"
 #include "builtin/regexp.hpp"
+#include "builtin/symbol.hpp"
+#include "builtin/tuple.hpp"
+
+#include "util/murmur_hash3.hpp"
 
 #include "configuration.hpp"
 #include "vm.hpp"
@@ -18,6 +25,11 @@
 
 #include "windows_compat.h"
 
+#include "ontology.hpp"
+
+#include "capi/handle.hpp"
+#include "builtin/nativemethod.hpp"
+
 #include <gdtoa.h>
 
 #include <unistd.h>
@@ -26,15 +38,17 @@
 #include <ctype.h>
 #include <stdint.h>
 
+#include <sstream>
+
 namespace rubinius {
 
   void String::init(STATE) {
-    GO(string).set(state->new_class("String", G(object)));
+    GO(string).set(ontology::new_class(state, "String", G(object)));
     G(string)->set_object_type(state, StringType);
   }
 
   /* Creates a String instance with +num_bytes+ == +size+ and
-   * having a CharArray with at least (size + 1) bytes.
+   * having a ByteArray with at least (size + 1) bytes.
    */
   String* String::create(STATE, Fixnum* size) {
     String *so;
@@ -42,12 +56,11 @@ namespace rubinius {
     so = state->new_object<String>(G(string));
 
     so->num_bytes(state, size);
-    so->encoding(state, Qnil);
     so->hash_value(state, nil<Fixnum>());
-    so->shared(state, Qfalse);
+    so->shared(state, cFalse);
 
     native_int bytes = size->to_native() + 1;
-    CharArray* ba = CharArray::create(state, bytes);
+    ByteArray* ba = ByteArray::create(state, bytes);
     ba->raw_bytes()[bytes-1] = 0;
 
     so->data(state, ba);
@@ -61,11 +74,10 @@ namespace rubinius {
     so = state->new_object<String>(G(string));
 
     so->num_bytes(state, Fixnum::from(0));
-    so->encoding(state, Qnil);
     so->hash_value(state, nil<Fixnum>());
-    so->shared(state, Qfalse);
+    so->shared(state, cFalse);
 
-    CharArray* ba = CharArray::create(state, bytes+1);
+    ByteArray* ba = ByteArray::create(state, bytes+1);
     ba->raw_bytes()[bytes] = 0;
 
     so->data(state, ba);
@@ -75,7 +87,7 @@ namespace rubinius {
 
   /*
    * Creates a String instance with +num_bytes+ bytes of storage.
-   * It also pins the CharArray used for storage, so it can be passed
+   * It also pins the ByteArray used for storage, so it can be passed
    * to an external function (like ::read)
    */
   String* String::create_pinned(STATE, Fixnum* size) {
@@ -84,12 +96,11 @@ namespace rubinius {
     so = state->new_object<String>(G(string));
 
     so->num_bytes(state, size);
-    so->encoding(state, Qnil);
     so->hash_value(state, nil<Fixnum>());
-    so->shared(state, Qfalse);
+    so->shared(state, cFalse);
 
     native_int bytes = size->to_native() + 1;
-    CharArray* ba = CharArray::create_pinned(state, bytes);
+    ByteArray* ba = ByteArray::create_pinned(state, bytes);
     ba->raw_bytes()[bytes-1] = 0;
 
     so->data(state, ba);
@@ -119,20 +130,535 @@ namespace rubinius {
     return so;
   }
 
-  String* String::from_chararray(STATE, CharArray* ca, Fixnum* start,
+  String* String::from_bytearray(STATE, ByteArray* ba, native_int size) {
+    String* s = state->new_object<String>(G(string));
+
+    s->num_bytes(state, Fixnum::from(size));
+    s->hash_value(state, nil<Fixnum>());
+    s->shared(state, cFalse);
+    s->data(state, ba);
+
+    return s;
+  }
+
+  String* String::from_bytearray(STATE, ByteArray* ba, Fixnum* start,
                                  Fixnum* count)
   {
     String* s = state->new_object<String>(G(string));
 
     s->num_bytes(state, count);
-    s->encoding(state, Qnil);
     s->hash_value(state, nil<Fixnum>());
-    s->shared(state, Qfalse);
+    s->shared(state, cFalse);
 
     // fetch_bytes NULL terminates
-    s->data(state, ca->fetch_bytes(state, start, count));
+    s->data(state, ba->fetch_bytes(state, start, count));
 
     return s;
+  }
+
+  void String::update_handle() {
+    if(!inflated_header_p()) return;
+
+    capi::Handle* handle = inflated_header()->handle();
+    if(!handle) return;
+
+    handle->update(NativeMethodEnvironment::get());
+  }
+
+  static bool byte_compatible_p(Encoding* enc) {
+    return enc->nil_p() || ONIGENC_MBC_MAXLEN(enc->get_encoding()) == 1;
+  }
+
+  static bool fixed_width_p(Encoding* enc) {
+    if(enc->nil_p()) return true;
+
+    OnigEncodingType* e = enc->get_encoding();
+    return ONIGENC_MBC_MAXLEN(e) == ONIGENC_MBC_MINLEN(e);
+  }
+
+  static const uint8_t* find_non_ascii(const uint8_t* data, int num) {
+    for(int i = 0; i < num; i++) {
+      if(!ISASCII(data[i])) {
+        return data + i;
+      }
+    }
+    return 0;
+  }
+
+  static int mbclen(const uint8_t* p, const uint8_t* e, OnigEncodingType* enc)
+  {
+    int n = ONIGENC_PRECISE_MBC_ENC_LEN(enc, (UChar*)p, (UChar*)e);
+
+    if (ONIGENC_MBCLEN_CHARFOUND_P(n) && ONIGENC_MBCLEN_CHARFOUND_LEN(n) <= e-p) {
+      return ONIGENC_MBCLEN_CHARFOUND_LEN(n);
+    } else {
+      int min = ONIGENC_MBC_MINLEN(enc);
+      return min <= e-p ? min : (int)(e-p);
+    }
+  }
+
+  static int precise_mbclen(const uint8_t* p, const uint8_t* e, OnigEncodingType* enc) {
+    int n;
+
+    if (e <= p) {
+      return ONIGENC_CONSTRUCT_MBCLEN_NEEDMORE(1);
+    }
+
+    n = ONIGENC_PRECISE_MBC_ENC_LEN(enc, (UChar*)p, (UChar*)e);
+    if (e-p < n) {
+      return ONIGENC_CONSTRUCT_MBCLEN_NEEDMORE(n-(int)(e-p));
+    }
+
+    return n;
+  }
+
+  static void invalid_codepoint_error(STATE, unsigned int c) {
+    std::ostringstream msg;
+    msg << "invalid codepoint: " << c;
+    Exception::range_error(state, msg.str().c_str());
+  }
+
+  struct convert_escaped_state {
+#define CONVERT_BUFSIZE 6
+
+    STATE;
+    String* str;
+    OnigEncodingType* enc;
+    bool ascii;
+    bool utf8;
+    ByteArray* ba;
+    uint8_t* bp;
+    uint8_t* be;
+    uint8_t* p;
+    uint8_t* e;
+    uint8_t* lp;
+    uint8_t buf[CONVERT_BUFSIZE];
+
+    convert_escaped_state(STATE, String* str)
+      : state(state)
+      , str(str)
+      , enc(0)
+      , ascii(true)
+      , utf8(false)
+      , ba(0)
+      , bp(0)
+      , be(0)
+    {
+      p = str->byte_address();
+      e = p + str->byte_size();
+      lp = p;
+      buf[0] = 0;
+    }
+
+    void update_index(int delta=0) {
+      lp = p + delta;
+    }
+
+    void new_bytes(int len) {
+      ba = ByteArray::create(state, len);
+      bp = ba->raw_bytes();
+      be = bp + ba->size();
+    }
+
+    void expand_bytes(int len) {
+      ByteArray* old_ba = ba;
+      uint8_t* old_bp = bp;
+
+      new_bytes(old_ba->size() + len);
+      memcpy(ba->raw_bytes(), old_ba->raw_bytes(), old_ba->size());
+      bp = ba->raw_bytes() + (old_bp - old_ba->raw_bytes());
+    }
+
+    void copy_bytes(int delta=0) {
+      if(!ba) new_bytes(str->byte_size());
+
+      int len = (p + delta) - lp;
+      if(len > 0) {
+        if(len > be - bp) {
+          expand_bytes(len);
+        }
+        memcpy(bp, lp, len);
+        bp += len;
+      }
+
+      update_index(delta);
+    }
+
+    void append_bytes(uint8_t* ptr, int len) {
+      if(len > be - bp) {
+        expand_bytes(len);
+      }
+      memcpy(bp, ptr, len);
+      bp += len;
+    }
+
+    void append_utf8(int value) {
+      if(value < 128) {
+        int n = snprintf(reinterpret_cast<char*>(buf),
+                         CONVERT_BUFSIZE, "\\x%02X", value);
+        append_bytes(buf, n);
+      } else {
+        if(!utf8) {
+          ascii = false;
+          utf8 = true;
+          enc = Encoding::utf8_encoding(state)->get_encoding();
+        }
+
+        int n = ONIGENC_CODE_TO_MBCLEN(enc, value);
+        if(n <= 0) invalid_codepoint_error(state, value);
+
+        n = ONIGENC_CODE_TO_MBC(enc, value, (UChar*)bp);
+        if(n <= 0) invalid_codepoint_error(state, value);
+        bp += n;
+      }
+    }
+
+    int convert_ctrl(bool ctrl=false, bool meta=false) {
+      if(ctrl) raise_error("duplicate control escape");
+      if(p == e) raise_error("control escape is too short");
+
+      if((*p & 0x80) == 0) {
+        int value = *p++;
+
+        if(value == '\\') {
+          value = convert_byte(true, meta);
+        }
+
+        return value &= 0x1f;
+      }
+
+      raise_error("invalid control escape");
+
+      // not reached
+      return 0;
+    }
+
+    int convert_meta(bool ctrl=false, bool meta=false) {
+      if(meta) raise_error("duplicate meta escape");
+      if(p == e) raise_error("meta escape is too short");
+
+      if((*p & 0x80) == 0) {
+        int value = *p++;
+
+        if(value == '\\') {
+          value = convert_byte(true, meta);
+        }
+
+        return value |= 0x80;
+      }
+
+      raise_error("invalid meta escape");
+
+      // not reached
+      return 0;
+    }
+
+    int convert_byte(bool ctrl=false, bool meta=false) {
+      if(p == e || *p++ != '\\') {
+        raise_error("escape multibyte character is too short");
+      }
+
+      switch(*p++) {
+        case '\\': return '\\';
+        case 'n': return '\n';
+        case 't': return '\t';
+        case 'r': return '\r';
+        case 'f': return '\f';
+        case 'v': return '\013';
+        case 'a': return '\007';
+        case 'e': return '\033';
+
+        /* \OOO */
+        case '0': case '1': case '2': case '3':
+        case '4': case '5': case '6': case '7':
+          p--;
+          return convert_octal();
+
+        case 'x': /* \xHH */
+          return convert_hex(1, 2);
+
+        case 'M': /* \M-X, \M-\C-X, \M-\cX */
+          if(p == e || *p++ != '-') {
+            raise_error("meta escape is too short");
+          }
+          return convert_meta(ctrl);
+
+        case 'C': /* \C-X, \C-\M-X */
+          if (p == e || *p++ != '-') {
+              raise_error("control escape is too short");
+          }
+          // fall through
+        case 'c': /* \cX, \c\M-X */
+          return convert_ctrl(meta);
+
+      default:
+        raise_error("unexpected escape sequence");
+      }
+
+      // not reached
+      return 0;
+    }
+
+    void convert_nonascii() {
+      int maxlen = ONIGENC_MBC_MAXLEN(enc);
+      int i = 0;
+      int n = 0;
+
+      do {
+        buf[i++] = convert_byte();
+        n = precise_mbclen(buf, buf + i, enc);
+      } while(p < e && i < maxlen && ONIGENC_MBCLEN_NEEDMORE_P(n));
+
+      n = precise_mbclen(buf, buf + i, enc);
+      if(ONIGENC_MBCLEN_INVALID_P(n)) {
+        raise_error("invalid multibyte escape");
+      } else if(i > 1 || (*buf & 0x80)) {
+        if(i == 1 && utf8) {
+          raise_error("escaped non-ASCII character in UTF-8 Regexp");
+        }
+        ascii = false;
+
+        append_bytes(buf, n);
+
+      } else {
+        int n = snprintf(reinterpret_cast<char*>(buf),
+                         CONVERT_BUFSIZE, "\\x%02X", *buf);
+        append_bytes(buf, n);
+      }
+    }
+
+    int convert_octal() {
+      int value = 0;
+
+      for(int i = 0;
+          p < e && i < 3 && *p >= '0' && *p <= '7';
+          i++, p++) {
+        value <<= 3;
+        value |= *p - '0';
+      }
+
+      return value;
+    }
+
+    int convert_hex(int min, int max) {
+      int value = 0;
+      int i = 0;
+
+      for(uint8_t d = *p; p < e && i < max; d = *++p, i++) {
+        if(d >= '0' && d <= '9') {
+          d -= '0';
+        } else if(d >= 'A' && d <= 'F') {
+          d -= 'A';
+          d += 10;
+        } else if(d >= 'a' && d <= 'f') {
+          d -= 'a';
+          d += 10;
+        } else {
+          break;
+        }
+
+        value <<= 4;
+        value += d;
+      }
+
+      if(i < min) {
+        raise_error("hexadecimal number is too short");
+      }
+
+      return value;
+    }
+
+    void raise_error(const char* reason) {
+      std::ostringstream msg;
+      msg << reason << ": byte: " << p - str->byte_address()
+          << ": " << str->c_str(state);
+      Exception::regexp_error(state, msg.str().c_str());
+    }
+
+    String* finalize() {
+      if(ba) {
+        copy_bytes();
+        str = String::from_bytearray(state, ba, bp - ba->raw_bytes());
+      }
+
+      return str;
+    }
+  };
+
+  String* String::convert_escaped(STATE, Encoding*& enc, bool& fixed_encoding) {
+    struct convert_escaped_state ces(state, this);
+
+    if(!fixed_encoding && !enc) {
+      enc = Encoding::ascii8bit_encoding(state);
+    } else if(enc == Encoding::utf8_encoding(state)) {
+      ces.utf8 = true;
+    } else if(enc == Encoding::usascii_encoding(state)) {
+      enc = Encoding::ascii8bit_encoding(state);
+    }
+    ces.enc = enc->get_encoding();
+
+    while(ces.p < ces.e) {
+      int n = precise_mbclen(ces.p, ces.e, ces.enc);
+      if(!ONIGENC_MBCLEN_CHARFOUND_P(n)) {
+        ces.raise_error("invalid multibyte character");
+      }
+
+      n = ONIGENC_MBCLEN_CHARFOUND_LEN(n);
+      if(n > 1 || (*ces.p & 0x80)) {
+        if(n == 1 && ces.utf8) {
+          ces.raise_error("non-ASCII character in UTF-8 Regexp");
+        }
+
+        ces.ascii = false;
+        ces.p += n;
+        continue;
+      }
+
+      if(*ces.p++ == '\\') {
+        if(ces.p == ces.e) {
+          ces.raise_error("escape sequence is too short");
+        }
+
+        switch(*ces.p++) {
+        case '1': case '2': case '3':
+        case '4': case '5': case '6':
+        case '7': { // \O, \OO, \OOO or backref
+          uint8_t* sp = ces.p--;
+
+          if(ces.convert_octal() < 128) {
+            continue;
+          } else {
+            ces.p = sp;
+          }
+          // fall through
+        }
+
+        case '0': // \0, \0O, \0OO
+        case 'x': // \xHH
+        case 'C': // \C-X, \C-\M-X
+        case 'c': // \cX, \c\M-X
+        case 'M': // \M-X, \M-\C-X, \M-\cX
+          ces.p -= 2;
+          ces.copy_bytes();
+          ces.convert_nonascii();
+          ces.update_index();
+          break;
+
+        case 'u':
+          if (ces.p == ces.e) {
+            ces.raise_error("escape sequence is too short");
+          }
+
+          ces.copy_bytes(-2);
+
+          if (*ces.p == '{') {  // \u{H HH HHH HHHH HHHHH HHHHHH ...}
+            ces.p++;
+
+            int value = -1;
+            while(ces.p < ces.e) {
+              if(ISSPACE(*ces.p)) continue;
+
+              value = ces.convert_hex(1, 6);
+
+              if(*ces.p != '}' && !ISSPACE(*ces.p)) {
+                ces.raise_error("invalid Unicode list");
+              }
+
+              ces.append_utf8(value);
+
+              if(*ces.p == '}') break;
+            }
+
+            if(ces.p == ces.e || *ces.p++ != '}' || value < 0) {
+              ces.raise_error("invalid Unicode list");
+            }
+          } else {  // \uHHHH
+            ces.append_utf8(ces.convert_hex(4, 4));
+          }
+
+          ces.update_index();
+          break;
+
+        case 'p': /* \p{Hiragana} */
+        case 'P':
+          /* TODO
+          if (!*encp) {
+            *has_property = 1;
+          }
+          */
+          break;
+
+        default: // \n, \\, \d, \9, etc.
+          break;
+        }
+      }
+    }
+
+    String* str = ces.finalize();
+
+    if(!fixed_encoding) {
+      if(ces.utf8) {
+        if(CBOOL(str->ascii_only_p(state))) {
+          enc = Encoding::usascii_encoding(state);
+        } else {
+          enc = Encoding::utf8_encoding(state);
+          fixed_encoding = true;
+        }
+      } else if(ces.ascii || CBOOL(str->ascii_only_p(state))) {
+        enc = Encoding::usascii_encoding(state);
+      }
+    }
+
+    return str;
+  }
+
+  native_int String::char_size(STATE) {
+    if(num_chars_->nil_p()) {
+      if(LANGUAGE_18_ENABLED(state)) {
+        num_chars(state, num_bytes_);
+      } else {
+        if(byte_compatible_p(encoding_)) {
+          num_chars(state, num_bytes_);
+        } else {
+          OnigEncodingType* enc = encoding_->get_encoding();
+          native_int chars;
+
+          if(fixed_width_p(encoding_)) {
+            chars = (byte_size() + ONIGENC_MBC_MINLEN(enc) - 1) / ONIGENC_MBC_MINLEN(enc);
+          } else {
+            uint8_t* p = byte_address();
+            uint8_t* e = p + byte_size();
+
+            for(chars = 0; p < e; chars++) {
+              int n = precise_mbclen(p, e, enc);
+
+              if(ONIGENC_MBCLEN_CHARFOUND_P(n)) {
+                p += ONIGENC_MBCLEN_CHARFOUND_LEN(n);
+              } else if(p + ONIGENC_MBC_MINLEN(enc) <= e) {
+                p += ONIGENC_MBC_MINLEN(enc);
+              } else {
+                p = e;
+              }
+            }
+          }
+
+          num_chars(state, Fixnum::from(chars));
+        }
+      }
+    }
+
+    return num_chars_->to_native();
+  }
+
+  Fixnum* String::size(STATE) {
+    return Fixnum::from(char_size(state));
+  }
+
+  Encoding* String::encoding(STATE) {
+    if(encoding_->nil_p()) {
+      encoding(state, Encoding::usascii_encoding(state));
+    }
+    return encoding_;
   }
 
   hashval String::hash_string(STATE) {
@@ -142,52 +668,21 @@ namespace rubinius {
 
     unsigned char* bp = (unsigned char*)(byte_address());
 
-    hashval h = hash_str(bp, size());
+    hashval h = hash_str(state, bp, byte_size());
     hash_value(state, Fixnum::from(h));
 
     return h;
   }
 
-  // see http://isthe.com/chongo/tech/comp/fnv/#FNV-param
-#ifdef _LP64
-  const static unsigned long FNVOffsetBasis = 14695981039346656037UL;
-  const static unsigned long FNVHashPrime = 1099511628211UL;
+  hashval String::hash_str(const unsigned char *bp, unsigned int sz, uint32_t seed) {
+#ifdef IS_X8664
+    hashval hv[2];
+    MurmurHash3_x64_128(bp, sz, seed, hv);
 #else
-  const static unsigned long FNVOffsetBasis = 2166136261UL;
-  const static unsigned long FNVHashPrime = 16777619UL;
+    hashval hv[1];
+    MurmurHash3_x86_32(bp, sz, seed, hv);
 #endif
-
-  static inline unsigned long update_hash(unsigned long hv,
-                                          unsigned char byte)
-  {
-    return (hv ^ byte) * FNVHashPrime;
-  }
-
-  static inline unsigned long finish_hash(unsigned long hv) {
-    return (hv>>FIXNUM_WIDTH) ^ (hv & FIXNUM_MAX);
-  }
-
-  hashval String::hash_str(const char *bp) {
-    hashval hv;
-
-    hv = FNVOffsetBasis;
-
-    while(*bp) {
-      hv = update_hash(hv, *bp++);
-    }
-
-    return finish_hash(hv);
-  }
-
-  hashval String::hash_str(const unsigned char *bp, unsigned int sz) {
-    unsigned char* be = (unsigned char*)bp + sz;
-    hashval hv = FNVOffsetBasis;
-
-    while(bp < be) {
-      hv = update_hash(hv, *bp++);
-    }
-
-    return finish_hash(hv);
+    return hv[0] & FIXNUM_MAX;
   }
 
   Symbol* String::to_sym(STATE) {
@@ -196,22 +691,55 @@ namespace rubinius {
 
   const char* String::c_str(STATE) {
     char* c_string = (char*)byte_address();
+    native_int current_size = byte_size();
 
-    if(c_string[size()] != 0) {
+    /*
+     * Oh Oh... String's don't need to be \0 terminated..
+     * The problem here is that that means we can't just
+     * set \0 on the c_string[size()] element since that means
+     * we might write outside the ByteArray storage allocated for this!
+     *
+     * Therefore we need to guard this case just in case so we don't
+     * put the VM in a state with corrupted memory.
+     */
+    if(current_size >= as<ByteArray>(data_)->size()) {
+      ByteArray* ba = ByteArray::create(state, current_size + 1);
+      memcpy(ba->raw_bytes(), byte_address(), current_size);
+      data(state, ba);
+      if(shared_ == cTrue) shared(state, cFalse);
+      // We need to read it again since we have a new ByteArray
+      c_string = (char*)byte_address();
+      c_string[current_size] = 0;
+    }
+
+    if(c_string[current_size] != 0) {
       unshare(state);
       // Read it again because unshare might change it.
       c_string = (char*)byte_address();
-      c_string[size()] = 0;
+      c_string[current_size] = 0;
     }
 
     return c_string;
   }
 
+  const char* String::c_str_null_safe(STATE) {
+    const char* str = c_str(state);
+    if(byte_size() > (native_int) strlen(str)) {
+      Exception::argument_error(state, "string contains NULL byte");
+    }
+    return str;
+  }
+
+  String* String::check_null_safe(STATE) {
+    c_str_null_safe(state);
+    return this;
+  }
+
   Object* String::secure_compare(STATE, String* other) {
     native_int s1 = num_bytes()->to_native();
     native_int s2 = other->num_bytes()->to_native();
-    native_int d1 = as<CharArray>(data_)->size();
-    native_int d2 = as<CharArray>(other->data_)->size();
+    native_int d1 = as<ByteArray>(data_)->size();
+    native_int d2 = as<ByteArray>(other->data_)->size();
 
     if(unlikely(s1 > d1)) {
       s1 = d1;
@@ -241,7 +769,7 @@ namespace rubinius {
       sum |= (b1 ^ b2);
     }
 
-    return (sum == 0) ? Qtrue : Qfalse;
+    return (sum == 0) ? cTrue : cFalse;
   }
 
   String* String::string_dup(STATE) {
@@ -260,32 +788,26 @@ namespace rubinius {
 
     String* so = state->new_object<String>(cls);
 
-    so->set_tainted(is_tainted_p());
-
-    so->num_bytes(state, num_bytes());
-    so->encoding(state, encoding());
-    so->data(state, data());
-    so->hash_value(state, hash_value());
-
-    so->shared(state, Qtrue);
-    shared(state, Qtrue);
+    so->copy_object(state, this);
+    so->shared(state, cTrue);
+    shared(state, cTrue);
 
     return so;
   }
 
   void String::unshare(STATE) {
-    if(shared_ == Qtrue) {
+    if(shared_ == cTrue) {
       if(data_->reference_p()) {
-        data(state, as<CharArray>(data_->duplicate(state)));
+        data(state, as<ByteArray>(data_->duplicate(state)));
       }
-      shared(state, Qfalse);
+      shared(state, cFalse);
     }
   }
 
   String* String::append(STATE, String* other) {
     // Clamp the length of the other string to the maximum byte array size
-    native_int length = other->size();
-    native_int data_length = as<CharArray>(other->data_)->size();
+    native_int length = other->byte_size();
+    native_int data_length = as<ByteArray>(other->data_)->size();
     if(unlikely(length > data_length)) {
       length = data_length;
     }
@@ -299,8 +821,8 @@ namespace rubinius {
   }
 
   String* String::append(STATE, const char* other, native_int length) {
-    native_int current_size = size();
-    native_int data_size = as<CharArray>(data_)->size();
+    native_int current_size = byte_size();
+    native_int data_size = as<ByteArray>(data_)->size();
 
     // Clamp the string size the maximum underlying byte array size
     if(unlikely(current_size > data_size)) {
@@ -317,15 +839,15 @@ namespace rubinius {
         capacity *= 2;
       } while(capacity < new_size + 1);
 
-      // No need to call unshare and duplicate a CharArray
+      // No need to call unshare and duplicate a ByteArray
       // just to throw it away.
-      if(shared_ == Qtrue) shared(state, Qfalse);
+      if(shared_ == cTrue) shared(state, cFalse);
 
-      CharArray* ba = CharArray::create(state, capacity);
+      ByteArray* ba = ByteArray::create(state, capacity);
       memcpy(ba->raw_bytes(), byte_address(), current_size);
       data(state, ba);
     } else {
-      if(shared_ == Qtrue) unshare(state);
+      if(shared_ == cTrue) unshare(state);
     }
 
     // Append on top of the null byte at the end of s1, not after it
@@ -335,6 +857,7 @@ namespace rubinius {
     byte_address()[new_size] = 0;
 
     num_bytes(state, Fixnum::from(new_size));
+    num_chars(state, nil<Fixnum>());
     hash_value(state, nil<Fixnum>());
 
     return this;
@@ -351,9 +874,9 @@ namespace rubinius {
       Exception::argument_error(state, "too large byte array size");
     }
 
-    CharArray* ba = CharArray::create(state, sz + 1);
+    ByteArray* ba = ByteArray::create(state, sz + 1);
     native_int copy_size = sz;
-    native_int data_size = as<CharArray>(data_)->size();
+    native_int data_size = as<ByteArray>(data_)->size();
 
     // Check that we don't copy any data outside the existing byte array
     if(unlikely(copy_size > data_size)) {
@@ -362,7 +885,7 @@ namespace rubinius {
     memcpy(ba->raw_bytes(), byte_address(), copy_size);
 
     // We've unshared
-    shared(state, Qfalse);
+    shared(state, cFalse);
     data(state, ba);
     hash_value(state, nil<Fixnum>());
 
@@ -370,6 +893,7 @@ namespace rubinius {
     // is, clamp it.
     if(num_bytes()->to_native() > sz) {
       num_bytes(state, count);
+      num_chars(state, nil<Fixnum>());
     }
 
     return this;
@@ -383,44 +907,14 @@ namespace rubinius {
     return string_dup(state)->append(state, other);
   }
 
-  Float* String::to_f(STATE) {
-    return Float::create(state, to_double(state));
-  }
+  Float* String::to_f(STATE, Object* strict) {
+    const char* str = c_str(state);
 
-  double String::to_double(STATE) {
-    double value;
-    char *ba = data_->to_chars(state, num_bytes_);
-    char *p, *n, *rest;
-    int e_seen = 0;
-
-    p = ba;
-    while(ISSPACE(*p)) p++;
-    n = p;
-
-    while(*p) {
-      if(*p == '_') {
-        p++;
-      } else {
-        if(*p == 'e' || *p == 'E') {
-          if(e_seen) {
-            *n = 0;
-            break;
-          }
-          e_seen = 1;
-        } else if(!(ISDIGIT(*p) || *p == '.' || *p == '-' || *p == '+')) {
-          *n = 0;
-          break;
-        }
-
-        *n++ = *p++;
-      }
+    if(strict == cTrue && byte_size() > (native_int)strlen(str)) {
+      return nil<Float>();
     }
-    *n = 0;
 
-    value = ruby_strtod(ba, &rest);
-    free(ba);
-
-    return value;
+    return Float::from_cstr(state, str, strict);
   }
 
   // Character-wise logical AND of two strings. Modifies the receiver.
@@ -444,7 +938,7 @@ namespace rubinius {
   }
 
   struct tr_data {
-    char tr[256];
+    uint8_t tr[256];
     native_int set[256];
     native_int steps;
     native_int last;
@@ -460,7 +954,7 @@ namespace rubinius {
       } else {
         last--;
         for(j = i + 1; j <= last; j++) {
-          set[(native_int)tr[j]]--;
+          set[tr[j]]--;
           tr[j-1] = tr[j];
         }
         tr[last] = chr;
@@ -485,7 +979,7 @@ namespace rubinius {
     }
 
     uint8_t* str = byte_address();
-    native_int bytes = (native_int)size();
+    native_int bytes = byte_size();
     native_int start = bytes > 1 && str[0] == '^' ? 1 : 0;
     memset(tr_data.set, -1, sizeof(native_int) * 256);
 
@@ -497,7 +991,7 @@ namespace rubinius {
         continue;
       } else if(seq == '-') {
         native_int max = ++i < bytes ? str[i] : -1;
-        if(max >= 0 && chr > max && RTEST(invalid_as_empty)) {
+        if(max >= 0 && chr > max && CBOOL(invalid_as_empty)) {
           i++;
         } else if(max >= 0) {
           do {
@@ -518,17 +1012,18 @@ namespace rubinius {
   }
 
   Fixnum* String::tr_replace(STATE, struct tr_data* tr_data) {
-    if(tr_data->last + 1 > (native_int)size() || shared_->true_p()) {
-      CharArray* ba = CharArray::create(state, tr_data->last + 1);
+    if(tr_data->last + 1 > byte_size() || shared_->true_p()) {
+      ByteArray* ba = ByteArray::create(state, tr_data->last + 1);
 
       data(state, ba);
-      shared(state, Qfalse);
+      shared(state, cFalse);
     }
 
     memcpy(byte_address(), tr_data->tr, tr_data->last);
     byte_address()[tr_data->last] = 0;
 
     num_bytes(state, Fixnum::from(tr_data->last));
+    num_chars(state, nil<Fixnum>());
 
     return Fixnum::from(tr_data->steps);
   }
@@ -543,8 +1038,8 @@ namespace rubinius {
     Object** tbl_ptr = tbl->field;
 
     kcode::table* kcode_tbl = 0;
-    if(RTEST(respect_kcode)) {
-      kcode_tbl = state->shared.kcode_table();
+    if(CBOOL(respect_kcode)) {
+      kcode_tbl = state->shared().kcode_table();
     } else {
       kcode_tbl = kcode::null_table();
     }
@@ -552,8 +1047,8 @@ namespace rubinius {
     // Pointers to iterate input bytes.
     uint8_t* in_p = byte_address();
 
-    native_int str_size = size();
-    native_int data_size = as<CharArray>(data_)->size();
+    native_int str_size = byte_size();
+    native_int data_size = as<ByteArray>(data_)->size();
     if(unlikely(str_size > data_size)) {
       str_size = data_size;
     }
@@ -585,7 +1080,7 @@ namespace rubinius {
         }
       } else if(String* str = try_as<String>(tbl_ptr[byte])) {
         cur_p = str->byte_address();
-        len = str->size();
+        len = str->byte_size();
         in_p++;
       } else {
         Tuple* tbl = as<Tuple>(tbl_ptr[byte]);
@@ -594,13 +1089,13 @@ namespace rubinius {
           String* key = as<String>(tbl->at(i));
 
           native_int rem = in_end - in_p;
-          native_int klen = key->size();
+          native_int klen = key->byte_size();
           if(rem < klen) continue;
 
           if(memcmp(in_p, key->byte_address(), klen) == 0) {
             String* str = as<String>(tbl->at(i+1));
             cur_p = str->byte_address();
-            len = str->size();
+            len = str->byte_size();
             in_p += klen;
             break;
           }
@@ -647,9 +1142,11 @@ namespace rubinius {
     String* result = String::create(state,
                                     reinterpret_cast<const char*>(output),
                                     out_p - output);
+
+    result->klass(state, class_object(state));
     free(output);
 
-    if(tainted_p(state)) result->taint(state);
+    infect(state, result);
     return result;
   }
 
@@ -660,7 +1157,7 @@ namespace rubinius {
     native_int dst = dest->to_native();
     native_int cnt = size->to_native();
 
-    native_int osz = other->size();
+    native_int osz = other->byte_size();
     if(src >= osz) return this;
     if(cnt < 0) return this;
     if(src < 0) src = 0;
@@ -669,7 +1166,7 @@ namespace rubinius {
     // This bounds checks on the total capacity rather than the virtual
     // size() of the String. This allows for string adjustment within
     // the capacity without having to change the virtual size first.
-    native_int sz = as<CharArray>(data_)->size();
+    native_int sz = as<ByteArray>(data_)->size();
     if(dst >= sz) return this;
     if(dst < 0) dst = 0;
     if(cnt > sz - dst) cnt = sz - dst;
@@ -684,10 +1181,10 @@ namespace rubinius {
   {
     native_int src = start->to_native();
     native_int cnt = size->to_native();
-    native_int sz = this->size();
-    native_int osz = other->size();
-    native_int dsz = as<CharArray>(data_)->size();
-    native_int odsz = as<CharArray>(other->data_)->size();
+    native_int sz = byte_size();
+    native_int osz = other->byte_size();
+    native_int dsz = as<ByteArray>(data_)->size();
+    native_int odsz = as<ByteArray>(other->data_)->size();
 
     if(unlikely(sz > dsz)) {
       sz = dsz;
@@ -737,7 +1234,7 @@ namespace rubinius {
     } else if(String* pat = try_as<String>(pattern)) {
       pat->infect(state, s);
 
-      native_int psz = pat->size();
+      native_int psz = pat->byte_size();
       if(psz == 1) {
         memset(s->byte_address(), pat->byte_address()[0], cnt);
       } else if(psz > 1) {
@@ -760,6 +1257,29 @@ namespace rubinius {
     return s;
   }
 
+  String* String::from_codepoint(STATE, Object* self, Integer* code, Encoding* enc) {
+    String* s = state->new_object<String>(G(string));
+
+    unsigned int c = code->to_uint();
+    int n = ONIGENC_CODE_TO_MBCLEN(enc->get_encoding(), c);
+
+    if(n <= 0) invalid_codepoint_error(state, c);
+
+    s->num_bytes(state, Fixnum::from(n));
+    s->hash_value(state, nil<Fixnum>());
+    s->shared(state, cFalse);
+    s->encoding(state, enc);
+
+    ByteArray* ba = ByteArray::create(state, n);
+
+    n = ONIGENC_CODE_TO_MBC(enc->get_encoding(), c, (UChar*)ba->raw_bytes());
+    if(n <= 0) invalid_codepoint_error(state, c);
+
+    s->data(state, ba);
+
+    return s;
+  }
+
   String* String::crypt(STATE, String* salt) {
     return String::create(state, ::crypt(this->c_str(state), salt->c_str(state)));
   }
@@ -767,207 +1287,13 @@ namespace rubinius {
   Integer* String::to_i(STATE, Fixnum* fix_base, Object* strict) {
     const char* str = c_str(state);
     int base = fix_base->to_native();
-    bool negative = false;
-    Integer* value = Fixnum::from(0);
 
-    if(strict == Qtrue) {
+    if(strict == cTrue) {
       // In strict mode the string can't have null bytes.
-      if(size() > (native_int)strlen(str)) return nil<Integer>();
+      if(byte_size() > (native_int)strlen(str)) return nil<Integer>();
     }
 
-    if(base == 1 || base > 36) return nil<Integer>();
-    // Strict mode can only be invoked from Ruby via Kernel#Integer()
-    // which does not allow bases other than 0.
-    if(base != 0 && strict == Qtrue && LANGUAGE_18_ENABLED(state))
-      return nil<Integer>();
-
-    // Skip any combination of leading whitespace and underscores.
-    // Leading whitespace is OK in strict mode, but underscores are not.
-    while(isspace(*str) || *str == '_') {
-      if(*str == '_' && strict == Qtrue) {
-        return nil<Integer>();
-      } else {
-        str++;
-      }
-    }
-
-    if(*str == '-') {
-      str++;
-      negative = true;
-    } else if(*str == '+') {
-      str++;
-    }
-
-    char chr;
-    int detected_base = 0;
-    const char* str_start = str;
-
-    // Try and detect a base prefix on the front. We have to do this
-    // even though we might have been told the base, because we have
-    // to know if we should discard the bytes that make up the prefix
-    // if it's redundant with passed in base.
-    //
-    // For example, if base == 16 and str == "0xa", we return
-    // to return 10. But if base == 10 and str == "0xa", we fail
-    // because we rewind and try to process 0x as part of the
-    // base 10 string.
-    //
-    if(*str == '0') {
-      str++;
-      switch(chr = *str++) {
-      case 'b': case 'B':
-        detected_base = 2;
-        break;
-      case 'o': case 'O':
-        detected_base = 8;
-        break;
-      case 'd': case 'D':
-        detected_base = 10;
-        break;
-      case 'x': case 'X':
-        detected_base = 16;
-        break;
-      default:
-        // If passed "017" and a base of 0, that is octal 15.
-        // Otherwise, it is whatever those digits would be in the
-        // specified base.
-        str--;
-        detected_base = 8;
-      }
-    }
-
-    // If base is less than 0, then it's just a hint for how to process it
-    // if there is no base detected.
-    if(base < 0) {
-      if(detected_base == 0) {
-        // Ok, no detected because, use the base hint and start over.
-        base = -base;
-        str = str_start;
-      } else {
-        base = detected_base;
-      }
-
-    // If 0 was passed in as the base, we use the detected base.
-    } else if(base == 0) {
-
-      // Default to 10 if there is no input and no detected base.
-      if(detected_base == 0) {
-        base = 10;
-        str = str_start;
-
-      } else {
-        base = detected_base;
-      }
-
-    // If the passed in base and the detected base contradict
-    // each other, then rewind and process the whole string as
-    // digits of the passed in base.
-    } else if(base != detected_base) {
-      // rewind the stream, and try and consume the prefix as
-      // digits in the number.
-      str = str_start;
-    }
-
-
-    bool underscore = false;
-
-    while(*str) {
-      chr = *str++;
-
-      // If we see space characters
-      if(chr == ' ' || chr == '\t' || chr == '\n' || chr == '\r') {
-
-        // Eat them all
-        while(chr == ' ' || chr == '\t' || chr == '\n' || chr == '\r') {
-          chr = *str++;
-        }
-
-        // If there is more stuff after the spaces, get out of dodge.
-        if(chr) {
-          if(strict == Qtrue) {
-            return nil<Integer>();
-          } else {
-            goto return_value;
-          }
-        }
-
-        break;
-      }
-
-      // If it's an underscore, remember that. An underscore is valid iff
-      // it followed by a valid character for this base.
-      if(chr == '_') {
-        if(underscore) {
-          // Double underscore is forbidden in strict mode.
-          if(strict == Qtrue) {
-            return nil<Integer>();
-          } else {
-            // Stop parse number after two underscores in a row
-            goto return_value;
-          }
-        }
-        underscore = true;
-        continue;
-      } else {
-        underscore = false;
-      }
-
-      // We use A-Z (and a-z) here so we support up to base 36.
-      if(chr >= '0' && chr <= '9') {
-        chr -= '0';
-      } else if(chr >= 'A' && chr <= 'Z') {
-        chr -= ('A' - 10);
-      } else if(chr >= 'a' && chr <= 'z') {
-        chr -= ('a' - 10);
-      } else {
-        //Invalid character, stopping right here.
-        if(strict == Qtrue) {
-          return nil<Integer>();
-        } else {
-          break;
-        }
-      }
-
-      // Bail if the current chr is greater or equal to the base,
-      // mean it's invalid.
-      if(chr >= base) {
-        if(strict == Qtrue) {
-          return nil<Integer>();
-        } else {
-          break;
-        }
-      }
-
-      if(value != Fixnum::from(0)) {
-        if(Fixnum *fix = try_as<Fixnum>(value)) {
-          value = fix->mul(state, Fixnum::from(base));
-        } else {
-          value = as<Bignum>(value)->mul(state, Fixnum::from(base));
-        }
-      }
-
-      if(Fixnum *fix = try_as<Fixnum>(value)) {
-        value = fix->add(state, Fixnum::from(chr));
-      } else {
-        value = as<Bignum>(value)->add(state, Fixnum::from(chr));
-      }
-    }
-
-    // If we last saw an underscore and we're strict, bail.
-    if(underscore && strict == Qtrue) {
-      return nil<Integer>();
-    }
-
-return_value:
-    if(negative) {
-      if(Fixnum* fix = try_as<Fixnum>(value)) {
-        value = fix->neg(state);
-      } else {
-        value = as<Bignum>(value)->neg(state);
-      }
-    }
-
-    return value;
+    return Integer::from_cstr(state, str, base, strict);
   }
 
   Integer* String::to_inum_prim(STATE, Fixnum* base, Object* strict) {
@@ -977,47 +1303,154 @@ return_value:
     return val;
   }
 
-  String* String::substring(STATE, Fixnum* start_f, Fixnum* count_f) {
-    native_int start = start_f->to_native();
-    native_int count = count_f->to_native();
-    native_int total = num_bytes_->to_native();
-    native_int data_size = as<CharArray>(data_)->size();
+  Object* String::aref(STATE, Fixnum* index) {
+    native_int i = index->to_native();
 
-    // Clamp the string size the maximum underlying byte array size
-    if(unlikely(total > data_size)) {
-      total = data_size;
+    if(i < 0) i += byte_size();
+    if(i >= byte_size() || i < 0) return cNil;
+
+    if(LANGUAGE_18_ENABLED(state)) {
+      return Fixnum::from(byte_address()[i]);
     }
 
-    if(count < 0) return nil<String>();
+    if(byte_compatible_p(encoding_)) {
+      return byte_substring(state, i, 1);
+    } else {
+      // Assumptions above about size are possibly invalid, recalculate.
+      i = index->to_native();
+      if(i < 0) i += char_size(state);
+      if(i >= char_size(state) || i < 0) return cNil;
 
-    if(start < 0) {
-      start += total;
-      if(start < 0) return nil<String>();
+      return char_substring(state, i, 1);
+    }
+  }
+
+  /* Returns the byte index of the character at logical 'index'. The 'start'
+   * parameter is the byte index of a character at which to start searching.
+   */
+  native_int String::find_character_byte_index(STATE, native_int index,
+                                               native_int start)
+  {
+    if(byte_compatible_p(encoding_)) {
+      return index;
+    } else if(fixed_width_p(encoding_)) {
+      return index * ONIGENC_MBC_MINLEN(encoding_->get_encoding());
+    } else {
+      OnigEncodingType* enc = encoding_->get_encoding();
+      uint8_t* p = byte_address() + start;
+      uint8_t* e = byte_address() + byte_size();
+
+      while(p < e && index--) {
+        p += mbclen(p, e, enc);
+      }
+
+      if(p > e) p = e;
+      return p - byte_address();
+    }
+  }
+
+  /* The 'index' and 'length' parameters are byte based. This method is a
+   * worker method called from other methods that have already computed the
+   * canonical byte (0 <= index < byte_size) and (0 <= length < byte_size).
+   */
+  String* String::byte_substring(STATE, native_int index, native_int length) {
+    native_int data_size = as<ByteArray>(data_)->size();
+
+    // Clamp the range to the underlying byte array size
+    if(unlikely(index > data_size)) index = data_size;
+
+    if(unlikely(index + length > data_size)) {
+      length = data_size - index;
     }
 
-    if(start > total) return nil<String>();
-
-    if(start + count > total) {
-      count = total - start;
-    }
-
-    if(count < 0) count = 0;
-
-    String* sub = String::create(state, Fixnum::from(count));
+    String* sub = String::create(state, Fixnum::from(length));
     sub->klass(state, class_object(state));
 
-    uint8_t* buf = byte_address() + start;
+    uint8_t* buf = byte_address() + index;
+    memcpy(sub->byte_address(), buf, length);
 
-    memcpy(sub->byte_address(), buf, count);
-
-    if(tainted_p(state) == Qtrue) sub->taint(state);
+    if(tainted_p(state)->true_p()) sub->taint(state);
+    if(untrusted_p(state)->true_p()) sub->untrust(state);
+    sub->encoding(state, encoding());
 
     return sub;
   }
 
+  /* The 'index' and 'length' parameters are character based. This method is a
+   * worker method called from other methods that have already computed the
+   * canonical character (0 <= index < char_size) and (0 <= length < char_size).
+   */
+  String* String::char_substring(STATE, native_int index, native_int length) {
+    native_int i = find_character_byte_index(state, index);
+    native_int e = find_character_byte_index(state, length - 1, i);
+
+    int c = precise_mbclen(byte_address() + e, byte_address() + byte_size(),
+                           encoding_->get_encoding());
+
+    if(ONIGENC_MBCLEN_CHARFOUND_P(c)) {
+      e += ONIGENC_MBCLEN_CHARFOUND_LEN(c);
+    } else {
+      e += 1;
+    }
+
+    return byte_substring(state, i, e - i);
+  }
+
+  String* String::byte_substring(STATE, Fixnum* index, Fixnum* length) {
+    native_int i = index->to_native();
+    native_int n = length->to_native();
+    native_int size = byte_size();
+
+    if(n < 0) return nil<String>();
+
+    if(i < 0) {
+      i += size;
+      if(i < 0) return nil<String>();
+    } else if(i > size) {
+      return nil<String>();
+    }
+
+    if(i + n > size) {
+      n = size - i;
+    }
+
+    return byte_substring(state, i, n);
+  }
+
+  String* String::substring(STATE, Fixnum* index, Fixnum* length) {
+    native_int i = index->to_native();
+    native_int n = length->to_native();
+    native_int size;
+
+    if(n < 0) return nil<String>();
+
+    if(byte_compatible_p(encoding_)) {
+      size = byte_size();
+    } else {
+      size = char_size(state);
+    }
+
+    if(i < 0) {
+      i += size;
+      if(i < 0) return nil<String>();
+    } else if(i > size) {
+      return nil<String>();
+    }
+
+    if(i + n > size) {
+      n = size - i;
+    }
+
+    if(n == 0 || byte_compatible_p(encoding_)) {
+      return byte_substring(state, i, n);
+    } else {
+      return char_substring(state, i, n);
+    }
+  }
+
   Fixnum* String::index(STATE, String* pattern, Fixnum* start) {
-    native_int total = size();
-    native_int match_size = pattern->size();
+    native_int total = byte_size();
+    native_int match_size = pattern->byte_size();
 
     if(start->to_native() < 0) {
       Exception::argument_error(state, "negative start given");
@@ -1060,8 +1493,8 @@ return_value:
   }
 
   Fixnum* String::rindex(STATE, String* pattern, Fixnum* start) {
-    native_int total = size();
-    native_int match_size = pattern->size();
+    native_int total = byte_size();
+    native_int match_size = pattern->byte_size();
     native_int pos = start->to_native();
 
     if(pos < 0) {
@@ -1109,17 +1542,17 @@ return_value:
 
   String* String::find_character(STATE, Fixnum* offset) {
     native_int o = offset->to_native();
-    if(o >= size()) return nil<String>();
+    if(o >= byte_size()) return nil<String>();
     if(o < 0) return nil<String>();
 
     uint8_t* cur = byte_address() + o;
 
     String* output = 0;
 
-    kcode::table* tbl = state->shared.kcode_table();
+    kcode::table* tbl = state->shared().kcode_table();
     if(kcode::mbchar_p(tbl, *cur)) {
       native_int clen = kcode::mbclen(tbl, *cur);
-      if(o + clen <= size()) {
+      if(o + clen <= byte_size()) {
         output = String::create(state, reinterpret_cast<const char*>(cur), clen);
       }
     }
@@ -1129,7 +1562,7 @@ return_value:
     }
 
     output->klass(state, class_object(state));
-    if(RTEST(tainted_p(state))) output->taint(state);
+    if(CBOOL(tainted_p(state))) output->taint(state);
 
     return output;
   }
@@ -1137,7 +1570,7 @@ return_value:
   Array* String::awk_split(STATE, Fixnum* f_limit) {
     native_int limit = f_limit->to_native();
 
-    native_int sz = size();
+    native_int sz = byte_size();
     uint8_t* start = byte_address();
     int end = 0;
     int begin = 0;
@@ -1190,6 +1623,73 @@ return_value:
       ary->append(state, str);
     }
     return ary;
+  }
+
+  Object* String::ascii_only_p(STATE) {
+    if(ascii_only_->nil_p()) {
+      if(byte_size() == 0) {
+        ascii_only(state, encoding(state)->ascii_compatible_p(state));
+      } else {
+        if(!CBOOL(encoding(state)->ascii_compatible_p(state))) {
+          ascii_only(state, cFalse);
+        } else if(find_non_ascii(byte_address(), byte_size())) {
+          ascii_only(state, cFalse);
+        } else {
+          ascii_only(state, cTrue);
+        }
+      }
+    }
+
+    return ascii_only_;
+  }
+
+  Object* String::valid_encoding_p(STATE) {
+    if(valid_encoding_->nil_p()) {
+      if(encoding(state) == Encoding::from_index(state, Encoding::eBinary)) {
+        valid_encoding(state, cTrue);
+        return valid_encoding_;
+      }
+
+      OnigEncodingType* enc = encoding_->get_encoding();
+
+      uint8_t* p = byte_address();
+      uint8_t* e = p + byte_size();
+
+      while(p < e) {
+        int n = precise_mbclen(p, e, enc);
+
+        if(!ONIGENC_MBCLEN_CHARFOUND_P(n)) {
+          valid_encoding(state, cFalse);
+          return valid_encoding_;
+        }
+
+        p += n;
+      }
+
+      valid_encoding(state, cTrue);
+    }
+
+    return valid_encoding_;
+  }
+
+  Fixnum* String::codepoint(STATE) {
+    if(char_size(state) == 0) return force_as<Fixnum>(Primitives::failure());
+
+    if(byte_compatible_p(encoding_)) {
+      return Fixnum::from(byte_address()[0]);
+    } else {
+      OnigEncodingType* enc = encoding_->get_encoding();
+      uint8_t* p = byte_address();
+      uint8_t* e = p + byte_size();
+
+      int n = precise_mbclen(p, e, enc);
+
+      if(ONIGENC_MBCLEN_CHARFOUND_P(n)) {
+        return Fixnum::from(ONIGENC_MBC_TO_CODE(enc, (UChar*)p, (UChar*)e));
+      }
+    }
+
+    return force_as<Fixnum>(Primitives::failure());
   }
 
   void String::Info::show(STATE, Object* self, int level) {

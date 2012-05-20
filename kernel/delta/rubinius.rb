@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   begin
     is_tty = STDIN.tty?
@@ -12,42 +14,6 @@ module Rubinius
 
   class << self
     attr_reader :add_method_hook
-  end
-
-  def self.open_class_under(name, sup, mod)
-    unless Type.object_kind_of? mod, Module
-      raise TypeError, "'#{mod.inspect}' is not a class/module"
-    end
-
-    tbl = mod.constant_table
-    if !tbl.key?(name)
-      # Create the class
-      sup = Object unless sup
-      obj = Class.new sup, name, mod
-    else
-      obj = tbl[name]
-      if Type.object_kind_of? obj, Autoload
-        obj = obj.call(true)
-
-        # nil is returned if the autoload was abort, usually because
-        # the file to be required has already been loaded. In which case
-        # act like the autoload wasn't there.
-        unless obj
-          supr = sup ? sup : Object
-          obj = Class.new supr, name, mod
-        end
-      end
-
-      if Type.object_kind_of? obj, Class
-        if sup and obj.superclass != sup
-          raise TypeError, "Superclass mismatch: #{obj.superclass} != #{sup}"
-        end
-      else
-        raise TypeError, "#{name} is not a class"
-      end
-    end
-
-    return obj
   end
 
   def self.open_class(name, sup, scope)
@@ -84,7 +50,6 @@ module Rubinius
     if !found
       # Create the module
       obj = Module.new
-      obj.set_name_if_necessary name, mod
       mod.const_set name, obj
     else
       obj = tbl[name]
@@ -94,7 +59,6 @@ module Rubinius
         # See comment above about autoload returning nil
         unless obj
           obj = Module.new
-          obj.set_name_if_necessary name, mod
           mod.const_set name, obj
         end
       end
@@ -166,7 +130,9 @@ module Rubinius
     mod.method_table.store name, executable, visibility
     Rubinius::VM.reset_method_cache(name)
 
-    mod.module_function name if vis == :module
+    Rubinius.privately do
+      mod.module_function name if vis == :module
+    end
 
     # Have to use Rubinius::Type.object_respond_to? rather than #respond_to?
     # because code will redefine #respond_to? itself, which is added
@@ -289,6 +255,10 @@ module Rubinius
 
   def self.compile_file(name)
     Compiler.compile name
+  end
+
+  def self.allocation_site(obj)
+    obj.instance_variable_get("@__allocation_site__")
   end
 
   ##

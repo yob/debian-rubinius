@@ -1,5 +1,16 @@
+# -*- encoding: us-ascii -*-
+
 class Regexp
-  ValidKcode    = [110, 101, 115, 117]  # [?n,?e,?s,?u]
+
+  # One might read this next array and think, why oh why is this done this way.
+  # The problem is how the 'n' KCODE works. This KCODE means no encoding,
+  # ASCII_8BIT or however you want to call it.
+  #
+  # In 1.9 you can use 'n' for specifying a regexp with the binary encoding,
+  # but all other KCODE encodings from 1.8 are ignored. Therefore we add ?n
+  # so 1.9 can recognize it but the other values only numerical so 1.9's
+  # String#[] won't find these.
+  ValidKcode    = [?n, 101, 115, 117]
   KcodeValue    = [16, 32, 48, 64]
 
   IGNORECASE         = 1
@@ -77,7 +88,7 @@ class Regexp
   def initialize(pattern, opts=nil, lang=nil)
     if pattern.kind_of?(Regexp)
       opts = pattern.options
-      pattern  = pattern.source
+      pattern = pattern.source
     elsif opts.kind_of?(Fixnum)
       opts = opts & (OPTION_MASK | KCODE_MASK) if opts > 0
     elsif opts
@@ -86,7 +97,7 @@ class Regexp
       opts = 0
     end
 
-    if opts and lang and lang.kind_of?(String)
+    if opts and lang.kind_of?(String)
       opts &= OPTION_MASK
       idx   = ValidKcode.index(lang.downcase[0])
       opts |= KcodeValue[idx] if idx
@@ -95,13 +106,8 @@ class Regexp
     compile pattern, opts
   end
 
-  def self.escape(str)
-    StringValue(str).transform(ESCAPE_TABLE, true)
-  end
-
   class << self
     alias_method :compile, :new
-    alias_method :quote, :escape
   end
 
   def initialize_copy(other)
@@ -225,7 +231,7 @@ class Regexp
     if options & KCODE_MASK == 0
       str << 'n'
     else
-      str << kcode[0,1]
+      str << kcode[0, 1]
     end
     str.hash
   end
@@ -236,7 +242,7 @@ class Regexp
 
     str = "/#{escape}/#{option_to_string(options)}"
     k = kcode()
-    str << k[0,1] if k and k != "none"
+    str << k[0, 1] if k
     return str
   end
 
@@ -249,21 +255,9 @@ class Regexp
     return nil
   end
 
-  # Performs normal match and returns MatchData object from $~ or nil.
-  def match(str)
-    unless str
-      Regexp.last_match = nil
-      return nil
-    end
-
-    str = StringValue(str)
-
-    Regexp.last_match = search_region(str, 0, str.size, true)
-  end
-
   def match_from(str, count)
     return nil unless str
-    search_region(str, count, str.size, true)
+    search_region(str, count, str.bytesize, true)
   end
 
   class SourceParser
@@ -368,12 +362,12 @@ class Regexp
 
     # TODO: audit specs for this method when specs are running
     def create_parts
-      return unless @index < @source.size
+      return unless @index < @source.bytesize
       char =  @source.getbyte(@index).chr
       case char
       when '('
         idx = @index + 1
-        if idx < @source.size and @source.getbyte(idx).chr == '?'
+        if idx < @source.bytesize and @source.getbyte(idx).chr == '?'
           process_group
         else
           push_current_character!
@@ -529,8 +523,8 @@ class Regexp
     hash = {}
 
     if @names
-      @names.each do |k,v|
-        hash[k.to_s] = [v + 1] # we only have one location currently for a key
+      @names.sort_by { |a,b| b.first }.each do |k, v| # LookupTable is unordered
+        hash[k.to_s] = v
       end
     end
 
@@ -554,16 +548,12 @@ class Regexp
   #
   def names
     if @names
-      ary = Array.new(@names.size)
-      @names.each do |k,v|
-        ary[v] = k.to_s
-      end
-
-      return ary
+      @names.sort_by { |a,b| b.first }.map { |x| x.first.to_s } # LookupTable is unordered
     else
       []
     end
   end
+
 end
 
 class MatchData
@@ -612,7 +602,7 @@ class MatchData
         val = nil
       else
         y = tup.at(1)
-        val = @source.substring(x, y-x)
+        val = @source.byteslice(x, y-x)
       end
 
       out[idx] = val
@@ -621,21 +611,21 @@ class MatchData
 
     return out
   end
-  
+
   def names
     @regexp.names
   end
 
   def pre_match
-    return @source.substring(0, 0) if @full.at(0) == 0
+    return @source.byteslice(0, 0) if @full.at(0) == 0
     nd = @full.at(0) - 1
-    @source.substring(0, nd+1)
+    @source.byteslice(0, nd+1)
   end
 
   def pre_match_from(idx)
-    return @source.substring(0, 0) if @full.at(0) == 0
+    return @source.byteslice(0, 0) if @full.at(0) == 0
     nd = @full.at(0) - 1
-    @source.substring(idx, nd-idx+1)
+    @source.byteslice(idx, nd-idx+1)
   end
 
   def collapsing?
@@ -643,39 +633,9 @@ class MatchData
   end
 
   def post_match
-    nd = @source.size - 1
+    nd = @source.bytesize - 1
     st = @full.at(1)
-    @source.substring(st, nd-st+1)
-  end
-
-  def [](idx, len = nil)
-    return to_a[idx, len] if len
-
-    case idx
-    when Fixnum
-      if idx <= 0
-        return matched_area() if idx == 0
-        return to_a[idx]
-      elsif idx <= @region.size
-        tup = @region[idx - 1]
-
-        x = tup.at(0)
-        return nil if x == -1
-
-        y = tup.at(1)
-        return @source.substring(x, y-x)
-      end
-    when Symbol
-      num = @regexp.name_table[idx]
-      raise ArgumentError, "Unknown named group '#{idx}'" unless num
-      return self[num + 1]
-    when String
-      num = @regexp.name_table[idx.to_sym]
-      raise ArgumentError, "Unknown named group '#{idx}'" unless num
-      return self[num + 1]
-    end
-
-    return to_a[idx]
+    @source.byteslice(st, nd-st+1)
   end
 
   def inspect
@@ -684,7 +644,7 @@ class MatchData
       "#<MatchData \"#{matched_area}\">"
     else
       idx = 0
-      capts.map! {|capture| "#{idx += 1}:#{capture.inspect}"}
+      capts.map! { |capture| "#{idx += 1}:#{capture.inspect}" }
       "#<MatchData \"#{matched_area}\" #{capts.join(" ")}>"
     end
   end
@@ -721,7 +681,7 @@ class MatchData
   def matched_area
     x = @full.at(0)
     y = @full.at(1)
-    @source.substring(x, y-x)
+    @source.byteslice(x, y-x)
   end
 
   alias_method :to_s, :matched_area
@@ -731,7 +691,7 @@ class MatchData
     x, y = @region[num]
     return nil if !y or x == -1
 
-    return @source.substring(x, y-x)
+    return @source.byteslice(x, y-x)
   end
 
   private :get_capture
@@ -739,7 +699,7 @@ class MatchData
   def each_capture
     @region.each do |tup|
       x, y = *tup
-      yield @source.substring(x, y-x)
+      yield @source.byteslice(x, y-x)
     end
   end
 

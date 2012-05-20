@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Process
   module Constants
     EXIT_SUCCESS = Rubinius::Config['rbx.platform.process.EXIT_SUCCESS'] || 0
@@ -62,7 +64,7 @@ module Process
 
   def self.setsid
     pgid = FFI::Platform::POSIX.setsid
-    Errno.handle if -1 == pgid
+    Errno.handle if pgid == -1
     pgid
   end
 
@@ -141,8 +143,11 @@ module Process
   end
 
   def self.abort(msg=nil)
-    $stderr.puts(msg) if msg
-    raise SystemExit.new(1)
+    if msg
+      msg = StringValue(msg)
+      $stderr.puts(msg)
+    end
+    raise SystemExit.new(1, msg)
   end
 
   def self.getpgid(pid)
@@ -269,7 +274,7 @@ module Process
     @maxgroups = g.length if g.length > @maxgroups
     FFI::MemoryPointer.new(:int, @maxgroups) { |p|
       p.write_array_of_int(g)
-      Errno.handle if -1 == FFI::Platform::POSIX.setgroups(g.length, p)
+      Errno.handle if FFI::Platform::POSIX.setgroups(g.length, p) == -1
     }
     g
   end
@@ -332,7 +337,7 @@ module Process
     status, termsig, stopsig, pid = value
 
     status = Process::Status.new(pid, status, termsig, stopsig)
-    Rubinius::Globals.set! :$?, status
+    set_status_global status
     [pid, status]
   end
 
@@ -371,27 +376,6 @@ module Process
     alias_method :waitpid2, :wait2
   end
 
-  #
-  # Indicate disinterest in child process.
-  #
-  # Sets up an internal wait on the given process ID.
-  # Only possibly real pids, i.e. positive numbers,
-  # may be waited for.
-  #
-  # TODO: Should an error be raised on ECHILD? --rue
-  #
-  # TODO: This operates on the assumption that waiting on
-  #       the event consumes very little resources. If this
-  #       is not the case, the check should be made WNOHANG
-  #       and called periodically.
-  #
-  def self.detach(pid)
-    raise ArgumentError, "Only positive pids may be detached" unless pid > 0
-
-    # The evented system does not need a loop
-    Thread.new { Process.wait pid }
-  end
-
   #--
   # TODO: Most of the fields aren't implemented yet.
   # TODO: Also, these objects should only need to be constructed by
@@ -410,48 +394,48 @@ module Process
       @termsig = termsig
       @stopsig = stopsig
     end
-    
+
     def to_i
       @exitstatus
     end
-    
+
     def to_s
       @exitstatus.to_s
     end
-    
+
     def &(num)
       @exitstatus & num
     end
-    
+
     def ==(other)
       other = other.to_i if other.kind_of? Process::Status
       @exitstatus == other
     end
-    
+
     def >>(num)
       @exitstatus >> num
     end
-    
+
     def coredump?
       false
     end
-    
+
     def exited?
       @exitstatus != nil
     end
-    
+
     def pid
       @pid
     end
-    
+
     def signaled?
       @termsig != nil
     end
-    
+
     def stopped?
       @stopsig != nil
     end
-    
+
     def success?
       if exited?
         @exitstatus == 0
@@ -704,55 +688,6 @@ module Kernel
     Process.fork(&block)
   end
   module_function :fork
-
-  def system(prog, *args)
-    pid = Process.fork
-    if pid
-      Process.waitpid(pid)
-      $?.exitstatus == 0
-    else
-      begin
-        Kernel.exec(prog, *args)
-      rescue Exception => e
-        if $DEBUG
-          e.render("Unable to execute subprogram", STDERR)
-        end
-        exit! 1
-      end
-
-      if $DEBUG
-        STDERR.puts "Unable to execute subprogram - exec silently returned"
-      end
-      exit! 1
-    end
-  end
-  module_function :system
-
-  def exec(cmd, *args)
-    if args.empty? and cmd.kind_of? String
-      raise Errno::ENOENT if cmd.empty?
-      if /([*?{}\[\]<>()~&|$;'`"\n\s]|[^\w])/o.match(cmd)
-        Process.perform_exec "/bin/sh", ["sh", "-c", cmd]
-      else
-        Process.perform_exec cmd, [cmd]
-      end
-    else
-      if cmd.kind_of? Array
-        prog = cmd[0]
-        name = cmd[1]
-      else
-        name = prog = cmd
-      end
-
-      argv = [name]
-      args.each do |arg|
-        argv << arg.to_s
-      end
-
-      Process.perform_exec prog, argv
-    end
-  end
-  module_function :exec
 
   def `(str) #`
     str = StringValue(str) unless str.kind_of?(String)

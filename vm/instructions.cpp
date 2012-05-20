@@ -4,6 +4,7 @@
 #include "builtin/block_environment.hpp"
 #include "builtin/class.hpp"
 #include "builtin/compiledmethod.hpp"
+#include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/string.hpp"
@@ -46,8 +47,6 @@ using namespace rubinius;
 #define stack_pop() (*STACK_PTR--)
 #define stack_set_top(val) *STACK_PTR = (val)
 
-#define USE_JUMP_TABLE
-
 #define stack_top() (*STACK_PTR)
 #define stack_back(count) (*(STACK_PTR - count))
 #define stack_clear(count) STACK_PTR -= count
@@ -58,11 +57,7 @@ using namespace rubinius;
 
 #define stack_local(which) call_frame->stk[vmm->stack_size - which - 1]
 
-#define next_int ((opcode)(stream[call_frame->inc_ip()]))
-
 #define both_fixnum_p(_p1, _p2) ((uintptr_t)(_p1) & (uintptr_t)(_p2) & TAG_FIXNUM)
-
-#define CHECK_EXCEPTION(val) if(val == NULL) { goto exception; }
 
 #define JUMP_DEBUGGING \
   return VMMethod::debugger_interpreter_continue(state, vmm, call_frame, \
@@ -77,9 +72,6 @@ using namespace rubinius;
 #define SET_CALL_FLAGS(val) is.call_flags = (val)
 #define CALL_FLAGS() is.call_flags
 
-#define SET_ALLOW_PRIVATE(val) is.allow_private = (val)
-#define ALLOW_PRIVATE() is.allow_private
-
 Object* VMMethod::interpreter(STATE,
                               VMMethod* const vmm,
                               InterpreterCallFrame* const call_frame)
@@ -93,12 +85,9 @@ Object* VMMethod::interpreter(STATE,
   }
 
   InterpreterState is;
+  GCTokenImpl gct;
 
-#ifdef X86_ESI_SPEEDUP
-  register void** ip_ptr asm ("esi") = vmm->addresses;
-#else
   register void** ip_ptr = vmm->addresses;
-#endif
 
   Object** stack_ptr = call_frame->stk - 1;
 
@@ -125,13 +114,13 @@ continue_to_run:
       Exception::make_type_error(state, e.type, e.object, e.reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
 
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
     call_frame->scope->flush_to_heap(state);
     return NULL;
   } catch(const RubyException& exc) {
     exc.exception->locations(state,
           Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc.exception);
+    state->raise_exception(exc.exception);
     return NULL;
   }
 
@@ -141,7 +130,7 @@ continue_to_run:
 
   // If control finds it's way down here, there is an exception.
 exception:
-  ThreadState* th = state->thread_state();
+  ThreadState* th = state->vm()->thread_state();
   //
   switch(th->raise_reason()) {
   case cException:
@@ -227,8 +216,8 @@ Object* VMMethod::uncommon_interpreter(STATE,
 
   VMMethod* method_vmm = method_call_frame->cm->backend_method();
 
-  if(++method_vmm->uncommon_count > state->shared.config.jit_deoptimize_threshold) {
-    if(state->shared.config.jit_uncommon_print) {
+  if(++method_vmm->uncommon_count > state->shared().config.jit_deoptimize_threshold) {
+    if(state->shared().config.jit_uncommon_print) {
       std::cerr << "[[[ Deoptimizing uncommon method ]]]\n";
       call_frame->print_backtrace(state);
 
@@ -244,6 +233,7 @@ Object* VMMethod::uncommon_interpreter(STATE,
 
   opcode* stream = vmm->opcodes;
   InterpreterState is;
+  GCTokenImpl gct;
 
   Object** stack_ptr = call_frame->stk + sp;
 
@@ -279,13 +269,13 @@ continue_to_run:
       Exception::make_type_error(state, e.type, e.object, e.reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
 
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
     call_frame->scope->flush_to_heap(state);
     return NULL;
   } catch(const RubyException& exc) {
     exc.exception->locations(state,
           Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc.exception);
+    state->raise_exception(exc.exception);
     return NULL;
   }
 
@@ -293,7 +283,7 @@ continue_to_run:
   rubinius::bug("Control flow error in interpreter");
 
 exception:
-  ThreadState* th = state->thread_state();
+  ThreadState* th = state->vm()->thread_state();
   //
   switch(th->raise_reason()) {
   case cException:
@@ -385,6 +375,7 @@ Object* VMMethod::debugger_interpreter(STATE,
 
   opcode* stream = vmm->opcodes;
   InterpreterState is;
+  GCTokenImpl gct;
 
   int current_unwind = 0;
   UnwindInfo unwinds[kMaxUnwindInfos];
@@ -403,7 +394,7 @@ continue_to_run:
 #undef DISPATCH
 #define DISPATCH \
     if(Object* bp = call_frame->find_breakpoint(state)) { \
-      if(!Helpers::yield_debugger(state, call_frame, bp)) goto exception; \
+      if(!Helpers::yield_debugger(state, gct, call_frame, bp)) goto exception; \
     } \
     goto *insn_locations[stream[call_frame->inc_ip()]];
 
@@ -423,13 +414,13 @@ continue_to_run:
       Exception::make_type_error(state, e.type, e.object, e.reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
 
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
     call_frame->scope->flush_to_heap(state);
     return NULL;
   } catch(const RubyException& exc) {
     exc.exception->locations(state,
           Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc.exception);
+    state->raise_exception(exc.exception);
     return NULL;
   }
 
@@ -438,7 +429,7 @@ continue_to_run:
 
   // If control finds it's way down here, there is an exception.
 exception:
-  ThreadState* th = state->thread_state();
+  ThreadState* th = state->vm()->thread_state();
   //
   switch(th->raise_reason()) {
   case cException:
@@ -524,6 +515,7 @@ Object* VMMethod::debugger_interpreter_continue(STATE,
 
 #include "vm/gen/instruction_locations.hpp"
 
+  GCTokenImpl gct;
   opcode* stream = vmm->opcodes;
 
   Object** stack_ptr = call_frame->stk + sp;
@@ -534,7 +526,7 @@ continue_to_run:
 #undef DISPATCH
 #define DISPATCH \
     if(Object* bp = call_frame->find_breakpoint(state)) { \
-      if(!Helpers::yield_debugger(state, call_frame, bp)) goto exception; \
+      if(!Helpers::yield_debugger(state, gct, call_frame, bp)) goto exception; \
     } \
     goto *insn_locations[stream[call_frame->inc_ip()]];
 
@@ -554,13 +546,13 @@ continue_to_run:
       Exception::make_type_error(state, e.type, e.object, e.reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
 
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
     call_frame->scope->flush_to_heap(state);
     return NULL;
   } catch(const RubyException& exc) {
     exc.exception->locations(state,
           Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc.exception);
+    state->raise_exception(exc.exception);
     return NULL;
   }
 
@@ -568,7 +560,7 @@ continue_to_run:
   rubinius::bug("Control flow error in interpreter");
 
 exception:
-  ThreadState* th = state->thread_state();
+  ThreadState* th = state->vm()->thread_state();
   //
   switch(th->raise_reason()) {
   case cException:

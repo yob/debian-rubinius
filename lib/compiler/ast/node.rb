@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Node
@@ -161,7 +163,7 @@ module Rubinius
       # The #visit implements a read-only traversal of the tree. To modify the
       # tree, see the #transform methed.
       def visit(visitor, parent=nil)
-        visitor.send self.node_name, self, parent
+        visitor.__send__ self.node_name, self, parent
         children { |c| c.visit visitor, self }
       end
 
@@ -257,12 +259,19 @@ module Rubinius
     class State
       attr_reader :scope, :super, :eval
 
+      class << self
+        attr_accessor :flip_flops
+      end
+
+      self.flip_flops ||= 0
+
       def initialize(scope)
         @scope = scope
         @ensure = 0
         @block = 0
         @masgn = 0
         @loop = 0
+        @op_asgn = 0
         @rescue = []
         @name = []
       end
@@ -315,6 +324,14 @@ module Rubinius
         @block > 0
       end
 
+      def flip_flops
+        State.flip_flops
+      end
+
+      def push_flip_flop
+        State.flip_flops += 1
+      end
+
       def push_masgn
         @masgn += 1
       end
@@ -325,6 +342,18 @@ module Rubinius
 
       def masgn?
         @masgn > 0
+      end
+
+      def push_op_asgn
+        @op_asgn += 1
+      end
+
+      def pop_op_asgn
+        @op_asgn -= 1 if op_asgn?
+      end
+
+      def op_asgn?
+        @op_asgn > 0
       end
 
       def push_super(scope)

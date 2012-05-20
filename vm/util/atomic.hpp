@@ -4,7 +4,14 @@
 #include <stdint.h>
 
 #if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 1))
+
+// On "4.1.2 (Gentoo 4.1.2 p1.1)" 32-bit, gcc sync intrinsics are missing
+#if (__GNUC__ == 4 && __GNUC_MINOR__ == 1 && defined(i386))
+#define X86_SYNC 1
+#define X86_32_SYNC 1
+#else
 #define GCC_SYNC 1
+#endif
 
 #elif defined(__APPLE__)
 #define APPLE_SYNC 1
@@ -40,6 +47,8 @@
 #endif
 
 namespace atomic {
+
+  typedef volatile int atomic_int_t;
 
   inline void memory_barrier() {
 #if defined(GCC_BARRIER)
@@ -95,11 +104,13 @@ namespace atomic {
     int new_val_lo = new_val & 0xffffffff;
 
     __asm__ __volatile__ (
-        "lock; cmpxchg8b %1; sete %0"
-      : "=q" (result)
-      : "m" (*ptr), "d" (old_val_hi), "a" (old_val_lo),
-                    "c" (new_val_hi), "b" (new_val_hi)
-      : "memory");
+      "push %%ebx; mov %5, %%ebx;"
+      "lock; cmpxchg8b %1; sete %0;"
+      "pop %%ebx"
+    : "=q" (result)
+    : "m" (*ptr), "d" (old_val_hi), "a" (old_val_lo),
+                  "c" (new_val_hi), "r" (new_val_lo)
+    : "memory");
 
     return result;
 #elif defined(X86_64_SYNC)
@@ -162,6 +173,44 @@ namespace atomic {
     return val;
 #endif
   }
+
+  template <typename intish>
+  inline intish test_and_set(intish *ptr) {
+#if defined(GCC_SYNC)
+    return __sync_lock_test_and_set(ptr, 1);
+#elif defined(APPLE_SYNC)
+    return OSAtomicTestAndSetBarrier(0, (volatile void*)ptr);
+#elif defined(X86_SYNC)
+    return !compare_and_swap((uint32_t*)ptr, 0, 1);
+#else
+#error "no sync primitive found"
+#endif
+  }
+
+  template <typename intish>
+  inline void test_and_clear(intish *ptr) {
+#if defined(GCC_SYNC)
+    __sync_lock_release(ptr);
+#elif defined(APPLE_SYNC)
+    OSAtomicTestAndClearBarrier(0, (volatile void*)ptr);
+#elif defined(X86_SYNC)
+    memory_barrier();
+    *ptr = 0;
+#else
+#error "no sync primitive found"
+#endif
+  }
+
+  template <typename T> inline T read(T *ptr) {
+    memory_barrier();
+    return *ptr;
+  }
+
+  template <typename T> inline void write(T *ptr, T val) {
+    memory_barrier();
+    *ptr = val;
+  }
+
 }
 
 #include "util/atomic_types.hpp"

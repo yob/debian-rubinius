@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 #--
 # NOTE do not define to_sym or id2name. It's been deprecated for 5 years and
@@ -31,10 +33,12 @@ class Fixnum < Integer
   alias_method :modulo, :%
 
   def fdiv(n)
-    to_f / n
+    if n.kind_of?(Fixnum)
+      to_f / n
+    else
+      redo_coerced :fdiv, n
+    end
   end
-
-  alias_method :quo, :fdiv
 
   # taint and untaint are noops on Fixnum
   def taint

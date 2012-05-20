@@ -85,6 +85,11 @@ describe "File.open" do
     File.exist?(@file).should == true
   end
 
+  it "opens a file with mode and permission as nil" do
+    @fh = File.open(@file, nil, nil)
+    @fh.should be_kind_of(File)
+  end
+
   # For this test we delete the file first to reset the perms
   it "opens the file when passed mode, num and permissions" do
     rm_r @file
@@ -518,6 +523,10 @@ describe "File.open" do
       File.open(@file, 'rb') {|f| f.external_encoding.should == Encoding::ASCII_8BIT}
       File.open(@file, 'wb+') {|f| f.external_encoding.should == Encoding::ASCII_8BIT}
     end
+  end
+
+  ruby_version_is "1.9" do
+    it "needs to be completed for hash argument"
   end
 end
 

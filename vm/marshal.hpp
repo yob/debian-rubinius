@@ -13,6 +13,7 @@ namespace rubinius {
   class InstructionSequence;
   class CompiledMethod;
   class String;
+  class Encoding;
   class Array;
   class Bignum;
   class Float;
@@ -37,6 +38,8 @@ namespace rubinius {
     Float* get_float();
     InstructionSequence* get_iseq();
     CompiledMethod* get_cmethod();
+    Object* get_constant();
+    Object* get_encoding();
 
   public:
     class Error {

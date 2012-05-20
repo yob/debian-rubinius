@@ -19,20 +19,36 @@
 
 #include "on_stack.hpp"
 
+#include "ontology.hpp"
+
 #include <sys/time.h>
 
 namespace rubinius {
 
   void Channel::init(STATE) {
-    GO(channel).set(state->new_class("Channel", G(object), G(rubinius)));
+    GO(channel).set(ontology::new_class(state, "Channel",
+                      G(object), G(rubinius)));
     G(channel)->set_object_type(state, Channel::type);
-    G(channel)->name(state, state->symbol("Rubinius::Channel"));
   }
 
   Channel* Channel::create(STATE) {
-    Channel* chan = state->new_object_mature<Channel>(G(channel));
+    Channel* chan = state->vm()->new_object_mature<Channel>(G(channel));
     chan->waiters_ = 0;
     chan->semaphore_count_ = 0;
+
+    // Using placement new to call the constructor of condition_
+    new(&chan->condition_) thread::Condition();
+    new(&chan->mutex_) thread::Mutex();
+
+    chan->value(state, List::create(state));
+
+    return chan;
+  }
+
+  Channel* Channel::create_primed(STATE) {
+    Channel* chan = state->vm()->new_object_mature<Channel>(G(channel));
+    chan->waiters_ = 0;
+    chan->semaphore_count_ = 1;
 
     // Using placement new to call the constructor of condition_
     new(&chan->condition_) thread::Condition();
@@ -48,55 +64,74 @@ namespace rubinius {
     // waiting_->remove(state, waiter);
   }
 
-  Object* Channel::send(STATE, Object* val) {
-    GCLockGuard lg(state, mutex_);
+  Object* Channel::send(STATE, GCToken gct, Object* val) {
+    Channel* self = this;
+
+    OnStack<2> os(state, val, self);
+
+    GCLockGuard lg(state, gct, mutex_);
 
     if(val->nil_p()) {
-      semaphore_count_++;
+      self->semaphore_count_++;
     } else {
-      if(semaphore_count_ > 0) {
-        for(int i = 0; i < semaphore_count_; i++) {
-          value_->append(state, Qnil);
+      if(self->semaphore_count_ > 0) {
+        for(int i = 0; i < self->semaphore_count_; i++) {
+          self->value_->append(state, cNil);
         }
-        semaphore_count_ = 0;
+        self->semaphore_count_ = 0;
       }
 
-      value_->append(state, val);
+      self->value_->append(state, val);
     }
 
-    if(waiters_ > 0) {
-      condition_.signal();
+    if(self->waiters_ > 0) {
+      self->condition_.signal();
     }
 
-    return Qnil;
+    return cNil;
   }
 
-  Object* Channel::try_receive(STATE) {
-    GCLockGuard lg(state, mutex_);
+  Object* Channel::try_receive(STATE, GCToken gct) {
+    Channel* self = this;
+    OnStack<1> os(state, self);
 
-    if(semaphore_count_ > 0) {
-      semaphore_count_--;
-      return Qnil;
+    GCLockGuard lg(state, gct, mutex_);
+
+    if(self->semaphore_count_ > 0) {
+      self->semaphore_count_--;
+      return cNil;
     }
 
-    if(value_->empty_p()) return Qnil;
-    return value_->shift(state);
+    if(self->value_->empty_p()) return cNil;
+    return self->value_->shift(state);
   }
 
-  Object* Channel::receive(STATE, CallFrame* call_frame) {
-    return receive_timeout(state, Qnil, call_frame);
+  Object* Channel::receive(STATE, GCToken gct, CallFrame* call_frame) {
+    return receive_timeout(state, gct, cNil, call_frame);
   }
 
 #define NANOSECONDS 1000000000
-  Object* Channel::receive_timeout(STATE, Object* duration, CallFrame* call_frame) {
-    GCLockGuard lg(state, mutex_);
+  Object* Channel::receive_timeout(STATE, GCToken gct, Object* duration, CallFrame* call_frame) {
+    // Passing control away means that the GC might run. So we need
+    // to stash this into a root, and read it back out again after
+    // control is returned.
+    //
+    // DO NOT USE this AFTER wait().
 
-    if(semaphore_count_ > 0) {
-      semaphore_count_--;
-      return Qnil;
+    // We have to do this because we can't pass this to OnStack, since C++
+    // won't let us reassign it.
+
+    Channel* self = this;
+    OnStack<2> os(state, self, duration);
+
+    GCLockGuard lg(state, gct, mutex_);
+
+    if(self->semaphore_count_ > 0) {
+      self->semaphore_count_--;
+      return cNil;
     }
 
-    if(!value_->empty_p()) return value_->shift(state);
+    if(!self->value_->empty_p()) return self->value_->shift(state);
 
     // Otherwise, we need to wait for a value.
     struct timespec ts = {0,0};
@@ -114,20 +149,9 @@ namespace rubinius {
       return Primitives::failure();
     }
 
-    // Passing control away means that the GC might run. So we need
-    // to stash this into a root, and read it back out again after
-    // control is returned.
-    //
-    // DO NOT USE this AFTER wait().
-
-    // We have to do this because we can't pass this to OnStack, since C++
-    // won't let us reassign it.
-    Channel* self = this;
-    OnStack<1> sv(state, self);
-
     // We pin this so we can pass condition_ out without worrying about
     // us moving it.
-    if(!this->pin()) {
+    if(!self->pin()) {
       rubinius::bug("unable to pin Channel");
     }
 
@@ -139,18 +163,30 @@ namespace rubinius {
       ts.tv_nsec  = nano % NANOSECONDS;
     }
 
-    waiters_++;
+    // We lock to manipulate the wait condition on the VM* so that
+    // we can sync up properly with another thread trying to wake us
+    // up right as we're trying to go to sleep.
+    state->lock(gct);
 
-    state->wait_on_channel(this);
+    if(!state->check_async(call_frame)) {
+      state->unlock();
+      return NULL;
+    }
+
+    state->vm()->wait_on_channel(self);
+
+    state->unlock();
+
+    self->waiters_++;
 
     for(;;) {
       {
         GCIndependent gc_guard(state, call_frame);
 
         if(use_timed_wait) {
-          if(condition_.wait_until(mutex_, &ts) == thread::cTimedOut) break;
+          if(self->condition_.wait_until(self->mutex_, &ts) == thread::cTimedOut) break;
         } else {
-          condition_.wait(mutex_);
+          self->condition_.wait(self->mutex_);
         }
       }
 
@@ -158,21 +194,21 @@ namespace rubinius {
       if(self->semaphore_count_ > 0 || !self->value()->empty_p()) break;
     }
 
-    state->clear_waiter();
-    state->thread->sleep(state, Qfalse);
+    state->vm()->clear_waiter();
+    state->vm()->thread->sleep(state, cFalse);
 
     self->unpin();
     self->waiters_--;
 
     if(!state->check_async(call_frame)) return NULL;
 
-    if(semaphore_count_ > 0) {
-      semaphore_count_--;
-      return Qnil;
+    if(self->semaphore_count_ > 0) {
+      self->semaphore_count_--;
+      return cNil;
     }
 
     // We were awoken, but there is no value to use. Return false.
-    if(self->value()->empty_p()) return Qfalse;
+    if(self->value()->empty_p()) return cFalse;
 
     return self->value()->shift(state);
   }
@@ -193,7 +229,8 @@ namespace rubinius {
     }
 
     virtual void call(Object* obj) {
-      chan->send(state, obj);
+      GCTokenImpl gct;
+      chan->send(state, gct, obj);
     }
   };
 
@@ -204,6 +241,7 @@ namespace rubinius {
   }
 
   void ChannelCallback::call(Object* obj) {
-    channel->send(state, obj);
+    GCTokenImpl gct;
+    channel->send(state, gct, obj);
   }
 }

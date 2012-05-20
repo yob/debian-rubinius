@@ -32,6 +32,8 @@ namespace tooling {
     rbxti::thread_start_func thread_start_func_;
     rbxti::thread_stop_func thread_stop_func_;
 
+    rbxti::at_gc_func at_gc_func_;
+
     rbxti::shutdown_func shutdown_func_;
 
   public:
@@ -50,22 +52,24 @@ namespace tooling {
     }
 
   public:
-    void* enter_method(VM* state, Executable* exec, Module* mod, Arguments& args, CompiledMethod* cm);
-    void  leave_method(VM* state, void* tag);
+    void* enter_method(STATE, Executable* exec, Module* mod, Arguments& args, CompiledMethod* cm);
+    void  leave_method(STATE, void* tag);
 
-    void* enter_block(VM* state, BlockEnvironment* env, Module* mod);
-    void  leave_block(VM* state, void* tag);
+    void* enter_block(STATE, BlockEnvironment* env, Module* mod);
+    void  leave_block(STATE, void* tag);
 
-    void* enter_gc(VM* state, int level);
-    void  leave_gc(VM* state, void* tag);
+    void* enter_gc(STATE, int level);
+    void  leave_gc(STATE, void* tag);
 
-    void* enter_script(VM* state, CompiledMethod* cm);
-    void  leave_script(VM* state, void* tag);
+    void* enter_script(STATE, CompiledMethod* cm);
+    void  leave_script(STATE, void* tag);
 
-    void shutdown(VM* state);
+    void shutdown(STATE);
 
     void thread_start(STATE);
     void thread_stop(STATE);
+
+    void at_gc(STATE);
 
     void set_tool_enter_method(rbxti::enter_method func);
     void set_tool_leave_method(rbxti::leave_func func);
@@ -87,6 +91,8 @@ namespace tooling {
     void set_tool_thread_start(rbxti::thread_start_func func);
     void set_tool_thread_stop(rbxti::thread_stop_func func);
 
+    void set_tool_at_gc(rbxti::at_gc_func func);
+
     Object* results(STATE);
     void enable(STATE);
     bool available(STATE);
@@ -94,14 +100,14 @@ namespace tooling {
 
   class Entry {
   protected:
-    VM* state_;
+    State* state_;
     ToolBroker* broker_;
     void* tag_;
 
   public:
     Entry(STATE)
       : state_(state)
-      , broker_(state->shared.tool_broker())
+      , broker_(state->shared().tool_broker())
     {}
   };
 

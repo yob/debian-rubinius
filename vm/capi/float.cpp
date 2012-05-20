@@ -12,7 +12,7 @@ namespace rubinius {
     Float* capi_get_float(NativeMethodEnvironment* env, VALUE float_handle) {
       Handle* handle = Handle::from(float_handle);
       handle->flush(env);
-      return as<Float>(handle->object());
+      return c_as<Float>(handle->object());
     }
 
     void flush_cached_rfloat(NativeMethodEnvironment* env, Handle* handle) {
@@ -35,7 +35,7 @@ namespace rubinius {
 
         flush_ = flush_cached_rfloat;
 
-        env->state()->shared.make_handle_cached(env->state(), this);
+        env->state()->vm()->shared.make_handle_cached(env->state(), this);
       }
 
       return as_.rfloat;
@@ -57,7 +57,7 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     return env->get_handle(Float::create(env->state(), val));
   }
-  
+
   VALUE rb_Float(VALUE object_handle) {
     return rb_convert_type(object_handle, 0, "Float", "to_f");
   }

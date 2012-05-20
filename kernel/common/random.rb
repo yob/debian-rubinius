@@ -1,11 +1,9 @@
+# -*- encoding: us-ascii -*-
+
 class Rubinius::Randomizer
   def self.allocate
     Rubinius.primitive :randomizer_allocate
     raise PrimitiveFailure, "Randomizer.allocate primitive failed"
-  end
-
-  def self.instance
-    @instance ||= new
   end
 
   def initialize

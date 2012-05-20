@@ -83,7 +83,7 @@ module Zlib
 
   @@@
   constants :required => true do |c|
-    c.include_dir 'vendor/zlib'
+    c.include_dir 'vendor/zlib' if BUILD_CONFIG[:vendor_zlib]
     c.include 'zlib.h'
 
     c.const 'ZLIB_VERSION', '%s', '(char *)', nil, to_s
@@ -117,12 +117,16 @@ module Zlib
     c.const 'Z_DEFAULT_STRATEGY',    nil, nil, 'DEFAULT_STRATEGY'
 
     c.const 'Z_DEFLATED',            nil, nil, 'DEFLATED'
+
+    c.const 'Z_ASCII',               nil, nil, 'ASCII'
+    c.const 'Z_BINARY',              nil, nil, 'BINARY'
+    c.const 'Z_UNKNOWN',             nil, nil, 'UNKNOWN'
   end
   @@@
 
   @@@
   constants do |c|
-    c.include_dir 'vendor/zlib'
+    c.include_dir 'vendor/zlib' if BUILD_CONFIG[:vendor_zlib]
     c.include 'zconf.h'
 
     c.const 'MAX_WBITS'
@@ -150,7 +154,7 @@ module Zlib
 
   @@@
   constants do |c|
-    c.include_dir 'vendor/zlib'
+    c.include_dir 'vendor/zlib' if BUILD_CONFIG[:vendor_zlib]
     c.include 'zlib.h'
 
     c.const 'OS_CODE'
@@ -243,7 +247,7 @@ module Zlib
     def self.use_zstream_layout
       @@@
       struct do |s|
-        s.include_dir 'vendor/zlib'
+        s.include_dir 'vendor/zlib' if BUILD_CONFIG[:vendor_zlib]
         s.include "zlib.h"
 
         s.name "struct z_stream_s"
@@ -309,22 +313,45 @@ module Zlib
       @func = nil
     end
 
+    def adler
+      self[:adler]
+    end
+
+    def avail_in
+      self[:avail_in]
+    end
+
+    def avail_out
+      self[:avail_out]
+    end
+
+    def avail_out=(size)
+      raise ArgumentError, "negative string size (or size too big)" if size < 0
+
+      return size if size == self[:avail_out]
+
+      if @output.nil?
+        @output = ''
+        @next_out = FFI::MemoryPointer.new(size) if @next_out.nil?
+        @next_out.write_string("\000" * size)
+      else
+        buf = @next_out.read_string(@next_out.total - self[:avail_out])
+        @next_out.free
+        @next_out = FFI::MemoryPointer.new(buf.size + size)
+        @next_out.write_string(buf)
+      end
+
+      self[:next_out] = @next_out
+
+      self[:avail_out] = size
+    end
+
     def closing?
       @flags & CLOSING == CLOSING
     end
 
-    def detatch_output
-      if @output.nil? then
-        data = ''
-      else
-        data = @output
-
-        @output = nil
-        self[:avail_out] = 0
-        self[:next_out] = nil
-      end
-
-      data
+    def data_type
+      self[:data_type]
     end
 
     ##
@@ -360,20 +387,28 @@ module Zlib
 
     alias :close :end
 
+    def ended?
+      !ready?
+    end
+
+    alias :closed? :ended?
+
     def expand_output
       if @output.nil? then
         @output = ''
         @next_out = FFI::MemoryPointer.new CHUNK if @next_out.nil?
       else
-        have = CHUNK - self[:avail_out]
+        have = @next_out.total - self[:avail_out]
         @output << @next_out.read_string(have)
       end
 
-      @next_out.write_string "\000" * CHUNK
+      @next_out.write_string "\000" * @next_out.total
       self[:next_out] = @next_out # Zlib advances self[:next_out]
 
-      self[:avail_out] = CHUNK
+      self[:avail_out] = @next_out.total
     end
+
+    private :expand_output
 
     ##
     # Finishes the stream and flushes output buffer. See Zlib::Deflate#finish
@@ -382,7 +417,7 @@ module Zlib
     def finish
       run '', Zlib::FINISH
 
-      detatch_output
+      flush_next_out
     end
 
     ##
@@ -392,16 +427,42 @@ module Zlib
       @flags & FINISHED == FINISHED
     end
 
+    alias :stream_end? :finished?
+
+    def flush_next_in
+      if @input.nil? then
+        data = ''
+      else
+        data = @input
+
+        reset_input
+      end
+
+      data
+    end
+
     ##
     # Flushes output buffer and returns all data in that buffer.
 
     def flush_next_out
-      detatch_output
+      if @output.nil? then
+        data = ''
+      else
+        data = @output
+
+        @output = nil
+        self[:avail_out] = 0
+        self[:next_out] = nil
+      end
+
+      data
     end
 
     def in_stream?
       @flags & IN_STREAM == IN_STREAM
     end
+
+    private :in_stream?
 
     def input_empty?
       @input.nil? or @input.empty?
@@ -418,11 +479,11 @@ module Zlib
       @flags |= READY
     end
 
+    private :ready
+
     def ready?
       @flags & READY == READY
     end
-    alias :closed? :ready?
-    alias :ended? :ready?
 
     ##
     # Resets and initializes the stream. All data in both input and output
@@ -441,6 +502,8 @@ module Zlib
     def reset_input
       @input = nil
     end
+
+    private :reset_input
 
     def run(data, flush)
       if @input.nil? and data.empty? then
@@ -661,7 +724,7 @@ module Zlib
     def deflate(data, flush = Zlib::NO_FLUSH)
       do_deflate data, flush
 
-      detatch_output
+      flush_next_out
     end
 
     ##
@@ -687,7 +750,7 @@ module Zlib
     def finish
       run '', Zlib::FINISH
 
-      detatch_output
+      flush_next_out
     end
 
     ##
@@ -698,7 +761,7 @@ module Zlib
     def flush(flush = Zlib::SYNC_FLUSH)
       run '', flush unless flush == Zlib::NO_FLUSH
 
-      detatch_output
+      flush_next_out
     end
 
     ##
@@ -981,7 +1044,8 @@ module Zlib
     # If the gzip file header is incorrect, raises an Zlib::GzipFile::Error
     # exception.
 
-    def initialize(io)
+    # TODO: handle options hash
+    def initialize(io, options=nil)
       @io = io
 
       @zstream = Zlib::Inflate.new -Zlib::MAX_WBITS
@@ -1031,7 +1095,15 @@ module Zlib
       if length && length < 0
         raise ArgumentError, "Negative length #{length} given"
       end
+
+      return nil if length && length > 0 && eof?
+
       data = @buffer
+
+      if length and data.size >= length
+        @buffer = data.slice! length..-1
+        return data
+      end
 
       while chunk = @io.read(CHUNK) do
         inflated = @zstream.inflate(chunk)
@@ -1138,6 +1210,33 @@ module Zlib
       end
     end
 
+    def getbyte
+      char = read 1
+      return nil if char.nil?
+      char.bytes.to_a[0]
+    end
+
+    def each_byte
+      return to_enum(:each_byte) unless block_given?
+      yield getbyte until eof?
+    end
+
+    def rewind
+      @io.seek 0
+      @lineno = 0
+      @buffer = ''
+      @zstream.reset
+      return 0
+    end
+
+    def lineno
+      @lineno = 0
+    end
+
+    def getc
+      return nil if eof?
+      read 1
+    end
   end
 
   ##
@@ -1313,15 +1412,20 @@ module Zlib
       end
 
       write_raw
+
+      data.length
     end
 
     ##
     # Same as IO.
 
-    alias << write
+    def <<(data)
+      write(data)
+      self
+    end
 
     def write_raw
-      data = @zstream.detatch_output
+      data = @zstream.flush_next_out
 
       unless data.empty? then
         @io.write data
@@ -1417,7 +1521,7 @@ module Zlib
 
       if finished? then
         if data.nil? then
-          unzipped = detatch_output
+          unzipped = flush_next_out
         else
           @input ||= ''
           @input << data
@@ -1431,7 +1535,7 @@ module Zlib
           run data, Zlib::SYNC_FLUSH
         end
 
-        unzipped = detatch_output
+        unzipped = flush_next_out
 
         if finished? and not @input.nil? then
           expand_output

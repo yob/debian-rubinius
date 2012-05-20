@@ -95,14 +95,14 @@ namespace rubinius {
 
     void post_marshal(STATE);
     size_t number_of_locals();
-    VMMethod* internalize(STATE, const char** failure_reason=0, int* ip=0);
+    VMMethod* internalize(STATE, GCToken gct, const char** failure_reason=0, int* ip=0);
     void specialize(STATE, TypeInfo* ti);
 
     static Object* default_executor(STATE, CallFrame*, Executable* exec, Module* mod, Arguments& args);
     static Object* specialized_executor(STATE, CallFrame*, Executable* exec, Module* mod, Arguments& args);
 
     // Rubinius.primitive :compiledmethod_set_breakpoint
-    Object* set_breakpoint(STATE, Fixnum* ip, Object* bp);
+    Object* set_breakpoint(STATE, GCToken gct, Fixnum* ip, Object* bp);
 
     // Rubinius.primitive :compiledmethod_clear_breakpoint
     Object* clear_breakpoint(STATE, Fixnum* ip);
@@ -121,11 +121,12 @@ namespace rubinius {
 
     String* full_name(STATE);
 
+    void set_interpreter(executor interp);
+
     class Info : public Executable::Info {
     public:
       BASIC_TYPEINFO(Executable::Info)
       virtual void mark(Object* obj, ObjectMark& mark);
-      virtual void visit(Object* obj, ObjectVisitor& visit);
       virtual void show(STATE, Object* self, int level);
     };
 
