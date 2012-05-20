@@ -21,7 +21,8 @@ Description: implementation of the Ruby programming language
 Package: rubinius-doc
 Section: doc
 Architecture: all
-Depends: ${misc:Depends}, rubinius
+Depends: ${misc:Depends}
+Recommends: rubinius
 Description: Rubinius documentation
  This package contains the Rubinius documentation. Once this package in
  installed, run `rbx docs` to have a browser window open at the index of the
