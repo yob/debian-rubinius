@@ -6,11 +6,11 @@ MAN_DIR		= /usr/share/man/man1
 INC_DIR		= /usr/include/rubinius
 LIB_DIR		= /usr/lib
 GEM_DIR		= /var/lib/gems
-LLVM_CONFIG	= /usr/bin/llvm-config-2.8
+LLVM_CONFIG	= /usr/bin/llvm-config-3.0
 
 CONFIGURE       = \
   ./configure \
-    --llvm-config=/usr/bin/llvm-config-2.8 \
+    --llvm-config=/usr/bin/llvm-config-3.0 \
     --libdir=/usr/lib \
     --bindir=/usr/bin \
     --mandir=/usr/share/man/man1 \
