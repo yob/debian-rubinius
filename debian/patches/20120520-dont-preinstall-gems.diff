@@ -1,0 +1,56 @@
+diff --git a/Rakefile b/Rakefile
+index 9a931c6..533879d 100644
+--- a/Rakefile
++++ b/Rakefile
+@@ -142,7 +142,7 @@ end
+ 
+ # See vm.rake for more information
+ desc "Build everything that needs to be built at default level."
+-task :build => ["build:build", "gem_bootstrap"]
++task :build => ["build:build"]
+ 
+ desc "Recompile all ruby system files"
+ task :rebuild => %w[clean build]
+@@ -204,29 +204,6 @@ namespace :clean do
+   end
+ end
+ 
+-desc 'Install the pre-installed gems'
+-task :gem_bootstrap do
+-  STDOUT.puts "Installing pre-installed gems..."
+-
+-  rbx = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
+-  gems = Dir["preinstalled-gems/*.gem"]
+-  options = "--local --conservative --ignore-dependencies --no-rdoc --no-ri"
+-
+-  BUILD_CONFIG[:version_list].each do |ver|
+-    gems.each do |gem|
+-      parts = File.basename(gem, ".gem").split "-"
+-      gem_name = parts[0..-2].join "-"
+-      gem_version = parts[-1]
+-
+-      system "#{rbx} -X#{ver} -S gem query --name-matches #{gem_name} --installed --version #{gem_version} > #{DEV_NULL}"
+-
+-      unless $?.success?
+-        sh "#{rbx} -X#{ver} -S gem install #{options} #{gem}"
+-      end
+-    end
+-  end
+-end
+-
+ desc "Run the Rubinius documentation website"
+ task :docs do
+   require 'kernel/delta/options'
+diff --git a/rakelib/install.rake b/rakelib/install.rake
+index 5a60c82..8892553 100644
+--- a/rakelib/install.rake
++++ b/rakelib/install.rake
+@@ -62,7 +62,7 @@ def install_file(source, pattern, dest)
+ end
+ 
+ desc "Install Rubinius"
+-task :install => %w[ build:build install:files gem_bootstrap install:done]
++task :install => %w[ build:build install:files install:done]
+ 
+ namespace :install do
+   desc "Install all the Rubinius files"

@@ -20,7 +20,7 @@ CONFIGURE       = \
     --gemsdir=/usr/local/lib/rubinius/gems
 
 %:
-	dh $@
+	dh --with quilt $@
 
 override_dh_auto_configure:
 	$(CONFIGURE)
