@@ -1,0 +1,28 @@
+diff --git a/rakelib/install.rake b/rakelib/install.rake
+index 5a60c82..c1799ab 100644
+--- a/rakelib/install.rake
++++ b/rakelib/install.rake
+@@ -151,15 +151,15 @@ namespace :install do
+       install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
+ 
+       # Create symlinks for common commands
+-      begin
+-        ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
+-          name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
+-          File.delete name if File.exists? name
+-          File.symlink BUILD_CONFIG[:program_name], name
+-        end
+-      rescue NotImplementedError
++      #begin
++      #  ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
++      #    name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
++      #    File.delete name if File.exists? name
++      #    File.symlink BUILD_CONFIG[:program_name], name
++      #  end
++      #rescue NotImplementedError
+         # ignore
+-      end
++      #end
+     end
+   end
+ 
