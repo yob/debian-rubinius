@@ -5,9 +5,9 @@
 #include "builtin/class.hpp"
 #include "builtin/module.hpp"
 #include "builtin/symbol.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/lookuptable.hpp"
 #include "builtin/nativemethod.hpp"
 
@@ -83,7 +83,7 @@ namespace rubinius {
 
       if(NativeMethodFrame* nmf = cf->native_method_frame()) {
         NativeMethod* nm = try_as<NativeMethod>(nmf->get_object(nmf->method()));
-        if(nm || !nm->name()->symbol_p()) {
+        if(nm && nm->name()->symbol_p()) {
           stream << "capi:" << nm->name()->debug_str(state) << " at ";
           stream << nm->file()->c_str(state);
         } else {
@@ -91,12 +91,12 @@ namespace rubinius {
         }
 
         stream << std::endl;
-        cf = static_cast<CallFrame*>(cf->previous);
+        cf = cf->previous;
         continue;
       }
 
-      if(!cf->cm) {
-        cf = static_cast<CallFrame*>(cf->previous);
+      if(!cf->compiled_code) {
+        cf = cf->previous;
         continue;
       }
 
@@ -123,11 +123,12 @@ namespace rubinius {
           std::string mod_name;
 
           if(cf->module()->nil_p()) {
-            mod_name = cf->cm->scope()->module()->debug_str(state);
+            mod_name = cf->compiled_code->scope()->module()->debug_str(state);
           } else {
             if((name = try_as<Symbol>(cf->module()->module_name()))) {
               mod_name = name->debug_str(state);
-            } else if((name = try_as<Symbol>(cf->cm->scope()->module()->module_name()))) {
+            } else if((name = try_as<Symbol>(
+                      cf->compiled_code->scope()->module()->module_name()))) {
               mod_name = name->debug_str(state);
             } else {
               mod_name = "<anonymous module>";
@@ -140,12 +141,12 @@ namespace rubinius {
         if(name) {
           stream << name->debug_str(state);
         } else {
-          stream << cf->cm->name()->debug_str(state);
+          stream << cf->compiled_code->name()->debug_str(state);
         }
       }
 
       stream << " in ";
-      if(Symbol* file_sym = try_as<Symbol>(cf->cm->file())) {
+      if(Symbol* file_sym = try_as<Symbol>(cf->compiled_code->file())) {
         stream << file_sym->debug_str(state) << ":" << cf->line(state);
       } else {
         stream << "<unknown>";
@@ -160,14 +161,14 @@ namespace rubinius {
       stream << ")";
 
       stream << std::endl;
-      cf = static_cast<CallFrame*>(cf->previous);
+      cf = cf->previous;
     }
 
   }
 
   int CallFrame::line(STATE) {
-    if(!cm) return -2;        // trampoline context
-    return cm->line(state, ip());
+    if(!compiled_code) return -2;        // trampoline context
+    return compiled_code->line(state, ip());
   }
 
   // Walks the CallFrame list to see if +scope+ is still running
@@ -175,7 +176,7 @@ namespace rubinius {
     CallFrame* cur = this;
     while(cur) {
       if(cur->scope && cur->scope->on_heap() == scope) return true;
-      cur = static_cast<CallFrame*>(cur->previous);
+      cur = cur->previous;
     }
 
     return false;
@@ -201,7 +202,7 @@ namespace rubinius {
     } else if(dispatch_data) {
       std::cout << "name=" << name()->debug_str(state) << " ";
     } else {
-      std::cout << "name=" << cm->name()->debug_str(state) << " ";
+      std::cout << "name=" << compiled_code->name()->debug_str(state) << " ";
     }
 
     std::cout << "ip=" << ip_ << " ";
@@ -212,9 +213,9 @@ namespace rubinius {
   }
 
   Object* CallFrame::find_breakpoint(STATE) {
-    if(!cm) return 0;
+    if(!compiled_code) return 0;
 
-    LookupTable* tbl = cm->breakpoints();
+    LookupTable* tbl = compiled_code->breakpoints();
     if(tbl->nil_p()) return 0;
 
     bool found = false;

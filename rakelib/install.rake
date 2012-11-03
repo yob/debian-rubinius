@@ -5,34 +5,16 @@
 #     and install the files with the 'install' command
 #
 
-def install_dir(lib)
-  if fr = ENV['FAKEROOT']
-    return File.join(fr, lib)
-  end
+desc "Install Rubinius"
+task :install => %w[build:build gems:install install:files install:done]
 
-  lib
-end
-
-install_dirs = [
-  BUILD_CONFIG[:bindir],
-  BUILD_CONFIG[:libdir],
-  BUILD_CONFIG[:include18dir],
-  BUILD_CONFIG[:include19dir],
-  BUILD_CONFIG[:include20dir],
-  BUILD_CONFIG[:mandir],
-  BUILD_CONFIG[:gemsdir]
-]
-
-# What the hell does this code do? We want to avoid sudo whenever
-# possible. This code is based on the assumption that if A is a
-# directory name, if any of the paths leading up to the full A are
-# writable, then A can be created. So A is decomposed one directory
-# at a time from the right-hand side. That path is checked for
-# whether it is a directory. If it is and it is writable, we can
-# create A. Otherwise, we can't create A and sudo is required.
-def need_sudo?(dirs)
-  dirs.each do |name|
-    dir = install_dir(File.expand_path(name))
+# Determine if all the targets for the install directories are writable
+# decomposing each candidate directory from the right side and checking if
+# that path is writable. If not, we require explicit permission.
+def need_permission?
+  FileList["#{BUILD_CONFIG[:stagingdir]}/*"].each do |name|
+    destdir = ENV['DESTDIR'] || ''
+    dir = File.expand_path(File.join(destdir, BUILD_CONFIG[:prefixdir], name))
 
     until dir == "/"
       if File.directory? dir
@@ -47,118 +29,258 @@ def need_sudo?(dirs)
   return false
 end
 
-def need_install?
-  File.expand_path(Dir.pwd) != install_dir(BUILD_CONFIG[:libdir])
-end
-
-def install_file(source, pattern, dest)
+def install_file(source, prefix, dest, name=nil, options={})
   return if File.directory? source
 
-  dest_name = install_dir File.join(dest, source.sub(pattern, ""))
-  dir = File.dirname(dest_name)
-  mkdir_p dir unless File.directory? dir
+  dest_name = File.join(dest, source[prefix.size..-1])
+  dir = File.dirname dest_name
+  mkdir_p dir, :verbose => $verbose unless File.directory? dir
 
-  install source, dest_name, :mode => 0644, :verbose => true
+  options[:mode] ||= 0644
+  options[:verbose] ||= $verbose
+
+  install source, dest_name, options
 end
 
-desc "Install Rubinius"
-task :install => %w[ build:build install:files gem_bootstrap install:done]
+def install_bin(source, target)
+  bin = "#{target}#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
+  dir = File.dirname bin
+  mkdir_p dir, :verbose => $verbose unless File.directory? dir
+
+  install source, bin, :mode => 0755, :verbose => $verbose
+
+  # Create symlinks for common commands
+  if BUILD_CONFIG[:use_bin_links]
+    begin
+      BUILD_CONFIG[:bin_links].each do |name|
+        link = "#{target}/#{BUILD_CONFIG[:bindir]}/#{name}"
+        File.delete link if File.exists? link
+        File.symlink BUILD_CONFIG[:program_name], link
+      end
+    rescue NotImplementedError
+      # ignore
+    end
+  end
+end
+
+def install_extra_bins(prefix, target)
+  install_file "#{prefix}/testrb", prefix, "#{target}#{BUILD_CONFIG[:bindir]}", :mode => 0755
+end
+
+def install_runtime(prefix, target)
+  FileList[
+    "#{prefix}/platform.conf",
+    "#{prefix}/**/index",
+    "#{prefix}/**/signature",
+    "#{prefix}/**/*.rb{a,c}",
+    "#{prefix}/**/load_order*.txt"
+  ].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:runtimedir]}"
+  end
+end
+
+def install_kernel(prefix, target)
+  FileList["#{prefix}/**/*.rb"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:kerneldir]}"
+  end
+end
+
+def install_capi_include(prefix, destination)
+  FileList["#{prefix}/**/*.h", "#{prefix}/**/*.hpp"].each do |name|
+    install_file name, prefix, destination
+  end
+end
+
+def install_build_lib(prefix, target)
+  FileList["#{prefix}/**/*.*", "#{prefix}/**/*"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}"
+  end
+end
+
+def install_lib(prefix, target)
+  FileList["#{prefix}/**/*.rb", "#{prefix}/**/rubygems/**/*"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}"
+  end
+end
+
+def install_transcoders(prefix, target)
+  FileList["#{prefix}/19/encoding/converter/*#{$dlext}"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}", :mode => 0755
+  end
+end
+
+def install_tooling(prefix, target)
+  FileList["#{prefix}/tooling/**/*.#{$dlext}"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}"
+  end
+end
+
+def install_cext(prefix, target)
+  FileList["#{prefix}/**/ext/**/*.#{$dlext}"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}"
+  end
+end
+
+def install_documentation(prefix, target)
+  FileList["#{prefix}/rubinius/documentation/**/*"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:libdir]}"
+  end
+end
+
+def install_manpages(prefix, target)
+  FileList["#{prefix}/**/*"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:mandir]}"
+  end
+end
+
+def install_gems(prefix, target)
+  FileList["#{prefix}/**/*.*", "#{prefix}/**/*"].each do |name|
+    install_file name, prefix, "#{target}#{BUILD_CONFIG[:gemsdir]}"
+  end
+end
+
+namespace :stage do
+  task :bin do
+    install_bin "#{BUILD_CONFIG[:sourcedir]}/vm/vm", BUILD_CONFIG[:sourcedir]
+
+    if BUILD_CONFIG[:stagingdir]
+      install_bin "#{BUILD_CONFIG[:sourcedir]}/vm/vm", BUILD_CONFIG[:stagingdir]
+
+      name = BUILD_CONFIG[:program_name]
+      mode = File::CREAT | File::TRUNC | File::WRONLY
+      File.open("#{BUILD_CONFIG[:sourcedir]}/bin/#{name}", mode, 0755) do |f|
+        f.puts <<-EOS
+#!/bin/sh
+#
+# Rubinius has been configured to be installed. This convenience
+# wrapper enables running Rubinius from the staging directories.
+
+export RBX_PREFIX_PATH=#{BUILD_CONFIG[:stagingdir]}
+EXE=$(basename $0)
+
+exec #{BUILD_CONFIG[:stagingdir]}#{BUILD_CONFIG[:bindir]}/$EXE "$@"
+        EOS
+      end
+    end
+  end
+
+  task :extra_bins do
+    if BUILD_CONFIG[:stagingdir]
+      install_extra_bins "#{BUILD_CONFIG[:sourcedir]}/bin", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :capi_include do
+    if BUILD_CONFIG[:stagingdir]
+      install_capi_include "#{BUILD_CONFIG[:sourcedir]}/vm/capi/18/include",
+                           "#{BUILD_CONFIG[:stagingdir]}#{BUILD_CONFIG[:include18dir]}"
+      install_capi_include "#{BUILD_CONFIG[:sourcedir]}/vm/capi/19/include",
+                           "#{BUILD_CONFIG[:stagingdir]}#{BUILD_CONFIG[:include19dir]}"
+      install_capi_include "#{BUILD_CONFIG[:sourcedir]}/vm/capi/20/include",
+                           "#{BUILD_CONFIG[:stagingdir]}#{BUILD_CONFIG[:include20dir]}"
+    end
+  end
+
+  task :lib do
+    if BUILD_CONFIG[:stagingdir]
+      install_build_lib "#{BUILD_CONFIG[:sourcedir]}/lib", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :tooling do
+    if BUILD_CONFIG[:stagingdir]
+      install_tooling "#{BUILD_CONFIG[:sourcedir]}/lib/tooling", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :runtime do
+    if BUILD_CONFIG[:stagingdir]
+      install_runtime "#{BUILD_CONFIG[:sourcedir]}/runtime", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :kernel do
+    if BUILD_CONFIG[:stagingdir]
+      install_kernel "#{BUILD_CONFIG[:sourcedir]}/kernel", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :documentation do
+    if BUILD_CONFIG[:stagingdir]
+      install_documentation "#{BUILD_CONFIG[:sourcedir]}/lib", BUILD_CONFIG[:stagingdir]
+    end
+  end
+
+  task :manpages do
+    if BUILD_CONFIG[:stagingdir]
+      install_manpages "#{BUILD_CONFIG[:sourcedir]}/doc/generated/vm/man", BUILD_CONFIG[:stagingdir]
+    end
+  end
+end
 
 namespace :install do
-  desc "Install all the Rubinius files"
+  desc "Install all the Rubinius files. Use DESTDIR environment variable " \
+       "to specify custom installation location."
   task :files do
-    if need_sudo? install_dirs
-      sh "sudo #{BUILD_CONFIG[:build_ruby]} -S #{BUILD_CONFIG[:build_rake]} install:files", :verbose => true
-    elsif !need_install?
-      puts "Install directory is the same as build directory, nothing to install"
-    else
-      install_dirs.each { |name| mkdir_p install_dir(name), :verbose => $verbose }
+    if BUILD_CONFIG[:stagingdir]
+      if need_permission?
+        prefix = BUILD_CONFIG[:prefixdir]
+        STDERR.puts <<-EOM
+Rubinius has been configured for the following paths:
 
-      [["18", "18"], ["19", "19"], ["19", "20"]].each do |a, b|
-        FileList["vm/capi/#{a}/include/**/*.h"].each do |name|
-          install_file name, %r[^vm/capi/#{a}/include], BUILD_CONFIG[:"include#{b}dir"]
-        end
-      end
+bin:     #{prefix}#{BUILD_CONFIG[:bindir]}
+lib:     #{prefix}#{BUILD_CONFIG[:libdir]}
+runtime: #{prefix}#{BUILD_CONFIG[:runtimedir]}
+kernel:  #{prefix}#{BUILD_CONFIG[:kerneldir]}
+site:    #{prefix}#{BUILD_CONFIG[:sitedir]}
+vendor:  #{prefix}#{BUILD_CONFIG[:vendordir]}
+man:     #{prefix}#{BUILD_CONFIG[:mandir]}
+gems:    #{prefix}#{BUILD_CONFIG[:gemsdir]}
 
-      FileList[
-        'runtime/platform.conf',
-        'runtime/**/index',
-        'runtime/**/signature',
-        'runtime/**/*.rb{a,c}',
-        'runtime/**/load_order*.txt'
-      ].each do |name|
-        install_file name, /^runtime/, BUILD_CONFIG[:runtime]
-      end
+Please ensure that the paths to these directories are writable
+by the current user. Otherwise, run 'rake install' with the
+oppropriate command to elevate permissions (eg su, sudo).
+        EOM
 
-      # Install the .rb files for the core library (kernel).
-      FileList['kernel/**/*.rb'].each do |name|
-        install_file name, /^kernel/, BUILD_CONFIG[:kernel_path]
-      end
+        exit(1)
+      else
+        stagingdir = BUILD_CONFIG[:stagingdir]
+        destdir = ENV['DESTDIR'] || ''
+        prefixdir = File.join(destdir, BUILD_CONFIG[:prefixdir])
 
-      # Install the .rb files for the standard library. This is a
-      # separate block from the .rbc files so that the .rb files
-      # have an older timestamp and do not trigger recompiling.
-      FileList['lib/**/*.rb'].each do |name|
-        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-      end
+        install_capi_include "#{stagingdir}#{BUILD_CONFIG[:include18dir]}",
+                             "#{prefixdir}#{BUILD_CONFIG[:include18dir]}"
+        install_capi_include "#{stagingdir}#{BUILD_CONFIG[:include19dir]}",
+                             "#{prefixdir}#{BUILD_CONFIG[:include19dir]}"
+        install_capi_include "#{stagingdir}#{BUILD_CONFIG[:include20dir]}",
+                             "#{prefixdir}#{BUILD_CONFIG[:include20dir]}"
 
-      FileList['lib/**/*.rbc'].each do |name|
-        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-      end
+        install_runtime "#{stagingdir}#{BUILD_CONFIG[:runtimedir]}", prefixdir
 
-      # Install C++ extensions. Since we permit configuring where
-      # to install the C extensions separately from the lib files,
-      # we have to be more restrictive with the globbing.
-      #
-      # TODO: handle this better in daedalus.
-      FileList["lib/tooling/**/*.#{$dlext}"].each do |name|
-        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-      end
+        install_kernel "#{stagingdir}#{BUILD_CONFIG[:kerneldir]}", prefixdir
 
-      if Rubinius::BUILD_CONFIG[:vendor_zlib]
-        # Install the zlib library files
-        FileList["lib/zlib/*"].each do |name|
-          install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-        end
-      end
+        install_lib "#{stagingdir}#{BUILD_CONFIG[:libdir]}", prefixdir
 
-      # Install the documentation site
-      FileList['lib/rubinius/documentation/**/*'].each do |name|
-        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-      end
+        install_transcoders "#{stagingdir}#{BUILD_CONFIG[:libdir]}", prefixdir
 
-      # Install the C extensions for the standard library.
-      FileList["lib/**/ext/**/*.#{$dlext}"].each do |name|
-        install_file name, /^lib/, BUILD_CONFIG[:lib_path]
-      end
+        install_tooling "#{stagingdir}#{BUILD_CONFIG[:libdir]}", prefixdir
 
-      # Install pre-installed gems
-      gems_dest = "#{BUILD_CONFIG[:gemsdir]}/rubinius/preinstalled"
-      FileList["preinstalled-gems/data/**/*"].each do |name|
-        install_file name, %r[^preinstalled-gems/data], gems_dest
-      end
+        install_documentation "#{stagingdir}#{BUILD_CONFIG[:libdir]}", prefixdir
 
-      FileList["preinstalled-gems/bin/*"].each do |name|
-        install_file name, /^preinstalled-gems/, BUILD_CONFIG[:gemsdir]
-      end
+        install_manpages "#{stagingdir}#{BUILD_CONFIG[:mandir]}", prefixdir
 
-      # Install the Rubinius executable
-      exe = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
-      install "vm/vm", install_dir(exe), :mode => 0755, :verbose => true
+        install_cext "#{stagingdir}#{BUILD_CONFIG[:libdir]}", prefixdir
 
-      # Install the testrb command
-      testrb = "#{BUILD_CONFIG[:bindir]}/testrb"
-      install "bin/testrb", install_dir(testrb), :mode => 0755, :verbose => true
+        bin = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
+        install_bin "#{stagingdir}#{bin}", prefixdir
 
-      # Create symlinks for common commands
-      begin
-        ["ruby", "rake", "gem", "irb", "rdoc", "ri"].each do |command|
-          name = install_dir("#{BUILD_CONFIG[:bindir]}/#{command}")
-          File.delete name if File.exists? name
-          File.symlink BUILD_CONFIG[:program_name], name
-        end
-      rescue NotImplementedError
-        # ignore
+        install_extra_bins "#{stagingdir}/#{BUILD_CONFIG[:bindir]}", prefixdir
+
+        install_gems "#{stagingdir}#{BUILD_CONFIG[:gemsdir]}", prefixdir
+
+        # Install the testrb command
+        testrb = "#{prefixdir}#{BUILD_CONFIG[:bindir]}/testrb"
+        install "bin/testrb", testrb, :mode => 0755, :verbose => $verbose
       end
     end
   end
@@ -169,7 +291,7 @@ namespace :install do
 
 Successfully installed Rubinius #{BUILD_CONFIG[:version]}
 
-Add '#{BUILD_CONFIG[:bindir]}' to your PATH. Available commands are:
+Add '#{BUILD_CONFIG[:prefixdir]}#{BUILD_CONFIG[:bindir]}' to your PATH. Available commands are:
 
   #{BUILD_CONFIG[:program_name]}, ruby, rake, gem, irb, rdoc, ri
 

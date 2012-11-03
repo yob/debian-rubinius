@@ -5,18 +5,16 @@ module RbConfig
     raise "Looks like you loaded the Rubinius rbconfig, but this is not Rubinius."
   end
 
-  prefix = File.dirname(File.dirname(__FILE__))
-
   CONFIG = {}
 
-  CONFIG["prefix"]             = prefix
+  CONFIG["prefix"]             = Rubinius::PREFIX_PATH
   CONFIG["install_prefix"]     = ''
   CONFIG["DLEXT"]              = Rubinius::LIBSUFFIX[1..-1]
   CONFIG["EXEEXT"]             = ""
   CONFIG["ruby_install_name"]  = RUBY_ENGINE.dup
   CONFIG["RUBY_INSTALL_NAME"]  = RUBY_ENGINE.dup
   CONFIG["exec_prefix"]        = "$(prefix)"
-  CONFIG["bindir"]             = Rubinius::BUILD_CONFIG[:bindir]
+  CONFIG["bindir"]             = Rubinius::BIN_PATH
   CONFIG["sbindir"]            = "$(exec_prefix)/sbin"
   CONFIG["libexecdir"]         = "$(exec_prefix)/libexec"
   CONFIG["datarootdir"]        = "$(prefix)/share"
@@ -121,10 +119,10 @@ module RbConfig
   # since we hardcode using gcc, and this flag is only
   # used by mkmf to compile extensions, be sure PIC is in
   # there
-  CONFIG["CFLAGS"]             = "-ggdb3 -fPIC"
+  CONFIG["CFLAGS"]             = "-g -fPIC"
   CONFIG["LDFLAGS"]            = ""
   if ENV['DEV']
-    CONFIG["CFLAGS"] << " -O0"
+    CONFIG["CFLAGS"] << " -O0 "
   else
     CONFIG["CFLAGS"] << " -O2"
   end
@@ -193,8 +191,12 @@ module RbConfig
   CONFIG["ALLOCA"]             = ""
   CONFIG["LIBEXT"]             = "a"
   CONFIG["LINK_SO"]            = ""
-  CONFIG["LIBPATHFLAG"]        = " -L%s"
-  CONFIG["RPATHFLAG"]          = ""
+  # On Linux it needs to pass down the -R flags into the linker so it will
+  # properly link files not located in paths in LD_LIBRARY_PATH. On other
+  # platforms this is not necessary and it is linked properly even for
+  # paths outside LD_LIBRARY_PATH.
+  CONFIG["LIBPATHFLAG"]        = Rubinius.linux? ? " -L%1$-s"     : " -L%s"
+  CONFIG["RPATHFLAG"]          = Rubinius.linux? ? " -Wl,-R%1$-s" : ""
   CONFIG["LIBPATHENV"]         = "DYLD_LIBRARY_PATH"
   CONFIG["TRY_LINK"]           = ""
   CONFIG["EXTSTATIC"]          = ""
@@ -214,7 +216,7 @@ module RbConfig
       RbConfig::CONFIG["bindir"],
       RbConfig::CONFIG["ruby_install_name"] + RbConfig::CONFIG["EXEEXT"]
     )
-  end  
+  end
 
   # Adapted from MRI's' rbconfig.rb
   MAKEFILE_CONFIG = {}

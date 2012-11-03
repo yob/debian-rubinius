@@ -59,7 +59,7 @@ namespace rubinius {
   }
 
   Thread* Thread::create(STATE, VM* target, Object* self, Run runner,
-                         bool main_thread)
+                         bool main_thread, bool system_thread)
   {
     Thread* thr = state->new_object<Thread>(G(thread));
 
@@ -74,10 +74,9 @@ namespace rubinius {
     thr->klass(state, as<Class>(self));
     thr->runner_ = runner;
     thr->init_lock_.init();
+    thr->system_thread_ = system_thread;
 
     target->thread.set(thr);
-
-    if(!main_thread) thr->init_lock_.lock();
 
     return thr;
   }
@@ -180,6 +179,29 @@ namespace rubinius {
     return cFalse;
   }
 
+  int Thread::start_new_thread(STATE, const pthread_attr_t &attrs) {
+    Thread* self = this;
+    OnStack<1> os(state, self);
+
+    self->init_lock_.lock();
+    int error = pthread_create(&vm_->os_thread(), &attrs, in_new_thread, (void*)vm_);
+    if(error) {
+      return error;
+    }
+
+    // We can't return from here until the new thread completes a minimal
+    // initialization. After the initialization, it unlocks init_lock_.
+    // So, wait here until we can lock init_lock_ after that.
+    self->init_lock_.lock();
+
+    // We locked init_lock_. And we are sure that the new thread completed
+    // the initialization.
+    // Locking init_lock_ isn't needed anymore, so unlock it.
+    self->init_lock_.unlock();
+
+    return 0;
+  }
+
   void* Thread::in_new_thread(void* ptr) {
     VM* vm = reinterpret_cast<VM*>(ptr);
 
@@ -187,19 +209,31 @@ namespace rubinius {
 
     int calculate_stack = 0;
     NativeMethod::init_thread(state);
-    VM::set_current(vm);
+    std::ostringstream tn;
+    tn << "rbx.ruby." << vm->thread_id();
+
+    VM::set_current(vm, tn.str());
 
     state->set_call_frame(0);
-    vm->shared.gc_dependent(state);
 
     if(cDebugThreading) {
       std::cerr << "[THREAD " << vm->thread_id()
                 << " (" << (unsigned int)thread_debug_self() << ") started thread]\n";
     }
 
-    vm->set_root_stack(reinterpret_cast<uintptr_t>(&calculate_stack), 4194304);
+    vm->set_root_stack(reinterpret_cast<uintptr_t>(&calculate_stack), THREAD_STACK_SIZE);
+
+    GCTokenImpl gct;
+
+    // Lock the thread object and unlock it at __run__ in the ruby land.
+    vm->thread->hard_lock(state, gct);
 
     vm->thread->init_lock_.unlock();
+
+    // Become GC-dependent after unlocking init_lock_ to avoid deadlocks.
+    // gc_dependent may lock when it detects GC is happening. Also the parent
+    // thread is locked until init_lock_ is unlocked by this child thread.
+    vm->shared.gc_dependent(state);
 
     vm->shared.tool_broker()->thread_start(state);
     Object* ret = vm->thread->runner_(state);
@@ -213,7 +247,6 @@ namespace rubinius {
 
     vm->thread->init_lock_.lock();
 
-    GCTokenImpl gct;
 
     std::list<ObjectHeader*>& los = vm->locked_objects();
     for(std::list<ObjectHeader*>::iterator i = los.begin();
@@ -246,10 +279,10 @@ namespace rubinius {
   Object* Thread::fork(STATE) {
     pthread_attr_t attrs;
     pthread_attr_init(&attrs);
-    pthread_attr_setstacksize(&attrs, 4194304);
+    pthread_attr_setstacksize(&attrs, THREAD_STACK_SIZE);
     pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
 
-    int error = pthread_create(&vm_->os_thread(), &attrs, in_new_thread, (void*)vm_);
+    int error = start_new_thread(state, attrs);
 
     if(error) {
       Exception::thread_error(state, strerror(error));
@@ -260,14 +293,13 @@ namespace rubinius {
   int Thread::fork_attached(STATE) {
     pthread_attr_t attrs;
     pthread_attr_init(&attrs);
-    pthread_attr_setstacksize(&attrs, 4194304);
+    pthread_attr_setstacksize(&attrs, THREAD_STACK_SIZE);
 
-    return pthread_create(&vm_->os_thread(), &attrs, in_new_thread, (void*)vm_);
+    return start_new_thread(state, attrs);
   }
 
   Object* Thread::pass(STATE, CallFrame* calling_environment) {
-    struct timespec ts = {0, 0};
-    nanosleep(&ts, NULL);
+    atomic::pause();
     return cNil;
   }
 
@@ -289,21 +321,44 @@ namespace rubinius {
   }
 
   Object* Thread::raise(STATE, GCToken gct, Exception* exc) {
-    init_lock_.lock();
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
     Thread* self = this;
     OnStack<2> os(state, self, exc);
 
     VM* vm = self->vm_;
     if(!vm) {
-      self->init_lock_.unlock();
       return cNil;
     }
 
     vm->register_raise(state, exc);
 
     vm->wakeup(state, gct);
-    self->init_lock_.unlock();
     return exc;
+  }
+
+  Object* Thread::current_exception(STATE) {
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
+    return vm_->thread_state()->current_exception();
+  }
+
+  Object* Thread::kill(STATE, GCToken gct) {
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
+    Thread* self = this;
+    OnStack<1> os(state, self);
+
+    VM* vm = self->vm_;
+    if(!vm) {
+      return cNil;
+    }
+
+    if(state->vm()->thread.get() == self) {
+      vm_->thread_state_.raise_thread_kill();
+      return NULL;
+    } else {
+      vm->register_kill(state);
+      vm->wakeup(state, gct);
+      return self;
+    }
   }
 
   Object* Thread::set_priority(STATE, Fixnum* new_priority) {
@@ -311,24 +366,22 @@ namespace rubinius {
   }
 
   Thread* Thread::wakeup(STATE, GCToken gct) {
-    init_lock_.lock();
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
     Thread* self = this;
     OnStack<1> os(state, self);
 
     VM* vm = self->vm_;
     if(alive() == cFalse || !vm) {
-      self->init_lock_.unlock();
       return force_as<Thread>(Primitives::failure());
     }
 
     vm->wakeup(state, gct);
 
-    self->init_lock_.unlock();
     return self;
   }
 
   Tuple* Thread::context(STATE) {
-    thread::SpinLock::LockGuard lg(init_lock_);
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
 
     VM* vm = vm_;
     if(!vm) return nil<Tuple>();
@@ -337,11 +390,11 @@ namespace rubinius {
 
     VariableScope* scope = cf->promote_scope(state);
 
-    return Tuple::from(state, 3, Fixnum::from(cf->ip()), cf->cm, scope);
+    return Tuple::from(state, 3, Fixnum::from(cf->ip()), cf->compiled_code, scope);
   }
 
   Array* Thread::mri_backtrace(STATE, GCToken gct, CallFrame* calling_environment) {
-    thread::SpinLock::LockGuard lg(init_lock_);
+    utilities::thread::SpinLock::LockGuard lg(init_lock_);
 
     VM* vm = vm_;
     if(!vm) return nil<Array>();

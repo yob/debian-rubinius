@@ -27,7 +27,7 @@ module Kernel
   def StringValue(obj)
     Rubinius::Type.coerce_to obj, String, :to_str
   end
-  private :StringValue
+  module_function :StringValue
 
   ##
   # MRI uses a macro named NUM2DBL which has essentially the same semantics as
@@ -166,18 +166,18 @@ module Kernel
   def caller(start=1, exclude_kernel=true)
     # The + 1 is to skip this frame
     Rubinius.mri_backtrace(start + 1).map do |tup|
-      cm = tup[0]
+      code = tup[0]
       line = tup[1]
       is_block = tup[2]
       name = tup[3]
 
-      "#{cm.active_path}:#{line}:in `#{name}'"
+      "#{code.active_path}:#{line}:in `#{name}'"
     end
   end
   module_function :caller
 
   def global_variables
-    Rubinius.convert_to_names Rubinius::Globals.variables
+    Rubinius::Type.convert_to_names Rubinius::Globals.variables
   end
   module_function :global_variables
 
@@ -398,7 +398,7 @@ module Kernel
       ary << sym if sym.is_ivar?
     end
 
-    Rubinius.convert_to_names ary
+    Rubinius::Type.convert_to_names ary
   end
 
   alias_method :__instance_variables__, :instance_variables
@@ -477,7 +477,7 @@ module Kernel
       methods.concat m.method_table.private_names
     end
 
-    Rubinius.convert_to_names methods
+    Rubinius::Type.convert_to_names methods
   end
   private :private_singleton_methods
 
@@ -498,7 +498,7 @@ module Kernel
       methods.concat m.method_table.protected_names
     end
 
-    Rubinius.convert_to_names methods
+    Rubinius::Type.convert_to_names methods
   end
   private :protected_singleton_methods
 
@@ -524,7 +524,7 @@ module Kernel
       end
     end
 
-    Rubinius.convert_to_names methods.uniq
+    Rubinius::Type.convert_to_names methods.uniq
   end
 
   def to_s
@@ -577,7 +577,7 @@ module Kernel
     cl = Rubinius::CodeLoader.new(name)
     cl.load(wrap)
 
-    Rubinius.run_script cl.cm
+    Rubinius.run_script cl.compiled_code
 
     Rubinius::CodeLoader.loaded_hook.trigger!(name)
 

@@ -8,6 +8,7 @@
 #include "helpers.hpp"
 #include "call_frame.hpp"
 #include "exception_point.hpp"
+#include "on_stack.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
@@ -43,6 +44,14 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     CallFrame* rcf = env->current_call_frame()->previous->top_ruby_frame();
+
+    return env->get_handle(rcf->name());
+  }
+
+  ID rb_frame_this_func() {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    CallFrame* rcf = env->current_call_frame()->top_ruby_frame();
 
     return env->get_handle(rcf->name());
   }
@@ -207,8 +216,18 @@ extern "C" {
     Symbol* constant = env->state()->symbol(name);
 
     LEAVE_CAPI(env->state());
-    Module* module = rubinius::Helpers::open_module(env->state(),
-        env->current_call_frame(), parent, constant);
+    Module* module = NULL;
+
+    // Create a scope so we know that the OnStack variables are popped off
+    // before we possibly make a longjmp. Making a longjmp doesn't give
+    // any guarantees about destructors being run
+    {
+      GCTokenImpl gct;
+      OnStack<2> os(env->state(), parent, constant);
+
+      module = rubinius::Helpers::open_module(env->state(), gct,
+          env->current_call_frame(), parent, constant);
+    }
 
     // The call above could have triggered an Autoload resolve, which may
     // raise an exception, so we have to check the value returned.

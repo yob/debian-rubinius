@@ -1,7 +1,7 @@
 #ifndef RBX_CALL_FRAME_HPP
 #define RBX_CALL_FRAME_HPP
 
-#include "vmmethod.hpp"
+#include "machine_code.hpp"
 #include "unwind_info.hpp"
 #include "stack_variables.hpp"
 #include "builtin/variable_scope.hpp"
@@ -29,7 +29,7 @@ namespace rubinius {
   struct CallFrame {
     enum Flags {
       cIsLambda =           1 << 0,
-      cCustomStaticScope =  1 << 1,
+      cCustomConstantScope =  1 << 1,
       cMultipleScopes =     1 << 2,
       cInlineFrame =        1 << 3,
       cClosedScope =        1 << 4,
@@ -41,10 +41,10 @@ namespace rubinius {
     };
 
     CallFrame* previous;
-    StaticScope* static_scope_;
+    ConstantScope* constant_scope_;
 
     void* dispatch_data;
-    CompiledMethod* cm;
+    CompiledCode* compiled_code;
 
     int flags;
     int ip_;
@@ -133,11 +133,11 @@ namespace rubinius {
 #endif
 
     Symbol* original_name() {
-      return cm->name();
+      return compiled_code->name();
     }
 
-    bool custom_static_scope_p() {
-      return flags & cCustomStaticScope;
+    bool custom_constant_scope_p() {
+      return flags & cCustomConstantScope;
     }
 
     bool inline_method_p() {
@@ -152,9 +152,9 @@ namespace rubinius {
       return flags & cBlock;
     }
 
-    StaticScope* static_scope() {
-      if(custom_static_scope_p()) return static_scope_;
-      return cm->scope();
+    ConstantScope* constant_scope() {
+      if(custom_constant_scope_p()) return constant_scope_;
+      return compiled_code->scope();
     }
 
     bool is_block_p(STATE) {
@@ -226,7 +226,7 @@ namespace rubinius {
     }
 
     void calculate_ip(void** pos) {
-      ip_ = pos - cm->backend_method()->addresses;
+      ip_ = pos - compiled_code->machine_code()->addresses;
     }
 
     VariableScope* promote_scope_full(STATE);

@@ -30,7 +30,11 @@ extern "C" {
     return str;
   }
 
-  VALUE rb_usascii_str_new_cstr(const char* ptr) {
+  VALUE rb_usascii_str_new(const char* ptr, long len) {
+    return rb_enc_str_new(ptr, len, rb_usascii_encoding());
+  }
+
+  VALUE rb_usascii_str_new2(const char* ptr) {
     return rb_enc_str_new(ptr, strlen(ptr), rb_usascii_encoding());
   }
 
@@ -58,6 +62,11 @@ extern "C" {
 
   VALUE rb_external_str_new_cstr(const char* string) {
     return rb_external_str_new_with_enc(string, strlen(string), rb_default_external_encoding());
+  }
+
+  VALUE rb_str_encode(VALUE str, VALUE to, int ecflags, VALUE ecopts) {
+    return rb_funcall(rb_mCAPI, rb_intern("rb_str_encode"), 4,
+                      str, to, INT2FIX(ecflags), ecopts);
   }
 
   int rb_enc_str_coderange(VALUE string) {

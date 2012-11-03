@@ -21,13 +21,14 @@
 
 #include "gc/managed.hpp"
 #include "gc/write_barrier.hpp"
+#include "auxiliary_threads.hpp"
 #include "configuration.hpp"
 #include "util/thread.hpp"
 
 namespace rubinius {
   typedef std::map<int, LocalInfo> LocalMap;
   class SymbolTable;
-  class CompiledMethod;
+  class CompiledCode;
   class GarbageCollector;
 
   namespace jit {
@@ -44,7 +45,7 @@ namespace rubinius {
     cMachineCode = 4
   };
 
-  class LLVMState : public ManagedThread {
+  class LLVMState : public AuxiliaryThread, public ManagedThread {
     llvm::LLVMContext& ctx_;
     llvm::Module* module_;
     llvm::ExecutionEngine* engine_;
@@ -78,7 +79,9 @@ namespace rubinius {
 
     bool type_optz_;
 
-    thread::SpinLock method_update_lock_;
+    utilities::thread::SpinLock method_update_lock_;
+    utilities::thread::Mutex wait_mutex;
+    utilities::thread::Condition wait_cond;
 
   public:
 
@@ -105,14 +108,13 @@ namespace rubinius {
     static LLVMState* get(STATE);
     static LLVMState* get_if_set(STATE);
     static LLVMState* get_if_set(VM*);
-    static void shutdown(STATE);
     static void start(STATE);
     static void on_fork(STATE);
     static void pause(STATE);
     static void unpause(STATE);
 
     LLVMState(STATE);
-    ~LLVMState();
+    virtual ~LLVMState();
 
     void add_internal_functions();
 
@@ -229,23 +231,25 @@ namespace rubinius {
     llvm::Type* ptr_type(std::string name);
     llvm::Type* type(std::string name);
 
-    void compile_soon(STATE, CompiledMethod* cm, Object* extra, bool is_block=false);
+    void compile_soon(STATE, GCToken gct, CompiledCode* code, CallFrame* call_frame,
+                      Object* extra, bool is_block=false);
     void remove(llvm::Function* func);
 
-    CallFrame* find_candidate(STATE, CompiledMethod* start, CallFrame* call_frame);
-    void compile_callframe(STATE, CompiledMethod* start, CallFrame* call_frame,
+    CallFrame* find_candidate(STATE, CompiledCode* start, CallFrame* call_frame);
+    void compile_callframe(STATE, GCToken gct, CompiledCode* start, CallFrame* call_frame,
                            int primitive = -1);
 
     Symbol* symbol(const std::string& sym);
     std::string symbol_debug_str(const Symbol* sym);
 
-    std::string enclosure_name(CompiledMethod* cm);
+    std::string enclosure_name(CompiledCode* code);
 
-    void shutdown_i();
-    void start_i();
-    void on_fork_i();
-    void pause_i();
-    void unpause_i();
+    void shutdown(STATE);
+    void before_exec(STATE);
+    void after_exec(STATE);
+    void before_fork(STATE);
+    void after_fork_parent(STATE);
+    void after_fork_child(STATE);
 
     void gc_scan(GarbageCollector* gc);
 

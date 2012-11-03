@@ -76,6 +76,7 @@ namespace rubinius {
     , waiting_channel_(this, nil<Channel>())
     , interrupted_exception_(this, nil<Exception>())
     , interrupt_with_signal_(false)
+    , interrupt_by_kill_(false)
     , waiting_header_(0)
     , custom_wakeup_(0)
     , custom_wakeup_data_(0)
@@ -111,6 +112,7 @@ namespace rubinius {
   }
 
   void VM::initialize_as_root() {
+
     om = new ObjectMemory(this, shared.config);
     shared.om = om;
 
@@ -131,14 +133,14 @@ namespace rubinius {
 
     bootstrap_ontology(&state);
 
-    VMMethod::init(&state);
+    MachineCode::init(&state);
 
     // Setup the main Thread, which is wrapper of the main native thread
     // when the VM boots.
     thread.set(Thread::create(&state, this, G(thread), 0, true), &globals().roots);
     thread->sleep(&state, cFalse);
 
-    VM::set_current(this);
+    VM::set_current(this, "rbx.ruby.main");
   }
 
   void VM::initialize_config() {
@@ -174,8 +176,8 @@ namespace rubinius {
   /**
    * Sets this VM instance as the current VM on this pthread.
    */
-  void VM::set_current(VM* vm) {
-    ManagedThread::set_current(vm);
+  void VM::set_current(VM* vm, std::string name) {
+    ManagedThread::set_current(vm, name);
   }
 
   Object* VM::new_object_typed(Class* cls, size_t size, object_type type) {
@@ -421,6 +423,13 @@ namespace rubinius {
   void VM::register_raise(STATE, Exception* exc) {
     SYNC(state);
     interrupted_exception_.set(exc);
+    check_local_interrupts = true;
+    get_attention();
+  }
+
+  void VM::register_kill(STATE) {
+    SYNC(state);
+    interrupt_by_kill_ = true;
     check_local_interrupts = true;
     get_attention();
   }

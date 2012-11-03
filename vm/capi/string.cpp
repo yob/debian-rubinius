@@ -45,9 +45,10 @@ namespace rubinius {
       size_t byte_size = ba->size();
 
       if(!ba->pinned_p()) {
-        ba = ByteArray::create_pinned(env->state(), byte_size);
-        memcpy(ba->raw_bytes(), string->byte_address(), byte_size);
-        string->data(env->state(), ba);
+        ByteArray* nba = ByteArray::create_pinned(env->state(), byte_size);
+        memcpy(nba->raw_bytes(), ba->raw_bytes(), byte_size);
+        string->data(env->state(), nba);
+        ba = nba;
       }
 
       char* ptr = reinterpret_cast<char*>(ba->raw_bytes());
@@ -105,20 +106,30 @@ namespace rubinius {
       bool unset = type_ != cRString;
 
       if(unset) {
-        type_ = cRString;
+        env->shared().capi_ds_lock().lock();
 
-        string->unshare(env->state());
+        // Gotta double check since we're now lock and it might
+        // have changed since we asked for the lock.
 
-        RString* str = new RString;
-        as_.rstring = str;
+        unset = type_ != cRString;
+        if(unset) {
+          type_ = cRString;
 
-        if(cache_level == RSTRING_CACHE_UNSAFE) {
-          flush_ = flush_cached_rstring;
-          update_ = update_cached_rstring;
-          env->check_tracked_handle(this, true);
-        } else {
-          env->check_tracked_handle(this, false);
+          string->unshare(env->state());
+
+          RString* str = new RString;
+          as_.rstring = str;
+
+          if(cache_level == RSTRING_CACHE_UNSAFE) {
+            flush_ = flush_cached_rstring;
+            update_ = update_cached_rstring;
+            env->check_tracked_handle(this, true);
+          } else {
+            env->check_tracked_handle(this, false);
+          }
         }
+
+        env->shared().capi_ds_lock().unlock();
       }
 
       // The underlying String may have changed since we last got the
@@ -245,6 +256,10 @@ extern "C" {
     return env->get_handle(string->string_dup(env->state()));
   }
 
+  VALUE rb_str_inspect(VALUE self) {
+    return rb_funcall(self, rb_intern("inspect"), 0);
+  }
+
   VALUE rb_str_intern(VALUE self) {
     return rb_funcall(self, rb_intern("to_sym"), 0);
   }
@@ -290,25 +305,27 @@ extern "C" {
 
     String* string = capi_get_string(env, self);
 
-    size_t size = c_as<ByteArray>(string->data())->size();
-    if(size != len) {
-      if(size < len) {
-        ByteArray* ba = ByteArray::create_pinned(env->state(), len+1);
-        memcpy(ba->raw_bytes(), string->byte_address(), size);
-        string->data(env->state(), ba);
-      }
-
-      string->byte_address()[len] = 0;
-      string->num_bytes(env->state(), Fixnum::from(len));
-      string->hash_value(env->state(), nil<Fixnum>());
+    size_t capacity = c_as<ByteArray>(string->data())->size();
+    // We make sure we have at least a byte for a trailing NULL
+    if(capacity <= len) {
+      ByteArray* ba = ByteArray::create_pinned(env->state(), len+1);
+      memcpy(ba->raw_bytes(), string->byte_address(), capacity);
+      string->data(env->state(), ba);
     }
-    capi_update_string(env, self);
 
+    string->hash_value(env->state(), nil<Fixnum>());
+    string->num_bytes(env->state(), Fixnum::from(len));
+    capi_update_string(env, self);
     return self;
   }
 
   VALUE rb_str_split(VALUE self, const char* separator) {
     return rb_funcall(self, rb_intern("split"), 1, rb_str_new2(separator));
+  }
+
+  VALUE rb_str_subseq(VALUE self, size_t starting_index, size_t length) {
+    return rb_funcall(self, rb_intern("byteslice"), 2,
+                      LONG2NUM(starting_index), LONG2NUM(length) );
   }
 
   VALUE rb_str_substr(VALUE self, size_t starting_index, size_t length) {
@@ -428,6 +445,14 @@ extern "C" {
     return rstr->ptr;
   }
 
+  char* rb_str_ptr_readonly_end(VALUE self) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    RString* rstr = Handle::from(self)->as_rstring(env, RSTRING_CACHE_SAFE);
+
+    return rstr->ptr + rstr->len;
+  }
+
   long rb_str_len(VALUE self) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
@@ -435,13 +460,20 @@ extern "C" {
     return string->byte_size();
   }
 
+  VALUE rb_str_length(VALUE self) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    String* string = capi_get_string(env, self);
+    return LONG2FIX(string->char_size(env->state()));
+  }
+
   void rb_str_set_len(VALUE self, size_t len) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     String* string = capi_get_string(env, self);
 
-    size_t byte_size = c_as<ByteArray>(string->data())->size();
-    if(len > byte_size) len = byte_size - 1;
+    size_t capacity = c_as<ByteArray>(string->data())->size();
+    if(len > capacity) len = capacity - 1;
 
     string->byte_address()[len] = 0;
     string->num_bytes(env->state(), Fixnum::from(len));
@@ -454,5 +486,16 @@ extern "C" {
     String* string = capi_get_string(env, self);
 
     return string->hash_string(env->state());
+  }
+
+  VALUE rb_str_equal(VALUE self, VALUE other) {
+    if(self == other) {
+      return Qtrue;
+    }
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    String* string = capi_get_string(env, self);
+    String* other_str = capi_get_string(env, other);
+
+    return env->get_handle(string->equal(env->state(), other_str));
   }
 }

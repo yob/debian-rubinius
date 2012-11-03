@@ -4,6 +4,18 @@ class StringIO
 
   DEFAULT_RECORD_SEPARATOR = "\n" unless defined?(::DEFAULT_RECORD_SEPARATOR)
 
+  # This is why we need undefined in Ruby
+  Undefined = Object.new
+
+  class Data
+    attr_accessor :string, :pos, :lineno
+
+    def initialize(string)
+      @string = string
+      @pos = @lineno = 0
+    end
+  end
+
   def self.open(*args)
     io = new(*args)
     return io unless block_given?
@@ -11,17 +23,17 @@ class StringIO
     begin
       yield io
     ensure
-      io.send(:finalize)
+      io.close
+      io.__data__.string = nil
+      self
     end
   end
 
-  attr_reader :string, :pos
-  attr_accessor :lineno
+  attr_reader :__data__
 
-  def initialize(string = "", mode = nil)
-    @string = Rubinius::Type.coerce_to string, String, :to_str
-    @pos = 0
-    @lineno = 0
+  def initialize(string="", mode=nil)
+    string = Rubinius::Type.coerce_to string, String, :to_str
+    @__data__ = Data.new string
 
     if mode
       if mode.is_a?(Integer)
@@ -31,7 +43,7 @@ class StringIO
         mode_from_string(mode)
       end
     else
-      mode_from_string(@string.frozen? ? "r" : "r+")
+      mode_from_string(string.frozen? ? "r" : "r+")
     end
 
     self
@@ -42,23 +54,52 @@ class StringIO
 
     taint if from.tainted?
 
-    @string = from.instance_variable_get(:@string).dup
     @append = from.instance_variable_get(:@append)
     @readable = from.instance_variable_get(:@readable)
     @writable = from.instance_variable_get(:@writable)
-
-    @pos = from.instance_variable_get(:@pos)
-    @lineno = from.instance_variable_get(:@lineno)
+    @__data__ = from.instance_variable_get(:@__data__)
 
     self
   end
 
+  def check_readable
+    raise IOError, "not opened for reading" unless @readable
+  end
+
+  private :check_readable
+
+  def check_writable
+    raise IOError, "not opened for writing" unless @writable
+    raise IOError, "unable to modify data" if @__data__.string.frozen?
+  end
+
+  private :check_writable
+
+  def set_encoding(external, internal=nil, options=nil)
+    @__data__.string.force_encoding(external || Encoding.default_external)
+  end
+
+  def external_encoding
+    @__data__.string.encoding
+  end
+
+  def internal_encoding
+    nil
+  end
+
   def each_byte
     return to_enum :each_byte unless block_given?
-    raise IOError, "not opened for reading" unless @readable
-    if @pos < @string.length
-      @string.byteslice(@pos..-1).each_byte { |b| @pos += 1; yield b}
+    check_readable
+
+    d = @__data__
+    string = d.string
+
+    while d.pos < string.length
+      byte = string.getbyte d.pos
+      d.pos += 1
+      yield byte
     end
+
     self
   end
 
@@ -93,14 +134,40 @@ class StringIO
 
   alias_method :chars, :each_char
 
-  def each(*args)
-    return to_enum :each, *args unless block_given?
-    raise IOError, "not opened for reading" unless @readable
-    while line = getline(*args)
-      yield line
+  def each_codepoint(&block)
+    return to_enum :each_codepoint unless block_given?
+    check_readable
+
+    d = @__data__
+    string = d.string
+
+    while d.pos < string.bytesize
+      char = string.chr_at d.pos
+
+      unless char
+        raise ArgumentError, "invalid byte sequence in #{string.encoding}"
+      end
+
+      d.pos += char.bytesize
+      yield char.ord
     end
+
     self
   end
+
+  alias_method :codepoints, :each_codepoint
+
+  def each(sep=$/, limit=Undefined)
+    return to_enum :each, sep, limit unless block_given?
+    check_readable
+
+    while line = getline(true, sep, limit)
+      yield line
+    end
+
+    self
+  end
+
   alias_method :each_line, :each
   alias_method :lines, :each
 
@@ -114,28 +181,32 @@ class StringIO
   end
 
   def write(str)
-    raise IOError, "not opened for writing" unless @writable
+    check_writable
 
     str = String(str)
-
     return 0 if str.empty?
 
-    if @append || @pos == @string.length
-      @string << str
-      @pos = @string.length
-    elsif @pos > @string.bytesize
-      @string[@string.bytesize .. @pos] = "\000" * (@pos - @string.bytesize)
-      @string << str
-      @pos = @string.bytesize
+    d = @__data__
+    pos = d.pos
+    string = d.string
+
+    if @append || pos == string.length
+      string << str
+      d.pos = string.length
+    elsif pos > string.bytesize
+      string[string.bytesize..pos] = "\000" * (pos - string.bytesize)
+      string << str
+      d.pos = string.bytesize
     else
-      @string[@pos, str.length] = str
-      @pos += str.length
-      @string.taint if str.tainted?
+      string[pos, str.length] = str
+      d.pos += str.length
+      string.taint if str.tainted?
     end
 
     return str.length
   end
   alias_method :syswrite, :write
+  alias_method :write_nonblock, :write
 
   def close
     raise IOError, "closed stream" if closed?
@@ -147,7 +218,7 @@ class StringIO
   end
 
   def close_read
-    raise IOError, "closing non-duplex IO for reading" unless @readable
+    check_readable
     @readable = nil
   end
 
@@ -156,7 +227,7 @@ class StringIO
   end
 
   def close_write
-    raise IOError, "closing non-duplex IO for writing" unless @writable
+    check_writable
     @writable = nil
   end
 
@@ -165,7 +236,8 @@ class StringIO
   end
 
   def eof?
-    @pos >= @string.bytesize
+    d = @__data__
+    d.pos >= d.string.bytesize
   end
   alias_method :eof, :eof?
 
@@ -186,9 +258,11 @@ class StringIO
   end
 
   def getc
-    raise IOError, "not opened for reading" unless @readable
-    char = @string[@pos]
-    @pos += 1 unless eof?
+    check_readable
+    d = @__data__
+
+    char = d.string[d.pos]
+    d.pos += 1 unless eof?
     char
   end
 
@@ -197,8 +271,10 @@ class StringIO
     char && char.ord
   end
 
-  def gets(*args)
-    $_ = getline(*args)
+  def gets(sep=$/, limit=Undefined)
+    check_readable
+
+    $_ = getline(false, sep, limit)
   end
 
   def isatty
@@ -206,29 +282,36 @@ class StringIO
   end
   alias_method :tty?, :isatty
 
-  def length
-    @string.length
+  def lineno
+    @__data__.lineno
   end
-  alias_method :size, :length
+
+  def lineno=(line)
+    @__data__.lineno = line
+  end
 
   def pid
     nil
   end
 
+  def pos
+    @__data__.pos
+  end
+
   def pos=(pos)
     raise Errno::EINVAL if pos < 0
-    @pos = pos
+    @__data__.pos = pos
   end
 
   def print(*args)
-    raise IOError, "not opened for writing" unless @writable
+    check_writable
     args << $_ if args.empty?
     write((args << $\).flatten.join)
     nil
   end
 
   def printf(*args)
-    raise IOError, "not opened for writing" unless @writable
+    check_writable
 
     if args.size > 1
       write(args.shift % args)
@@ -240,7 +323,7 @@ class StringIO
   end
 
   def putc(obj)
-    raise IOError, "not opened for writing" unless @writable
+    check_writable
 
     if obj.is_a?(String)
       char = obj[0]
@@ -248,16 +331,20 @@ class StringIO
       char = Rubinius::Type.coerce_to obj, Integer, :to_int
     end
 
-    if @append || @pos == @string.length
-      @string << char
-      @pos = @string.length
-    elsif @pos > @string.length
-      @string[@string.length .. @pos] = "\000" * (@pos - @string.length)
-      @string << char
-      @pos = @string.length
+    d = @__data__
+    pos = d.pos
+    string = d.string
+
+    if @append || pos == string.length
+      string << char
+      d.pos = string.length
+    elsif pos > string.length
+      string[string.length..pos] = "\000" * (pos - string.length)
+      string << char
+      d.pos = string.length
     else
-      @string[@pos] = char
-      @pos += 1
+      string[pos] = char
+      d.pos += 1
     end
 
     obj
@@ -292,25 +379,43 @@ class StringIO
     nil
   end
 
-  def read(length = nil, buffer = "")
-    raise IOError, "not opened for reading" unless @readable
-
-    buffer = StringValue(buffer)
+  def read(length=nil, buffer=nil)
+    check_readable
+    d = @__data__
+    pos = d.pos
+    string = d.string
 
     if length
-      return nil if eof?
       length = Rubinius::Type.coerce_to length, Integer, :to_int
       raise ArgumentError if length < 0
-      buffer.replace @string.byteslice(@pos, length)
-      buffer.force_encoding Encoding::ASCII_8BIT
-      @pos += buffer.length
+
+      buffer = StringValue(buffer) if buffer
+
+      if eof?
+        buffer.clear if buffer
+        if length == 0
+          return "".force_encoding(Encoding::ASCII_8BIT)
+        else
+          return nil
+        end
+      end
+
+      str = string.byteslice(pos, length)
+      str.force_encoding Encoding::ASCII_8BIT
+
+      str = buffer.replace(str) if buffer
     else
-      return "" if eof?
-      buffer.replace @string.byteslice(@pos..-1)
-      @pos = @string.bytesize
+      if eof?
+        buffer.clear if buffer
+        return "".force_encoding(Encoding::ASCII_8BIT)
+      end
+
+      str = string.byteslice(pos..-1)
+      buffer.replace str if buffer
     end
 
-    return buffer
+    d.pos += str.length
+    return str
   end
 
   def readchar
@@ -322,53 +427,43 @@ class StringIO
     readchar.getbyte(0)
   end
 
-  def readline(*args)
+  def readline(sep=$/, limit=Undefined)
+    check_readable
     raise IO::EOFError, "end of file reached" if eof?
-    $_ = getline(*args)
+
+    $_ = getline(true, sep, limit)
   end
 
-  def readlines(*args)
-    raise IOError, "not opened for reading" unless @readable
+  def readlines(sep=$/, limit=Undefined)
+    check_readable
+
     ary = []
-    while line = getline(*args)
+    while line = getline(true, sep, limit)
       ary << line
     end
+
     ary
   end
 
-  def reopen(string = nil, mode = nil)
-    if string
-      if !string.is_a?(String) and !mode
-        string = Rubinius::Type.coerce_to(string, StringIO, :to_strio)
-        taint if string.tainted?
-        @string = string.string
-      else
-        @string = StringValue(string)
+  def reopen(string=nil, mode=Undefined)
+    if string and not string.kind_of? String and mode.equal? Undefined
+      stringio = Rubinius::Type.coerce_to(string, StringIO, :to_strio)
 
-        if mode
-          if mode.is_a?(Integer)
-            mode_from_integer(mode)
-          else
-            mode = StringValue(mode)
-            mode_from_string(mode)
-          end
-        else
-          mode_from_string("r+")
-        end
-      end
+      taint if stringio.tainted?
+      initialize_copy stringio
     else
-      mode_from_string("r+")
-    end
+      mode = nil if mode.equal? Undefined
+      string = "" unless string
 
-    @pos = 0
-    @lineno = 0
+      initialize string, mode
+    end
 
     self
   end
 
   def rewind
-    @pos = 0
-    @lineno = 0
+    d = @__data__
+    d.pos = d.lineno = 0
   end
 
   def seek(to, whence = IO::SEEK_SET)
@@ -377,9 +472,9 @@ class StringIO
 
     case whence
     when IO::SEEK_CUR
-      to += @pos
+      to += @__data__.pos
     when IO::SEEK_END
-      to += @string.bytesize
+      to += @__data__.string.bytesize
     when IO::SEEK_SET, nil
     else
       raise Errno::EINVAL, "invalid whence"
@@ -387,15 +482,25 @@ class StringIO
 
     raise Errno::EINVAL if to < 0
 
-    @pos = to
+    @__data__.pos = to
 
     return 0
   end
 
+  def size
+    @__data__.string.bytesize
+  end
+  alias_method :length, :size
+
+  def string
+    @__data__.string
+  end
+
   def string=(string)
-    @string = StringValue(string)
-    @pos = 0
-    @lineno = 0
+    d = @__data__
+    d.string = StringValue(string)
+    d.pos = 0
+    d.lineno = 0
   end
 
   def sync
@@ -406,12 +511,14 @@ class StringIO
     val
   end
 
-  def sysread(length = nil, buffer = "")
+  def sysread(length=nil, buffer="")
     str = read(length, buffer)
+
     if str.nil?
       buffer.clear
       raise IO::EOFError, "end of file reached"
     end
+
     str
   end
 
@@ -419,163 +526,184 @@ class StringIO
   alias_method :read_nonblock, :sysread
 
   def tell
-    @pos
+    @__data__.pos
   end
 
   def truncate(length)
-    raise IOError, "not opened for writing" unless @writable
+    check_writable
     len = Rubinius::Type.coerce_to length, Integer, :to_int
     raise Errno::EINVAL, "negative length" if len < 0
-    if len < @string.bytesize
-      @string[len .. @string.bytesize] = ""
+    string = @__data__.string
+
+    if len < string.bytesize
+      string[len..string.bytesize] = ""
     else
-      @string << "\000" * (len - @string.bytesize)
+      string << "\000" * (len - string.bytesize)
     end
     return length
   end
 
   def ungetc(char)
-    raise IOError, "not opened for reading" unless @readable
+    check_readable
+
+    d = @__data__
+    pos = d.pos
+    string = d.string
+
     if char.kind_of? Integer
       char = Rubinius::Type.coerce_to char, String, :chr
     else
       char = Rubinius::Type.coerce_to char, String, :to_str
     end
 
-    if @pos > @string.bytesize
-      @string[@string.bytesize .. @pos] = "\000" * (@pos - @string.bytesize)
-      @pos -= 1
-      @string[@pos] = char
-    elsif @pos > 0
-      @pos -= 1
-      @string[@pos] = char
+    if pos > string.bytesize
+      string[string.bytesize..pos] = "\000" * (pos - string.bytesize)
+      d.pos -= 1
+      string[d.pos] = char
+    elsif pos > 0
+      d.pos -= 1
+      string[d.pos] = char
     end
 
     nil
   end
 
+  def ungetbyte(bytes)
+    check_readable
+
+    return unless bytes
+
+    if bytes.kind_of? Fixnum
+      bytes = "" << bytes
+    else
+      bytes = StringValue(bytes)
+      return if bytes.bytesize == 0
+    end
+
+    d = @__data__
+    pos = d.pos
+    string = d.string
+
+    enc = string.encoding
+
+    if d.pos == 0
+      d.string = "#{bytes}#{string}"
+    else
+      size = bytes.bytesize
+      a = string.byteslice(0, pos - size) if size < pos
+      b = string.byteslice(pos..-1)
+      d.string = "#{a}#{bytes}#{b}"
+      d.pos = pos > size ? pos - size : 0
+    end
+
+    d.string.force_encoding enc
+    nil
+  end
+
   protected
-    def finalize
-      close
-      @string = nil
-      self
+
+  def mode_from_string(mode)
+    @append = truncate = false
+
+    if mode[0] == ?r
+      @readable = true
+      @writable = mode[-1] == ?+ ? true : false
     end
 
-    def mode_from_string(mode)
-      @readable = @writable = @append = truncate = false
-
-      case mode
-      when "r", "rb"
-        @readable = true
-      when "r+", "rb+"
-        @readable = true
-        @writable = true
-      when "w", "wb"
-        truncate = true
-        @writable = true
-      when "w+", "wb+"
-        truncate = true
-        @readable = true
-        @writable = true
-      when "a", "ab"
-        @writable = true
-        @append   = true
-      when "a+", "ab+"
-        @readable = true
-        @writable = true
-        @append   = true
-      end
-      raise Errno::EACCES, "Permission denied" if @writable && @string.frozen?
-      @string.replace("") if truncate
+    if mode[0] == ?w
+      @writable = truncate = true
+      @readable = mode[-1] == ?+ ? true : false
     end
 
-    def mode_from_integer(mode)
-      @readable = @writable = @append = false
-
-      case mode & (IO::RDONLY | IO::WRONLY | IO::RDWR)
-      when IO::RDONLY
-        @readable = true
-        @writable = false
-      when IO::WRONLY
-        raise Errno::EACCES, "Permission denied" if @string.frozen?
-        @readable = false
-        @writable = true
-      when IO::RDWR
-        raise Errno::EACCES, "Permission denied" if @string.frozen?
-        @readable = true
-        @writable = true
-      end
-
-      @append = true if (mode & IO::APPEND) != 0
-      @string.replace("") if (mode & IO::TRUNC) != 0
+    if mode[0] == ?a
+      @append = @writable = true
+      @readable = mode[-1] == ?+ ? true : false
     end
 
-    def getline(*args)
-      raise IOError unless @readable
+    d = @__data__
+    raise Errno::EACCES, "Permission denied" if @writable && d.string.frozen?
+    d.string.replace("") if truncate
+  end
 
-      sep = nil
+  def mode_from_integer(mode)
+    @readable = @writable = @append = false
+    d = @__data__
+
+    if mode == 0 or mode & IO::RDWR != 0
+      @readable = true
+    end
+
+    if mode & (IO::WRONLY | IO::RDWR) != 0
+      raise Errno::EACCES, "Permission denied" if d.string.frozen?
+      @writable = true
+    end
+
+    @append = true if (mode & IO::APPEND) != 0
+    d.string.replace("") if (mode & IO::TRUNC) != 0
+  end
+
+  def getline(arg_error, sep, limit)
+    if limit != Undefined
+      limit = Rubinius::Type.coerce_to limit, Fixnum, :to_int
+      sep = Rubinius::Type.coerce_to sep, String, :to_str if sep
+    else
       limit = nil
 
-      case args.size
-      when 0
-        sep = $/
-      when 1
-        if args[0]
-          if limit = Rubinius::Type.check_convert_type(args[0], Integer, :to_int)
-            return '' if limit == 0
-          else
-            sep = Rubinius::Type.coerce_to(args[0], String, :to_str)
-          end
-        end
-      when 2
-        sep = Rubinius::Type.check_convert_type(args[0], String, :to_str)
-        limit = Rubinius::Type.coerce_to(args[1], Integer, :to_int)
+      unless sep == $/ or sep.nil?
+        osep = sep
+        sep = Rubinius::Type.check_convert_type sep, String, :to_str
+        limit = Rubinius::Type.coerce_to osep, Fixnum, :to_int unless sep
       end
-
-      sep = StringValue(sep) unless sep.nil?
-
-      return nil if eof?
-
-      if sep.nil?
-        if limit
-          line = @string.byteslice(@pos...@pos + limit)
-        else
-          line = @string.byteslice(@pos..-1)
-        end
-        @pos += line.bytesize
-      elsif sep.empty?
-        if stop = @string.index("\n\n", @pos)
-          stop += 2
-          line = @string.byteslice(@pos...stop)
-          while @string[stop] == ?\n
-            stop += 1
-          end
-          @pos = stop
-        else
-          line = @string.byteslice(@pos .. -1)
-          @pos = @string.bytesize
-        end
-      else
-        if stop = @string.index(sep, @pos)
-          if limit && stop - @pos >= limit
-            stop = @pos + limit
-          else
-            stop += sep.length
-          end
-          line = @string.byteslice(@pos...stop)
-          @pos = stop
-        else
-          if limit
-            line = @string.byteslice(@pos...@pos + limit)
-          else
-            line = @string.byteslice(@pos..-1)
-          end
-          @pos += line.bytesize
-        end
-      end
-
-      @lineno += 1
-
-      return line
     end
+
+    raise ArgumentError if arg_error and limit == 0
+
+    return nil if eof?
+
+    d = @__data__
+    pos = d.pos
+    string = d.string
+
+    if sep.nil?
+      if limit
+        line = string.byteslice(pos...pos + limit)
+      else
+        line = string.byteslice(pos..-1)
+      end
+      d.pos += line.bytesize
+    elsif sep.empty?
+      if stop = string.index("\n\n", pos)
+        stop += 2
+        line = string.byteslice(pos...stop)
+        while string[stop] == ?\n
+          stop += 1
+        end
+        d.pos = stop
+      else
+        line = string.byteslice(pos..-1)
+        d.pos = string.bytesize
+      end
+    else
+      if stop = string.index(sep, pos)
+        if limit && stop - pos >= limit
+          stop = pos + limit
+        else
+          stop += sep.length
+        end
+        line = string.byteslice(pos...stop)
+        d.pos = stop
+      else
+        if limit
+          line = string.byteslice(pos...pos + limit)
+        else
+          line = string.byteslice(pos..-1)
+        end
+        d.pos += line.bytesize
+      end
+    end
+
+    d.lineno += 1
+
+    return line
+  end
 end

@@ -14,6 +14,7 @@
 #include "builtin/block_environment.hpp"
 #include "builtin/proc.hpp"
 
+#include "call_frame.hpp"
 #include "configuration.hpp"
 #include "lookup_data.hpp"
 #include "dispatch.hpp"
@@ -137,6 +138,17 @@ namespace rubinius {
       return map[type];
     }
 
+    bool capi_check_interrupts(STATE, CallFrame* call_frame, void* end) {
+      if(!state->check_stack(call_frame, end)) {
+        return false;
+      }
+
+      if(unlikely(state->vm()->check_local_interrupts)) {
+        if(!state->process_async(call_frame)) return false;
+      }
+      return true;
+    }
+
     /**
      *  Common implementation for rb_funcall*
      */
@@ -190,7 +202,7 @@ namespace rubinius {
                                       Object** args, Object* block)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
@@ -199,12 +211,18 @@ namespace rubinius {
       // Unlock, we're leaving extension code.
       LEAVE_CAPI(env->state());
 
-      LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
-      Arguments args_o(method, recv, block, arg_count, args);
-      Dispatch dis(method);
+      Object* ret = cNil;
 
-      Object* ret = dis.send(env->state(), env->current_call_frame(),
-                             lookup, args_o);
+      // Run in a block so objects are properly deconstructed when we
+      // do a longjmp because of an exception.
+      {
+        LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
+        Arguments args_o(method, recv, block, arg_count, args);
+        Dispatch dis(method);
+
+        ret = dis.send(env->state(), env->current_call_frame(),
+                      lookup, args_o);
+      }
 
       // We need to get the handle for the return value before getting
       // the GEL so that ret isn't accidentally GCd while we wait.
@@ -243,12 +261,17 @@ namespace rubinius {
       Object* recv = env->get_object(receiver);
       Symbol* method = (Symbol*)method_name;
 
-      LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
-      Arguments args_o(method, recv, cNil, arg_count, args);
-      Dispatch dis(method);
+      Object* ret = cNil;
+      // Run in block so we properly deconstruct objects allocated
+      // on the stack if we do a longjmp because of an exception.
+      {
+        LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
+        Arguments args_o(method, recv, cNil, arg_count, args);
+        Dispatch dis(method);
 
-      Object* ret = dis.send(env->state(), env->current_call_frame(),
-                             lookup, args_o);
+        ret = dis.send(env->state(), env->current_call_frame(),
+                       lookup, args_o);
+      }
 
       // We need to get the handle for the return value before getting
       // the GEL so that ret isn't accidentally GCd while we wait.
@@ -269,7 +292,7 @@ namespace rubinius {
                               size_t arg_count, Object** arg_vals)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
@@ -282,18 +305,23 @@ namespace rubinius {
       STATE = env->state();
 
       CallFrame* call_frame = env->current_call_frame();
-      Arguments args(G(sym_call), blk, arg_count, arg_vals);
 
-      if(BlockEnvironment* be = try_as<BlockEnvironment>(blk)) {
-        ret = be->call(state, call_frame, args);
-      } else if(Proc* proc = try_as<Proc>(blk)) {
-        ret = proc->yield(state, call_frame, args);
-      } else if(blk->nil_p()) {
-        state->raise_exception(Exception::make_lje(state, call_frame));
-        ret = NULL;
-      } else {
-        Dispatch dis(G(sym_call));
-        ret = dis.send(state, call_frame, args);
+      // Run in separate block so the arguments are destructed
+      // properly before we make a potential longjmp.
+      {
+        Arguments args(G(sym_call), blk, arg_count, arg_vals);
+
+        if(BlockEnvironment* be = try_as<BlockEnvironment>(blk)) {
+          ret = be->call(state, call_frame, args);
+        } else if(Proc* proc = try_as<Proc>(blk)) {
+          ret = proc->yield(state, call_frame, args);
+        } else if(blk->nil_p()) {
+          state->raise_exception(Exception::make_lje(state, call_frame));
+          ret = NULL;
+        } else {
+          Dispatch dis(G(sym_call));
+          ret = dis.send(state, call_frame, args);
+        }
       }
 
       // We need to get the handle for the return value before getting
@@ -316,7 +344,7 @@ namespace rubinius {
                                  size_t arg_count, Object** args)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
@@ -331,12 +359,17 @@ namespace rubinius {
       // Unlock, we're leaving extension code.
       LEAVE_CAPI(env->state());
 
-      LookupData lookup(recv, mod->superclass(), env->state()->globals().sym_private.get());
-      Arguments args_o(name, recv, arg_count, args);
-      Dispatch dis(name);
+      Object* ret = cNil;
+      // Use a block objects on the stack are properly deconstructed when
+      // we do a potential longjmp.
+      {
+        LookupData lookup(recv, mod->superclass(), env->state()->globals().sym_private.get());
+        Arguments args_o(name, recv, arg_count, args);
+        Dispatch dis(name);
 
-      Object* ret = dis.send(env->state(), env->current_call_frame(),
-                             lookup, args_o);
+        ret = dis.send(env->state(), env->current_call_frame(),
+                       lookup, args_o);
+      }
 
       // We need to get the handle for the return value before getting
       // the GEL so that ret isn't accidentally GCd while we wait.
@@ -426,6 +459,12 @@ namespace rubinius {
       Class* cls = c_as<Class>(env->get_object(klass));
       Exception* exc = Exception::make_exception(env->state(), cls, reason);
       capi_raise_backend(exc);
+    }
+
+    void capi_raise_break(VALUE obj) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      env->state()->vm()->thread_state()->raise_break(env->get_object(obj), env->scope()->parent());
+      env->current_ep()->return_to(env);
     }
 
     Proc* wrap_c_function(void* cb, VALUE cb_data, int arity) {
@@ -621,6 +660,20 @@ extern "C" {
     if (!rb_block_given_p()) {
       rb_raise(rb_eLocalJumpError, "no block given", 0);
     }
+  }
+
+  VALUE rb_block_call(VALUE obj, ID meth, int argc, VALUE* argv,
+                      VALUE(*cb)(ANYARGS), VALUE cb_data) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    if(cb) {
+      Proc* prc = capi::wrap_c_function((void*)cb, cb_data, C_BLOCK_CALL);
+      env->set_outgoing_block(env->get_handle(prc));
+    } else {
+      env->set_outgoing_block(env->get_handle(env->block()));
+    }
+
+    return rb_funcall2(obj, meth, argc, argv);
   }
 
   VALUE rb_apply(VALUE recv, ID mid, VALUE args) {

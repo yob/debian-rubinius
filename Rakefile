@@ -1,9 +1,23 @@
 # NOTE! When updating this file, also update INSTALL, if necessary.
 # NOTE! Please keep your tasks grouped together.
 
+include Rake::DSL if Rake.const_defined? :DSL
+
 if ENV["RUBYLIB"]
-  STDERR.puts "ERROR: Please unset RUBYLIB to build Rubinius"
-  exit 1
+  STDERR.puts <<-EOM
+WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING
+WARNING                                                                 WARNING
+WARNING   You have the RUBYLIB environment variable set. This can       WARNING
+WARNING   cause serious problems building Rubinius, including but       WARNING
+WARNING   not limited to causing the build to fail or specs to fail     WARNING
+WARNING   or your computer to randomly emit strange beeping sounds      WARNING
+WARNING   or burst into flames. Not all these possible catastrophic     WARNING
+WARNING   effects have been observed in the wild, but you have been     WARNING
+WARNING   warned. We recommend unsetting this environment variable      WARNING
+WARNING   and running the build again.                                  WARNING
+WARNING                                                                 WARNING
+WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING
+  EOM
 end
 
 # Wipe out CDPATH, it interferes with building in some cases,
@@ -22,18 +36,24 @@ end
 
 $:.unshift File.expand_path("../", __FILE__)
 
-config_rb = File.expand_path "../config.rb", __FILE__
-config_h  = File.expand_path "../vm/gen/config.h", __FILE__
+BUILD_CONFIG = {} unless Object.const_defined? :BUILD_CONFIG
 
-unless File.exists?(config_rb) and File.exists?(config_h)
-  STDERR.puts "Please run ./configure first"
-  exit 1
+def load_configuration
+  config_rb = File.expand_path "../config.rb", __FILE__
+  config_h  = File.expand_path "../vm/gen/config.h", __FILE__
+
+  unless File.exists?(config_rb) and File.exists?(config_h)
+    STDERR.puts "Please run ./configure first"
+    exit 1
+  end
+
+  load config_rb
+  BUILD_CONFIG.replace Rubinius::BUILD_CONFIG
 end
 
-require config_rb
-BUILD_CONFIG = Rubinius::BUILD_CONFIG
+load_configuration
 
-unless BUILD_CONFIG[:config_version] == 156
+unless BUILD_CONFIG[:config_version] == 162
   STDERR.puts "Your configuration is outdated, please run ./configure first"
   exit 1
 end
@@ -42,6 +62,14 @@ end
 unless BUILD_CONFIG[:which_ruby] == :ruby or BUILD_CONFIG[:which_ruby] == :rbx
   STDERR.puts "Sorry, building Rubinius requires MRI or Rubinius"
   exit 1
+end
+
+def libprefixdir
+  if BUILD_CONFIG[:stagingdir]
+    "#{BUILD_CONFIG[:stagingdir]}#{BUILD_CONFIG[:libdir]}"
+  else
+    "#{BUILD_CONFIG[:sourcedir]}/lib"
+  end
 end
 
 # Records the full path to the ruby executable that runs this configure
@@ -93,10 +121,14 @@ class SpecRunner
   @at_exit_handler_set = false
   @at_exit_status = 0
 
+  def self.at_exit_status
+    @at_exit_status
+  end
+
   def self.set_at_exit_handler
     return if @at_exit_handler_set
 
-    at_exit { exit @at_exit_status }
+    at_exit { exit SpecRunner.at_exit_status }
     @at_exit_handler_set = true
   end
 
@@ -105,7 +137,7 @@ class SpecRunner
   end
 
   def initialize
-    unless File.directory? BUILD_CONFIG[:runtime]
+    unless File.directory? BUILD_CONFIG[:runtimedir]
       # Setting these enables the specs to run when rbx has been configured
       # to be installed, but rake install has not been run yet.
       ENV["RBX_RUNTIME"] = File.expand_path "../runtime", __FILE__
@@ -123,11 +155,19 @@ class SpecRunner
   def run(flags=nil)
     self.class.set_at_exit_handler
 
-    sh("bin/mspec ci #{ENV['CI_MODE_FLAG'] || flags} -d --background", &@handler)
+    sh("bin/mspec ci #{ENV['CI_MODE_FLAG'] || flags} -d --agent --background", &@handler)
   end
 end
 
-task :default => :spec
+if BUILD_CONFIG[:stagingdir]
+  task :default => [:spec, :check_status, :install]
+else
+  task :default => :spec
+end
+
+task :check_status do
+  exit unless SpecRunner.at_exit_status == 0
+end
 
 task :github do
   cur = `git config remote.origin.url`.strip
@@ -141,8 +181,8 @@ task :github do
 end
 
 # See vm.rake for more information
-desc "Build everything that needs to be built at default level."
-task :build => ["build:build", "gem_bootstrap"]
+desc "Build Rubinius"
+task :build => %w[build:build gems:install]
 
 desc "Recompile all ruby system files"
 task :rebuild => %w[clean build]
@@ -201,29 +241,6 @@ namespace :clean do
     files = (Dir["*~"] + Dir["**/*~"]).uniq
 
     rm_f files, :verbose => $verbose unless files.empty?
-  end
-end
-
-desc 'Install the pre-installed gems'
-task :gem_bootstrap do
-  STDOUT.puts "Installing pre-installed gems..."
-
-  rbx = "#{BUILD_CONFIG[:bindir]}/#{BUILD_CONFIG[:program_name]}"
-  gems = Dir["preinstalled-gems/*.gem"]
-  options = "--local --conservative --ignore-dependencies --no-rdoc --no-ri"
-
-  BUILD_CONFIG[:version_list].each do |ver|
-    gems.each do |gem|
-      parts = File.basename(gem, ".gem").split "-"
-      gem_name = parts[0..-2].join "-"
-      gem_version = parts[-1]
-
-      system "#{rbx} -X#{ver} -S gem query --name-matches #{gem_name} --installed --version #{gem_version} > #{DEV_NULL}"
-
-      unless $?.success?
-        sh "#{rbx} -X#{ver} -S gem install #{options} #{gem}"
-      end
-    end
   end
 end
 

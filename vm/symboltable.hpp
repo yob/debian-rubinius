@@ -56,12 +56,19 @@ namespace rubinius {
     SymbolMap symbols;
     SymbolStrings strings;
     SymbolKinds kinds;
-    thread::SpinLock lock_;
+    utilities::thread::SpinLock lock_;
     size_t bytes_used_;
 
     Symbol* lookup(const char* str, size_t length, uint32_t seed);
 
   public:
+
+    SymbolTable()
+      : bytes_used_(0)
+    {
+      lock_.init();
+    }
+
     size_t& bytes_used() {
       return bytes_used_;
     }

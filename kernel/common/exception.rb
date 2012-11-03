@@ -17,8 +17,8 @@ class Exception
   # source means it's easy to forget about.
   def to_yaml_properties
     list = super
-    list.delete Rubinius.convert_to_name(:@backtrace)
-    list.delete Rubinius.convert_to_name(:@custom_backtrace)
+    list.delete Rubinius::Type.convert_to_name(:@backtrace)
+    list.delete Rubinius::Type.convert_to_name(:@custom_backtrace)
     return list
   end
 
@@ -168,12 +168,15 @@ class ZeroDivisionError < StandardError
 end
 
 class ArgumentError < StandardError
-  def message
-    return @reason_message if @reason_message
-    if @method_name
-      "method '#{@method_name}': given #{@given}, expected #{@expected}"
+  def to_s
+    if @given and @expected
+      if @method_name
+        "method '#{@method_name}': given #{@given}, expected #{@expected}"
+      else
+        "given #{@given}, expected #{@expected}"
+      end
     else
-      "given #{@given}, expected #{@expected}"
+      super
     end
   end
 end
@@ -246,6 +249,10 @@ class NotImplementedError < ScriptError
 end
 
 class Interrupt < SignalException
+  def initialize(*args)
+    super(args.shift)
+    @name = args.shift
+  end
 end
 
 class IOError < StandardError
@@ -400,7 +407,9 @@ class SystemCallError < StandardError
     alias_method :exception, :new
   end
 
-  def initialize(message, errno)
+  # Use splat args here so that arity returns -1 to match MRI.
+  def initialize(*args)
+    message, errno = args
     @errno = errno
 
     msg = "unknown error"
@@ -430,15 +439,15 @@ end
 
 # Defined by the VM itself
 class Rubinius::InvalidBytecode < Rubinius::Internal
-  attr_reader :compiled_method
+  attr_reader :compiled_code
   attr_reader :ip
 
   def message
-    if @compiled_method
+    if @compiled_code
       if @ip and @ip >= 0
-        "#{super} - at #{@compiled_method.name}+#{@ip}"
+        "#{super} - at #{@compiled_code.name}+#{@ip}"
       else
-        "#{super} - method #{@compiled_method.name}"
+        "#{super} - method #{@compiled_code.name}"
       end
     else
       super

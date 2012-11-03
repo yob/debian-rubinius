@@ -36,14 +36,15 @@ module Rubinius
 
       req = self.require
 
-      Rubinius.run_script self.cm
+      Rubinius.run_script self.compiled_code
 
       CodeLoader.loaded_hook.trigger!(@path)
 
+      add_feature
+
       return true
     ensure
-      add_feature
-      req.remove!
+      req.remove! if req
 
       CodeLoader.check_version = saved_check
       CodeLoader.source_extension = saved_extension
@@ -64,7 +65,7 @@ module Rubinius
 
       script.make_main!
 
-      Rubinius.run_script self.cm
+      Rubinius.run_script self.compiled_code
 
       CodeLoader.loaded_hook.trigger!(@path)
     end
@@ -105,6 +106,14 @@ module Rubinius
         new(name).require_compiled(check_version)
       end
 
+      # Loads and runs a compiled file from a concrete path. Does not search
+      # for a file or update $LOADED_FEATURES.
+      def load_compiled_file(path, check_version=true)
+        signature = check_version ? Signature : 0
+        code = Rubinius.invoke_primitive :compiledfile_load, path, signature, RUBY_LIB_VERSION
+        Rubinius.run_script code
+      end
+
       def load_script(name, debug=false)
         new(name).load_script(debug)
       end
@@ -129,38 +138,44 @@ module Rubinius
       version = Rubinius::RUBY_LIB_VERSION
 
       if CodeLoader.load_compiled
-        cm = load_compiled_file @load_path, signature, version
+        code = load_compiled_file @load_path, signature, version
       else
         compiled_name = Compiler.compiled_name @load_path
 
-        if compiled_name and File.exists? compiled_name
-          if @stat.mtime > File.mtime(compiled_name)
-            cm = compile_file @load_path, compiled_name
-          else
-            begin
-              cm = load_compiled_file compiled_name, signature, version
-            rescue TypeError, InvalidRBC
-              cm = compile_file @load_path, compiled_name
+        if compiled_name
+          begin
+            compiled_stat = File::Stat.stat compiled_name
+
+            if compiled_stat and @stat.mtime > compiled_stat.mtime
+              code = compile_file @load_path, compiled_name
+            else
+              begin
+                code = load_compiled_file compiled_name, signature, version
+              rescue TypeError, InvalidRBC
+                code = compile_file @load_path, compiled_name
+              end
             end
+          rescue Errno::ENOENT
+            code = compile_file @load_path, compiled_name
           end
         else
-          cm = compile_file @load_path, compiled_name
+          code = compile_file @load_path, compiled_name
         end
       end
 
-      script = cm.create_script(wrap)
+      script = code.create_script(wrap)
       script.file_path = @file_path
       script.data_path = @load_path
 
-      @cm = cm
+      @compiled_code = code
       CodeLoader.compiled_hook.trigger! script
       return script
     end
 
-    attr_reader :cm
+    attr_reader :compiled_code
 
     # Compile a Ruby source file and save the compiled file. Return the
-    # internal representation (CompiledMethod) of the Ruby source file.
+    # internal representation (CompiledCode) of the Ruby source file.
     def compile_file(file, compiled)
       if CodeLoader.save_compiled?
         Compiler.compile file, compiled

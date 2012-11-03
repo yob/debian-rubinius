@@ -5,7 +5,7 @@
 #include "shared_state.hpp"
 
 namespace rubinius {
-  thread::ThreadData<ManagedThread*> _current_thread;
+  utilities::thread::ThreadData<ManagedThread*> _current_thread;
 
   ManagedThread::ManagedThread(uint32_t id, SharedState& ss, ManagedThread::Kind kind)
     : shared_(ss)
@@ -19,8 +19,10 @@ namespace rubinius {
     return _current_thread.get();
   }
 
-  void ManagedThread::set_current(ManagedThread* th) {
+  void ManagedThread::set_current(ManagedThread* th, std::string name) {
     th->os_thread_ = pthread_self();
     _current_thread.set(th);
+    th->name_ = name;
+    utilities::thread::Thread::set_os_name(name.c_str());
   }
 }

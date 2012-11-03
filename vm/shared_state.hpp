@@ -11,6 +11,7 @@
 
 #include "stats.hpp"
 
+#include "auxiliary_threads.hpp"
 #include "globals.hpp"
 #include "symboltable.hpp"
 
@@ -18,13 +19,17 @@
 
 #include "lock.hpp"
 
+#include "util/thread.hpp"
+
 #ifdef RBX_WINDOWS
 #include <winsock2.h>
 #endif
 
 namespace rubinius {
   namespace capi {
+    class Handle;
     class Handles;
+    class GlobalHandle;
   }
 
   namespace tooling {
@@ -58,11 +63,12 @@ namespace rubinius {
   class SharedState : public RefCount, public Lockable {
   private:
     bool initialized_;
+    AuxiliaryThreads* auxiliary_threads_;
     SignalHandler* signal_handler_;
 
     capi::Handles* global_handles_;
-    capi::Handles* cached_handles_;
-    std::list<capi::Handle**> global_handle_locations_;
+    std::list<capi::Handle*> cached_handles_;
+    std::list<capi::GlobalHandle*> global_handle_locations_;
 
     int global_serial_;
     WorldState* world_;
@@ -81,15 +87,18 @@ namespace rubinius {
     Environment* env_;
     tooling::ToolBroker* tool_broker_;
 
-    thread::Mutex onig_lock_;
+    utilities::thread::Mutex onig_lock_;
 
     // This lock is to implement Thread.critical. It is not critical as
     // the name would make it sound.
-    thread::Mutex ruby_critical_lock_;
+    utilities::thread::Mutex ruby_critical_lock_;
     pthread_t ruby_critical_thread_;
     bool ruby_critical_set_;
 
+    bool use_capi_lock_;
     Mutex capi_lock_;
+
+    utilities::thread::SpinLock capi_ds_lock_;
 
     bool check_gc_;
 
@@ -114,6 +123,10 @@ namespace rubinius {
 
     void set_initialized() {
       initialized_ = true;
+    }
+
+    AuxiliaryThreads* auxiliary_threads() {
+      return auxiliary_threads_;
     }
 
     SignalHandler* signal_handler() {
@@ -141,24 +154,19 @@ namespace rubinius {
       return global_handles_;
     }
 
-    void add_global_handle(State*, capi::Handle* handle);
+    capi::Handle* add_global_handle(State*, Object* obj);
     void make_handle_cached(State*, capi::Handle* handle);
 
-    capi::Handles* cached_handles() {
-      return cached_handles_;
+    std::list<capi::Handle*>* cached_handles() {
+      return &cached_handles_;
     }
 
-    std::list<capi::Handle**>* global_handle_locations() {
+    std::list<capi::GlobalHandle*>* global_handle_locations() {
       return &global_handle_locations_;
     }
 
-    void add_global_handle_location(capi::Handle** loc) {
-      global_handle_locations_.push_back(loc);
-    }
-
-    void del_global_handle_location(capi::Handle** loc) {
-      global_handle_locations_.remove(loc);
-    }
+    void add_global_handle_location(capi::Handle** loc, const char* file, int line);
+    void del_global_handle_location(capi::Handle** loc);
 
     int global_serial() {
       return global_serial_;
@@ -214,19 +222,13 @@ namespace rubinius {
       return agent_;
     }
 
-    void set_agent(QueryAgent* agent) {
-      agent_ = agent;
-    }
-
-    QueryAgent* autostart_agent(STATE);
-
-    void stop_agent(STATE);
+    QueryAgent* start_agent(STATE);
 
     Environment* env() {
       return env_;
     }
 
-    thread::Mutex& onig_lock() {
+    utilities::thread::Mutex& onig_lock() {
       return onig_lock_;
     }
 
@@ -254,9 +256,16 @@ namespace rubinius {
       check_gc_ = true;
     }
 
+    void set_use_capi_lock(bool s) {
+      use_capi_lock_ = s;
+    }
+
+    utilities::thread::SpinLock& capi_ds_lock() {
+      return capi_ds_lock_;
+    }
+
     void scheduler_loop();
 
-    void pre_exec();
     void reinit(STATE);
 
     bool should_stop();

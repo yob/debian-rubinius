@@ -1,14 +1,6 @@
 # -*- encoding: us-ascii -*-
 
 class String
-  def self.allocate
-    str = super()
-    str.__data__ = Rubinius::ByteArray.new(1)
-    str.num_bytes = 0
-    str.force_encoding(Encoding::BINARY)
-    str
-  end
-
   def self.try_convert(obj)
     Rubinius::Type.try_convert obj, String, :to_str
   end
@@ -22,22 +14,59 @@ class String
 
   alias_method :each_codepoint, :codepoints
 
-  def encode!(to=undefined, from=undefined, options=nil)
+  def encode!(to=undefined, from=undefined, options=undefined)
     Rubinius.check_frozen
 
+    replace encode(to, from, options)
+  end
+
+  def encode(to=undefined, from=undefined, options=undefined)
     # TODO
     if to.equal? undefined
       to = Encoding.default_internal
+      return self.dup unless to
     else
       to = Rubinius::Type.coerce_to_encoding to
     end
 
-    force_encoding to
-    self
-  end
+    if from.equal? undefined
+      from = encoding
+      options = 0
+    end
 
-  def encode(to=undefined, from=undefined, options=nil)
-    dup.encode!(to, from, options)
+    if options.equal? undefined
+      if from.kind_of? Hash
+        options = from
+        from = encoding
+      else
+        options = 0
+      end
+    end
+
+    if from == to
+      str = self.dup
+    else
+      ec = Encoding::Converter.new from, to, options
+      str = ec.convert self
+    end
+
+    # TODO: replace this hack with transcoders
+    if options.kind_of? Hash
+      case xml = options[:xml]
+      when :text
+        str.gsub!(/[&><]/, '&' => '&amp;', '>' => '&gt;', '<' => '&lt;')
+      when :attr
+        str.gsub!(/[&><"]/, '&' => '&amp;', '>' => '&gt;', '<' => '&lt;', '"' => '&quot;')
+        str.insert(0, '"')
+        str.insert(-1, '"')
+      when nil
+        # nothing
+      else
+        raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
+      end
+    end
+
+    str
   end
 
   def force_encoding(enc)
@@ -49,39 +78,6 @@ class String
   def prepend(other)
     self[0,0] = other
     self
-  end
-
-  def delete!(*strings)
-    raise ArgumentError, "wrong number of arguments" if strings.empty?
-
-    strings.each do |string|
-      if string =~ /.+\-.+/
-        ranges_found = string.scan(/\w{1}\-\w{1}/)
-        ranges_found.map{ |range| range.gsub(/-/, '').split('') }.each do |range_array|
-          raise ArgumentError, "invalid range #{strings} in string transliteration" unless range_array == range_array.sort
-        end
-      end
-    end
-
-    self.modify!
-
-    table = count_table(*strings).__data__
-
-    i, j = 0, -1
-    while i < @num_bytes
-      c = @data[i]
-      unless table[c] == 1
-        @data[j+=1] = c
-      end
-      i += 1
-    end
-
-    if (j += 1) < @num_bytes
-      self.num_bytes = j
-      self
-    else
-      nil
-    end
   end
 
   def upto(stop, exclusive=false)
@@ -119,34 +115,6 @@ class String
 
     @data.reverse(0, @num_bytes)
     self
-  end
-
-  def squeeze!(*strings)
-    if strings.first =~ /.+\-.+/
-      range = strings.first.gsub(/-/, '').split('')
-      raise ArgumentError, "invalid range #{strings} in string transliteration" unless range == range.sort
-    end
-
-    return if @num_bytes == 0
-    self.modify!
-
-    table = count_table(*strings).__data__
-
-    i, j, last = 1, 0, @data[0]
-    while i < @num_bytes
-      c = @data[i]
-      unless c == last and table[c] == 1
-        @data[j+=1] = last = c
-      end
-      i += 1
-    end
-
-    if (j += 1) < @num_bytes
-      self.num_bytes = j
-      self
-    else
-      nil
-    end
   end
 
   def sub!(pattern, replacement=undefined)
@@ -418,6 +386,12 @@ class String
     end
 
     return self
+  end
+
+  def clear
+    Rubinius.check_frozen
+    self.num_bytes = 0
+    self
   end
 
   def replace(other)

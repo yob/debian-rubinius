@@ -44,10 +44,3 @@ module GC
     GC.start
   end
 end
-
-module ObjectSpace
-  def self.find_object(query, callable)
-    Rubinius.primitive :vm_find_object
-    raise PrimitiveFailure, "vm_each_object failed"
-  end
-end

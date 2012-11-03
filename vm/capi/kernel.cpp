@@ -26,11 +26,24 @@ extern "C" {
     exit(1);  // compiler snack.
   }
 
-  void rb_throw(const char* symbol, VALUE result) {
-    rb_funcall(rb_mKernel, rb_intern("throw"), 2, ID2SYM(rb_intern(symbol)), result);
-
+  void rb_throw_obj(VALUE obj, VALUE result) {
+    rb_funcall(rb_mKernel, rb_intern("throw"), 2, obj, result);
     rubinius::bug("rb_throw failed");
     exit(1);  // compiler snack.
+  }
+
+  void rb_throw(const char* symbol, VALUE result) {
+    rb_throw_obj(ID2SYM(rb_intern(symbol)), result);
+    exit(1);  // compiler snack.
+  }
+
+  VALUE rb_catch_obj(VALUE tag, VALUE (*func)(ANYARGS), VALUE data) {
+    VALUE proc = rb_proc_new(func, data);
+    return rb_funcall2b(rb_mKernel, rb_intern("catch"), 1, &tag, proc);
+  }
+
+  VALUE rb_catch(const char* tag, VALUE(*func)(ANYARGS), VALUE data) {
+    return rb_catch_obj(ID2SYM(rb_intern(tag)), func, data);
   }
 
   VALUE rb_rescue2(VALUE (*func)(ANYARGS), VALUE arg1,
@@ -336,5 +349,9 @@ extern "C" {
   VALUE rb_f_sprintf(int argc, const VALUE* argv) {
     VALUE ary = rb_ary_new4(argc-1, argv+1);
     return rb_funcall(rb_mCAPI, rb_intern("sprintf"), 2, argv[0], ary);
+  }
+
+  VALUE rb_make_backtrace() {
+    return rb_funcall(rb_mKernel, rb_intern("caller"), 0);
   }
 }

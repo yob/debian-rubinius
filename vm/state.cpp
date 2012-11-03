@@ -38,6 +38,11 @@ namespace rubinius {
       vm_->thread_state_.raise_exception(exc);
       return false;
     }
+    if(vm_->interrupt_by_kill_) {
+      vm_->interrupt_by_kill_ = false;
+      vm_->thread_state_.raise_thread_kill();
+      return false;
+    }
 
     return true;
   }
@@ -58,11 +63,7 @@ namespace rubinius {
 
     // If this is true, stack_limit_ was just changed to get our attention, reset
     // it now.
-    if(vm_->stack_limit_ == vm_->stack_start_) {
-      vm_->reset_stack_limit();
-    } else {
-      if(!check_stack(call_frame, end)) return false;
-    }
+    if(!check_stack(call_frame, end)) return false;
 
     if(unlikely(vm_->check_local_interrupts)) {
       if(!process_async(call_frame)) return false;
@@ -78,11 +79,11 @@ namespace rubinius {
   }
 
 
-  void State::park(GCToken gct, CallFrame* call_frame) {
-    vm_->park_->park(this, call_frame);
+  Object* State::park(GCToken gct, CallFrame* call_frame) {
+    return vm_->park_->park(this, call_frame);
   }
 
-  void State::park_timed(GCToken gct, CallFrame* call_frame, struct timespec* ts) {
-    vm_->park_->park_timed(this, call_frame, ts);
+  Object* State::park_timed(GCToken gct, CallFrame* call_frame, struct timespec* ts) {
+    return vm_->park_->park_timed(this, call_frame, ts);
   }
 }

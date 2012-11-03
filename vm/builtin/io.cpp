@@ -20,6 +20,7 @@
 #endif
 
 #include "builtin/io.hpp"
+#include "builtin/atomic.hpp"
 #include "builtin/array.hpp"
 #include "builtin/bytearray.hpp"
 #include "builtin/channel.hpp"
@@ -51,6 +52,9 @@ namespace rubinius {
     GO(iobuffer).set(ontology::new_class(state, "InternalBuffer",
           G(object), G(io)));
     G(iobuffer)->set_object_type(state, IOBufferType);
+
+    AtomicReference* ref = AtomicReference::create(state, Fixnum::from(-1));
+    G(io)->set_ivar(state, state->symbol("@max_open_fd"), ref);
   }
 
   IO* IO::create(STATE, int fd) {
@@ -103,9 +107,19 @@ namespace rubinius {
 
   Fixnum* IO::open(STATE, String* path, Fixnum* mode, Fixnum* perm) {
     int fd = ::open(path->c_str_null_safe(state), mode->to_native(), perm->to_native());
+    update_max_fd(state, fd);
     return Fixnum::from(fd);
   }
 
+  void IO::update_max_fd(STATE, native_int new_fd) {
+    AtomicReference* ref = as<AtomicReference>(G(io)->get_ivar(state, state->symbol("@max_open_fd")));
+    Fixnum* old_fd = as<Fixnum>(ref->get(state));
+
+    while(old_fd->to_native() < new_fd &&
+          ref->compare_and_set(state, old_fd, Fixnum::from(new_fd)) == cFalse) {
+      old_fd = as<Fixnum>(ref->get(state));
+    }
+  }
 
   namespace {
     /** Utility function used by IO::select, returns highest descriptor. */
@@ -305,6 +319,7 @@ namespace rubinius {
     native_int cur_fd   = to_fd();
 
     int other_fd = ::open(path->c_str_null_safe(state), mode->to_native(), 0666);
+    update_max_fd(state, other_fd);
 
     if(other_fd == -1) {
       Exception::errno_error(state, "reopen");
@@ -347,6 +362,9 @@ namespace rubinius {
     if(pipe(fds) == -1) {
       Exception::errno_error(state, "creating pipe");
     }
+
+    update_max_fd(state, fds[0]);
+    update_max_fd(state, fds[1]);
 
     lhs->descriptor(state, Fixnum::from(fds[0]));
     rhs->descriptor(state, Fixnum::from(fds[1]));
@@ -394,9 +412,8 @@ namespace rubinius {
     // a lowlevel RIO struct using fdopen, then we MUST use fclose
     // to close it.
 
-    if(inflated_header_p()) {
-      capi::Handle* hdl = inflated_header()->handle();
-      if(hdl && hdl->is_rio()) {
+    if(capi::Handle* hdl = handle(state)) {
+      if(hdl->is_rio()) {
         if(!hdl->rio_close()) {
           Exception::errno_error(state);
         }
@@ -532,9 +549,8 @@ namespace rubinius {
       // a lowlevel RIO struct using fdopen, then we MUST use fclose
       // to close it.
 
-      if(io->inflated_header_p()) {
-        capi::Handle* hdl = io->inflated_header()->handle();
-        if(hdl && hdl->is_rio()) {
+      if(capi::Handle* hdl = io->handle(state)) {
+        if(hdl->is_rio()) {
           hdl->rio_close();
           return;
         }
@@ -1133,10 +1149,9 @@ failed: /* try next '*' position */
     struct iovec vec[1];
     char buf[1];
 
-    struct {
-      struct cmsghdr hdr;
-      char pad[8+sizeof(int)+8];
-    } cmsg;
+    static const int cmsg_space = CMSG_SPACE(sizeof(int));
+    struct cmsghdr *cmsg;
+    char cmsg_buf[cmsg_space];
 
     fd = io->descriptor()->to_native();
 
@@ -1150,16 +1165,17 @@ failed: /* try next '*' position */
     msg.msg_iov = vec;
     msg.msg_iovlen = 1;
 
-    msg.msg_control = (caddr_t)&cmsg;
-    msg.msg_controllen = CMSG_SPACE(sizeof(int));
+    msg.msg_control = (caddr_t)cmsg_buf;
+    msg.msg_controllen = sizeof(cmsg_buf);
     msg.msg_flags = 0;
-    memset(&cmsg, 0, sizeof(cmsg));
-    cmsg.hdr.cmsg_len = CMSG_LEN(sizeof(int));
-    cmsg.hdr.cmsg_level = SOL_SOCKET;
-    cmsg.hdr.cmsg_type = SCM_RIGHTS;
+    cmsg = CMSG_FIRSTHDR(&msg);
+    memset(cmsg_buf, 0, sizeof(cmsg_buf));
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
 
     // Workaround for GCC's broken strict-aliasing checks.
-    int* fd_data = (int*)CMSG_DATA(&cmsg.hdr);
+    int* fd_data = (int*)CMSG_DATA(cmsg);
     *fd_data = fd;
 
     if(sendmsg(descriptor()->to_native(), &msg, 0) == -1) {
@@ -1178,10 +1194,9 @@ failed: /* try next '*' position */
     struct iovec vec[1];
     char buf[1];
 
-    struct {
-      struct cmsghdr hdr;
-      char pad[8+sizeof(int)+8];
-    } cmsg;
+    static const int cmsg_space = CMSG_SPACE(sizeof(int));
+    struct cmsghdr *cmsg;
+    char cmsg_buf[cmsg_space];
 
     msg.msg_name = NULL;
     msg.msg_namelen = 0;
@@ -1193,16 +1208,17 @@ failed: /* try next '*' position */
     msg.msg_iov = vec;
     msg.msg_iovlen = 1;
 
-    msg.msg_control = (caddr_t)&cmsg;
-    msg.msg_controllen = CMSG_SPACE(sizeof(int));
+    msg.msg_control = (caddr_t)cmsg_buf;
+    msg.msg_controllen = sizeof(cmsg_buf);
     msg.msg_flags = 0;
-    memset(&cmsg, 0, sizeof(cmsg));
-    cmsg.hdr.cmsg_len = CMSG_LEN(sizeof(int));
-    cmsg.hdr.cmsg_level = SOL_SOCKET;
-    cmsg.hdr.cmsg_type = SCM_RIGHTS;
+    cmsg = CMSG_FIRSTHDR(&msg);
+    memset(cmsg_buf, 0, sizeof(cmsg_buf));
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
 
     // Workaround for GCC's broken strict-aliasing checks.
-    int* fd_data = (int *)CMSG_DATA(&cmsg.hdr);
+    int* fd_data = (int *)CMSG_DATA(cmsg);
     *fd_data = -1;
 
     int read_fd = descriptor()->to_native();
@@ -1231,14 +1247,14 @@ failed: /* try next '*' position */
     }
 
     if(msg.msg_controllen != CMSG_SPACE(sizeof(int))
-        || cmsg.hdr.cmsg_len != CMSG_LEN(sizeof(int))
-        || cmsg.hdr.cmsg_level != SOL_SOCKET
-        || cmsg.hdr.cmsg_type != SCM_RIGHTS) {
+        || cmsg->cmsg_len != CMSG_LEN(sizeof(int))
+        || cmsg->cmsg_level != SOL_SOCKET
+        || cmsg->cmsg_type != SCM_RIGHTS) {
       return Primitives::failure();
     }
 
     // Workaround for GCC's broken strict-aliasing checks.
-    fd_data = (int *)CMSG_DATA(&cmsg.hdr);
+    fd_data = (int *)CMSG_DATA(cmsg);
     return Fixnum::from(*fd_data);
 #endif
   }

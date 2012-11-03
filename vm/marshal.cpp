@@ -12,7 +12,7 @@
 #include <gdtoa.h>
 
 #include "builtin/array.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/encoding.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
@@ -26,8 +26,6 @@
 #define STACK_BUF_SZ 1024
 
 namespace rubinius {
-
-  using std::endl;
 
   Object* UnMarshaller::get_constant() {
     char stack_data[STACK_BUF_SZ];
@@ -197,10 +195,12 @@ namespace rubinius {
     }
   }
 
+#define OPCODE_LENGTH 32
+
   InstructionSequence* UnMarshaller::get_iseq() {
     size_t count;
     long op;
-    char data[32];
+    char data[OPCODE_LENGTH];
     stream >> count;
 
     // Read off newline
@@ -210,7 +210,7 @@ namespace rubinius {
     Tuple* ops = iseq->opcodes();
 
     for(size_t i = 0; i < count; i++) {
-      stream.getline(data, 32);
+      stream.getline(data, OPCODE_LENGTH);
       op = strtol(data, NULL, 10);
       ops->put(state, i, Fixnum::from(op));
     }
@@ -220,30 +220,30 @@ namespace rubinius {
     return iseq;
   }
 
-  CompiledMethod* UnMarshaller::get_cmethod() {
+  CompiledCode* UnMarshaller::get_compiled_code() {
     size_t ver;
     stream >> ver;
 
-    CompiledMethod* cm = CompiledMethod::create(state);
+    CompiledCode* code = CompiledCode::create(state);
 
-    cm->metadata(state, unmarshal());
-    cm->primitive(state, (Symbol*)unmarshal());
-    cm->name(state, (Symbol*)unmarshal());
-    cm->iseq(state, (InstructionSequence*)unmarshal());
-    cm->stack_size(state, (Fixnum*)unmarshal());
-    cm->local_count(state, (Fixnum*)unmarshal());
-    cm->required_args(state, (Fixnum*)unmarshal());
-    cm->post_args(state, (Fixnum*)unmarshal());
-    cm->total_args(state, (Fixnum*)unmarshal());
-    cm->splat(state, unmarshal());
-    cm->literals(state, (Tuple*)unmarshal());
-    cm->lines(state, (Tuple*)unmarshal());
-    cm->file(state, (Symbol*)unmarshal());
-    cm->local_names(state, (Tuple*)unmarshal());
+    code->metadata(state, unmarshal());
+    code->primitive(state, (Symbol*)unmarshal());
+    code->name(state, (Symbol*)unmarshal());
+    code->iseq(state, (InstructionSequence*)unmarshal());
+    code->stack_size(state, (Fixnum*)unmarshal());
+    code->local_count(state, (Fixnum*)unmarshal());
+    code->required_args(state, (Fixnum*)unmarshal());
+    code->post_args(state, (Fixnum*)unmarshal());
+    code->total_args(state, (Fixnum*)unmarshal());
+    code->splat(state, unmarshal());
+    code->literals(state, (Tuple*)unmarshal());
+    code->lines(state, (Tuple*)unmarshal());
+    code->file(state, (Symbol*)unmarshal());
+    code->local_names(state, (Tuple*)unmarshal());
 
-    cm->post_marshal(state);
+    code->post_marshal(state);
 
-    return cm;
+    return code;
   }
 
   Object* UnMarshaller::unmarshal() {
@@ -271,7 +271,7 @@ namespace rubinius {
     case 'i':
       return get_iseq();
     case 'M':
-      return get_cmethod();
+      return get_compiled_code();
     case 'c':
       return get_constant();
     case 'E':

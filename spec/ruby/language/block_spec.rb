@@ -16,6 +16,11 @@ describe "A block" do
     res.should == 1
   end
 
+  it "allows to define a block variable with the same name as the enclosing block" do
+    o = BlockSpecs::OverwriteBlockVariable.new
+    o.z { 1 }.should == 1
+  end
+
   ruby_version_is ""..."1.9" do
     it "overwrites a captured local when used as an argument" do
       var = 1
@@ -507,17 +512,21 @@ describe "A block" do
 
   describe "arguments with _" do
 
-    it "extracts arguments with _" do
-      @y.m([[1, 2, 3], 4]) { |(_, a, _), _| a }.should == 2
-    end
-
     ruby_version_is ""..."1.9" do
+      it "extracts arguments with _" do
+        @y.m([[1, 2, 3], 4]) { |(_, a, _), _| a }.should == 4
+      end
+
       it "assigns the last variable named" do
         @y.m(1, 2) { |_, _| _ }.should == 2
       end
     end
 
     ruby_version_is "1.9" do
+      it "extracts arguments with _" do
+        @y.m([[1, 2, 3], 4]) { |(_, a, _), _| a }.should == 2
+      end
+
       it "assigns the first variable named" do
         @y.m(1, 2) { |_, _| _ }.should == 1
       end

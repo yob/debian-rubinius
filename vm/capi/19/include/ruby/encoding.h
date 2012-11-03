@@ -32,9 +32,22 @@ typedef OnigEncodingType rb_encoding;
 #define rb_enc_mbcput(c, buf, enc)  ONIGENC_CODE_TO_MBC(enc,c,(UChar*)(buf))
 #define rb_enc_asciicompat(enc)     (rb_enc_mbminlen(enc)==1 && !rb_enc_dummy_p(enc))
 
+/* start, ptr, end, encoding -> prev_char */
+#define rb_enc_prev_char(s,p,e,enc) \
+    ((char *)onigenc_get_prev_char_head((enc),(UChar*)(s),(UChar*)(p),(UChar*)(e)))
+/* start, ptr, end, encoding -> next_char */
+#define rb_enc_left_char_head(s,p,e,enc) \
+    ((char *)onigenc_get_left_adjust_char_head((enc),(UChar*)(s),(UChar*)(p),(UChar*)(e)))
+#define rb_enc_right_char_head(s,p,e,enc) \
+    ((char *)onigenc_get_right_adjust_char_head((enc),(UChar*)(s),(UChar*)(p),(UChar*)(e)))
+#define rb_enc_step_back(s,p,e,n,enc) \
+    ((char *)onigenc_step_back((enc),(UChar*)(s),(UChar*)(p),(UChar*)(e),(int)(n)))
+
 #define rb_enc_name(enc)            (enc)->name
 #define rb_enc_mbminlen(enc)        (enc)->min_enc_len
 #define rb_enc_mbmaxlen(enc)        (enc)->max_enc_len
+
+#define rb_usascii_str_new2 rb_usascii_str_new_cstr
 
 #define ENCODING_GET(obj) rb_enc_get_index(obj)
 #define ENCODING_SET(obj, i) rb_enc_set_index(obj, i)
@@ -50,6 +63,9 @@ rb_encoding* rb_usascii_encoding(void);
 rb_encoding* rb_ascii8bit_encoding(void);
 rb_encoding* rb_locale_encoding(void);
 rb_encoding* rb_filesystem_encoding(void);
+
+int rb_enc_coderange_asciionly_p(VALUE obj);
+#define ENC_CODERANGE_ASCIIONLY     rb_enc_coderange_asciionly_p
 
 int rb_utf8_encindex(void);
 int rb_usascii_encindex(void);
@@ -74,6 +90,7 @@ VALUE rb_enc_from_encoding(rb_encoding *enc);
 int rb_define_dummy_encoding(const char *);
 int rb_enc_find_index(const char *name);
 int rb_enc_to_index(rb_encoding* enc);
+char* rb_enc_nth(const char *p, const char *e, long nth, rb_encoding *enc);
 
 int rb_enc_dummy_p(rb_encoding *enc);
 VALUE rb_enc_associate(VALUE, rb_encoding*);
@@ -81,12 +98,15 @@ VALUE rb_enc_associate_index(VALUE, int);
 void rb_enc_copy(VALUE dest, VALUE src);
 
 VALUE rb_enc_str_new(const char*, long, rb_encoding*);
-VALUE rb_usascii_str_new_cstr(const char* ptr);
+VALUE rb_usascii_str_new(const char* ptr, long len);
+VALUE rb_usascii_str_new2(const char* ptr);
 int rb_enc_str_coderange(VALUE);
 
 VALUE rb_external_str_new_with_enc(const char *ptr, long len, rb_encoding *);
 VALUE rb_str_export_to_enc(VALUE, rb_encoding *);
 VALUE rb_str_conv_enc(VALUE str, rb_encoding *from, rb_encoding *to);
+
+VALUE rb_str_encode(VALUE str, VALUE to, int ecflags, VALUE ecopts);
 
 void rb_declare_transcoder(const char* from, const char* to, const char* lib);
 void rb_register_transcoder(const rb_transcoder* trans);

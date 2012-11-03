@@ -12,7 +12,7 @@
 %"struct.rubinius::CallUnit" = type opaque
 %"struct.rubinius::InstructionSequence" = type opaque
 %"struct.rubinius::MethodCacheEntry" = type opaque
-%"struct.rubinius::StaticScope" = type opaque
+%"struct.rubinius::ConstantScope" = type opaque
 
 %"struct.rubinius::Arguments" = type {
    %"struct.rubinius::Symbol"*, ; name
@@ -26,7 +26,7 @@
 declare void @output1(%"struct.rubinius::Arguments"*)
 
 %"struct.rubinius::jit::RuntimeData" = type {
-  %"struct.rubinius::CompiledMethod"*, ; method
+  %"struct.rubinius::CompiledCode"*, ; method
           %"struct.rubinius::Symbol"*, ; name
           %"struct.rubinius::Module"*  ; module
 }
@@ -44,20 +44,17 @@ declare void @output3(%"struct.rubinius::Dispatch"*)
 
 %"struct.rubinius::InlineCache" = type {
             %"struct.rubinius::Symbol"*, ; name
-  %"struct.rubinius::MethodCacheEntry"*, ; cache
+  [3 x %"struct.rubinius::InlineCacheHit"], ; cache
           %"struct.rubinius::CallUnit"*, ; call_unit
   %"struct.rubinius::Object"* (%"struct.rubinius::State"*, %"struct.rubinius::InlineCache"*, %"struct.rubinius::CallFrame"*, %"struct.rubinius::Arguments"*)*, ; initial
   %"struct.rubinius::Object"* (%"struct.rubinius::State"*, %"struct.rubinius::InlineCache"*, %"struct.rubinius::CallFrame"*, %"struct.rubinius::Arguments"*)*, ; execute
-                                      i32*, ; hits
-                                       i32, ; seen_classes_overflow
-  [3 x %"struct.rubinius::InlineCacheHit"], ; seen_classes
-                                       i32  ; private_lock
+                                       i32 ; seen_classes_overflow
 }
 
 declare void @output4(%"struct.rubinius::InlineCache"*)
 
 %"struct.rubinius::InlineCacheHit" = type {
-  %"struct.rubinius::Class"*, ; seen_class
+  %"struct.rubinius::MethodCacheEntry"*, ; entry
                          i32  ; hits
 }
 
@@ -125,26 +122,26 @@ declare void @output12(%"struct.rubinius::Array"*)
            %"struct.rubinius::Object", ; header
    %"struct.rubinius::VariableScope"*, ; scope
    %"struct.rubinius::VariableScope"*, ; top_scope
-  %"struct.rubinius::CompiledMethod"*, ; code
+  %"struct.rubinius::CompiledCode"*, ; code
           %"struct.rubinius::Module"*  ; module
 }
 
 declare void @output13(%"struct.rubinius::BlockEnvironment"*)
 
 %"struct.rubinius::BlockInvocation" = type {
-                               i32, ; flags
-       %"struct.rubinius::Object"*, ; self
-  %"struct.rubinius::StaticScope"*, ; static_scope
-       %"struct.rubinius::Module"*  ; module
+                                 i32, ; flags
+         %"struct.rubinius::Object"*, ; self
+  %"struct.rubinius::ConstantScope"*, ; constant_scope
+         %"struct.rubinius::Module"*  ; module
 }
 
 declare void @output14(%"struct.rubinius::BlockInvocation"*)
 
 %"struct.rubinius::CallFrame" = type {
        %"struct.rubinius::CallFrame"*, ; previous
-     %"struct.rubinius::StaticScope"*, ; static_scope
+   %"struct.rubinius::ConstantScope"*, ; constant_scope
                                   i8*, ; dispatch_data
-  %"struct.rubinius::CompiledMethod"*, ; cm
+  %"struct.rubinius::CompiledCode"*, ; cm
                                   i32, ; flags
                                   i32, ; ip
                                   i8*, ; jit_data
@@ -168,7 +165,7 @@ declare void @output15(%"struct.rubinius::CallFrame"*)
 
 declare void @output16(%"struct.rubinius::Class"*)
 
-%"struct.rubinius::CompiledMethod" = type {
+%"struct.rubinius::CompiledCode" = type {
                %"struct.rubinius::Executable", ; header
                   %"struct.rubinius::Object"*, ; metadata
                   %"struct.rubinius::Symbol"*, ; name
@@ -182,14 +179,14 @@ declare void @output16(%"struct.rubinius::Class"*)
                    %"struct.rubinius::Tuple"*, ; lines
                    %"struct.rubinius::Tuple"*, ; local_names
                   %"struct.rubinius::Symbol"*, ; file
-             %"struct.rubinius::StaticScope"*, ; scope
+           %"struct.rubinius::ConstantScope"*, ; scope
              %"struct.rubinius::LookupTable"*, ; breakpoints
                 %"struct.rubinius::VMMethod"*, ; backend_method
   %"struct.rubinius::jit::RuntimeDataHolder"*, ; jit_data
                    %"struct.rubinius::Tuple"*  ; literals
 }
 
-declare void @output17(%"struct.rubinius::CompiledMethod"*)
+declare void @output17(%"struct.rubinius::CompiledCode"*)
 
 %"struct.rubinius::Executable" = type {
    %"struct.rubinius::Object", ; header
@@ -237,7 +234,7 @@ declare void @output22(%"struct.rubinius::Tuple"*)
 %"struct.rubinius::VariableScope" = type {
            %"struct.rubinius::Object", ; header
           %"struct.rubinius::Object"*, ; block
-  %"struct.rubinius::CompiledMethod"*, ; method
+  %"struct.rubinius::CompiledCode"*, ; method
           %"struct.rubinius::Module"*, ; module
    %"struct.rubinius::VariableScope"*, ; parent
            %"struct.rubinius::Tuple"*, ; heap_locals

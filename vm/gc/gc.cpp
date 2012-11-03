@@ -11,10 +11,10 @@
 #include "builtin/module.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/weakref.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "call_frame.hpp"
 #include "builtin/variable_scope.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/block_environment.hpp"
 #include "capi/handle.hpp"
 
@@ -136,7 +136,7 @@ namespace rubinius {
     scope->block_ = mark_object(scope->block());
     scope->module_ = (Module*)mark_object(scope->module());
 
-    int locals = call_frame->cm->backend_method()->number_of_locals;
+    int locals = call_frame->compiled_code->machine_code()->number_of_locals;
     for(int i = 0; i < locals; i++) {
       Object* local = scope->get_local(i);
       if(local->reference_p()) {
@@ -176,25 +176,25 @@ namespace rubinius {
     while(call_frame) {
       call_frame = displace(call_frame, offset);
 
-      // Skip synthetic, non CompiledMethod frames
-      if(!call_frame->cm) {
+      // Skip synthetic, non CompiledCode frames
+      if(!call_frame->compiled_code) {
         call_frame = call_frame->previous;
         continue;
       }
 
-      if(call_frame->custom_static_scope_p() &&
-          call_frame->static_scope_ &&
-          call_frame->static_scope_->reference_p()) {
-        call_frame->static_scope_ =
-          (StaticScope*)mark_object(call_frame->static_scope_);
+      if(call_frame->custom_constant_scope_p() &&
+          call_frame->constant_scope_ &&
+          call_frame->constant_scope_->reference_p()) {
+        call_frame->constant_scope_ =
+          (ConstantScope*)mark_object(call_frame->constant_scope_);
       }
 
-      if(call_frame->cm && call_frame->cm->reference_p()) {
-        call_frame->cm = (CompiledMethod*)mark_object(call_frame->cm);
+      if(call_frame->compiled_code && call_frame->compiled_code->reference_p()) {
+        call_frame->compiled_code = (CompiledCode*)mark_object(call_frame->compiled_code);
       }
 
-      if(call_frame->cm && call_frame->stk) {
-        native_int stack_size = call_frame->cm->stack_size()->to_native();
+      if(call_frame->compiled_code && call_frame->stk) {
+        native_int stack_size = call_frame->compiled_code->stack_size()->to_native();
         for(native_int i = 0; i < stack_size; i++) {
           Object* obj = call_frame->stk[i];
           if(obj && obj->reference_p()) {
@@ -237,7 +237,7 @@ namespace rubinius {
       }
 
       if(jit::RuntimeData* rd = call_frame->runtime_data()) {
-        rd->method_ = (CompiledMethod*)mark_object(rd->method());
+        rd->method_ = (CompiledCode*)mark_object(rd->method());
         rd->name_ = (Symbol*)mark_object(rd->name());
         rd->module_ = (Module*)mark_object(rd->module());
       }
@@ -245,7 +245,7 @@ namespace rubinius {
 
       saw_variable_scope(call_frame, displace(call_frame->scope, offset));
 
-      call_frame = static_cast<CallFrame*>(call_frame->previous);
+      call_frame = call_frame->previous;
     }
   }
 
@@ -272,19 +272,20 @@ namespace rubinius {
   void GarbageCollector::scan(VariableRootBuffers& buffers,
                               bool young_only, AddressDisplacement* offset)
   {
-    for(VariableRootBuffers::Iterator vi(buffers);
-        vi.more();
-        vi.advance())
-    {
-      Object*** buffer = displace(vi->buffer(), offset);
-      for(int idx = 0; idx < vi->size(); idx++) {
+    VariableRootBuffer* vrb = displace(buffers.front(), offset);
+
+    while(vrb) {
+      Object*** buffer = displace(vrb->buffer(), offset);
+      for(int idx = 0; idx < vrb->size(); idx++) {
         Object** var = displace(buffer[idx], offset);
         Object* tmp = *var;
 
-        if(tmp->reference_p() && (!young_only || tmp->young_object_p())) {
+        if(tmp && tmp->reference_p() && (!young_only || tmp->young_object_p())) {
           *var = saw_object(tmp);
         }
       }
+
+      vrb = displace((VariableRootBuffer*)vrb->next(), offset);
     }
   }
 

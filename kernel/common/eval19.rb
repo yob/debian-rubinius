@@ -23,47 +23,47 @@ class BasicObject
   #   k.instance_eval { @secret }   #=> 99
 
   def instance_eval(string=nil, filename="(eval)", line=1, &prc)
-    if ImmediateValue === self
+    if ::ImmediateValue === self
       sc = nil
     else
-      sc = Rubinius::Type.object_singleton_class(self)
+      sc = ::Rubinius::Type.object_singleton_class(self)
     end
 
     if prc
       if string
-        raise ArgumentError, 'cannot pass both a block and a string to evaluate'
+        raise ::ArgumentError, 'cannot pass both a block and a string to evaluate'
       end
       # Return a copy of the BlockEnvironment with the receiver set to self
       env = prc.block
 
       if sc
-        static_scope = env.repoint_scope sc
+        constant_scope = env.repoint_scope sc
       else
-        static_scope = env.disable_scope!
+        constant_scope = env.disable_scope!
       end
 
-      return env.call_under(self, static_scope, self)
+      return env.call_under(self, constant_scope, self)
     elsif string
-      string = StringValue(string)
+      string = ::Kernel.StringValue(string)
 
-      static_scope = Rubinius::StaticScope.of_sender
+      constant_scope = ::Rubinius::ConstantScope.of_sender
 
       if sc
-        static_scope = Rubinius::StaticScope.new(sc, static_scope)
+        constant_scope = ::Rubinius::ConstantScope.new(sc, constant_scope)
       else
-        static_scope = static_scope.using_disabled_scope
+        constant_scope = constant_scope.using_disabled_scope
       end
 
-      binding = Binding.setup(Rubinius::VariableScope.of_sender,
-                              Rubinius::CompiledMethod.of_sender,
-                              static_scope)
+      binding = ::Binding.setup(::Rubinius::VariableScope.of_sender,
+                                ::Rubinius::CompiledCode.of_sender,
+                                constant_scope)
 
-      be = Rubinius::Compiler.construct_block string, binding,
-                                              filename, line
+      be = ::Rubinius::Compiler.construct_block string, binding,
+                                                filename, line
 
       be.call_on_instance(self)
     else
-      raise ArgumentError, 'block not supplied'
+      raise ::ArgumentError, 'block not supplied'
     end
   end
 
@@ -87,21 +87,21 @@ class BasicObject
   #   k.instance_exec(5) { |x| @secret+x }   #=> 104
 
   def instance_exec(*args, &prc)
-    raise LocalJumpError, "Missing block" unless block_given?
+    raise ::LocalJumpError, "Missing block" unless block_given?
     env = prc.block
 
-    if prc.kind_of? Proc::Method
+    if prc.kind_of? ::Proc::Method
       return prc.bound_method.call(*args)
     end
 
-    static_scope = env.static_scope
-    if ImmediateValue === self
-      static_scope = static_scope.using_disabled_scope
+    constant_scope = env.constant_scope
+    if ::ImmediateValue === self
+      constant_scope = constant_scope.using_disabled_scope
     else
-      sc = Rubinius::Type.object_singleton_class(self)
-      static_scope = static_scope.using_current_as(sc)
+      sc = ::Rubinius::Type.object_singleton_class(self)
+      constant_scope = constant_scope.using_current_as(sc)
     end
 
-    return env.call_under(self, static_scope, *args)
+    return env.call_under(self, constant_scope, *args)
   end
 end

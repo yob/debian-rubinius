@@ -1,3 +1,11 @@
+#include "detection.hpp"
+
+#ifdef OS_X_10_5
+#ifndef RBX_HAVE_TR1_HASH
+#include "missing/leopard_hashtable"
+#endif
+#endif
+
 #include "inline_cache.hpp"
 #include "arguments.hpp"
 #include "call_frame.hpp"
@@ -16,7 +24,8 @@
 namespace rubinius {
 
   MethodMissingReason InlineCache::fill_public(STATE, Object* self, Symbol* name,
-                                               Class* klass, MethodCacheEntry*& mce)
+                                               Class* klass, MethodCacheEntry*& mce,
+                                               bool super)
   {
     MethodTableBucket* entry;
 
@@ -94,7 +103,7 @@ namespace rubinius {
           }
 
           if(use_exec) {
-            mce = MethodCacheEntry::create(state, klass, use_module, use_exec);
+            mce = MethodCacheEntry::create(state, klass, use_module, use_exec, eNone, super);
 
             if(!vis_entry) vis_entry = entry;
 
@@ -119,7 +128,7 @@ namespace rubinius {
 
   bool InlineCache::fill_private(STATE, Symbol* name, Module* start,
                                  Class* klass,
-                                 MethodCacheEntry*& mce)
+                                 MethodCacheEntry*& mce, bool super)
   {
     MethodTableBucket* entry;
 
@@ -152,9 +161,10 @@ namespace rubinius {
           if(Alias* alias = try_as<Alias>(entry->method())) {
             mce = MethodCacheEntry::create(state, klass,
                                            alias->original_module(),
-                                           alias->original_exec());
+                                           alias->original_exec(),
+                                           eNone, super);
           } else {
-            mce = MethodCacheEntry::create(state, klass, module, entry->method());
+            mce = MethodCacheEntry::create(state, klass, module, entry->method(), eNone, super);
           }
 
           if(!vis_entry) vis_entry = entry;
@@ -181,6 +191,7 @@ namespace rubinius {
   }
 
   bool InlineCache::fill_method_missing(STATE, Class* klass,
+                                        MethodMissingReason reason,
                                         MethodCacheEntry*& mce)
   {
     MethodTableBucket* entry;
@@ -210,11 +221,13 @@ namespace rubinius {
           if(Alias* alias = try_as<Alias>(entry->method())) {
             mce = MethodCacheEntry::create(state, klass,
                                            alias->original_module(),
-                                           alias->original_exec());
+                                           alias->original_exec(),
+                                           reason, reason == eSuper);
           } else {
             mce = MethodCacheEntry::create(state, klass,
                                            module,
-                                           entry->method());
+                                           entry->method(),
+                                           reason, reason == eSuper);
           }
 
           return true;
@@ -232,43 +245,42 @@ namespace rubinius {
   }
 
   MethodCacheEntry* InlineCache::update_and_validate(STATE, CallFrame* call_frame, Object* recv) {
-    MethodCacheEntry* mce = cache_;
 
     Class* const recv_class = recv->lookup_begin(state);
+    MethodCacheEntry* mce = get_cache(recv_class);
 
-    if(likely(mce && mce->receiver_class() == recv_class)) return mce;
+    if(likely(mce)) return mce;
 
     MethodMissingReason reason =
       fill_public(state, call_frame->self(), name, recv_class, mce);
     if(reason != eNone) return 0;
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache_, mce);
+    if(unlikely(cache_size() > 0)) {
+      execute_backend_ = check_cache_poly;
+    }
 
-    update_seen_classes(mce);
-    call_frame->cm->write_barrier(state, mce);
+    set_cache(mce);
+
+    call_frame->compiled_code->write_barrier(state, mce);
 
     return mce;
   }
 
   MethodCacheEntry* InlineCache::update_and_validate_private(STATE, CallFrame* call_frame, Object* recv) {
-    MethodCacheEntry* mce = cache_;
 
     Class* const recv_class = recv->lookup_begin(state);
+    MethodCacheEntry* mce = get_cache(recv_class);
 
-    if(likely(mce && mce->receiver_class() == recv_class)) return mce;
+    if(likely(mce)) return mce;
 
     if(!fill_private(state, name, recv_class, recv_class, mce)) return 0;
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache_, mce);
+    if(unlikely(cache_size() > 0)) {
+      execute_backend_ = check_cache_poly;
+    }
 
-    update_seen_classes(mce);
-    call_frame->cm->write_barrier(state, mce);
+    set_cache(mce);
+    call_frame->compiled_code->write_barrier(state, mce);
 
     return mce;
   }
@@ -295,14 +307,14 @@ namespace rubinius {
     if(CallUnit* cu = try_as<CallUnit>(ret)) {
       MethodCacheEntry* mce = 0;
 
-      mce = MethodCacheEntry::create(state, recv_class, cu->module(), cu->executable());
+      mce = MethodCacheEntry::create(state, recv_class, cu->module(), cu->executable(), eNone, false);
 
-      atomic::write(&cache->cache_, mce);
+      cache->set_cache(mce);
 
-      call_frame->cm->write_barrier(state, mce);
+      call_frame->compiled_code->write_barrier(state, mce);
 
       cache->call_unit_ = cu;
-      call_frame->cm->write_barrier(state, cu);
+      call_frame->compiled_code->write_barrier(state, cu);
 
       cache->execute_backend_ = check_cache_custom;
 
@@ -316,7 +328,7 @@ namespace rubinius {
   Object* InlineCache::check_cache_custom(STATE, InlineCache* cache,
       CallFrame* call_frame, Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
+    MethodCacheEntry* mce = cache->get_single_cache();
 
     args.set_name(cache->name);
     return cache->call_unit_->execute(state, call_frame, cache->call_unit_,
@@ -332,7 +344,7 @@ namespace rubinius {
     Object* const recv = args.recv();
     Class* const recv_class = recv->lookup_begin(state);
 
-    MethodCacheEntry* mce = 0;
+    MethodCacheEntry* mce = NULL;
 
     MethodMissingReason reason =
       cache->fill_public(state, call_frame->self(), cache->name,
@@ -341,33 +353,36 @@ namespace rubinius {
     if(reason != eNone) {
       state->vm()->set_method_missing_reason(reason);
 
-      if(!cache->fill_method_missing(state, recv_class, mce)) {
+      if(!cache->fill_method_missing(state, recv_class, reason, mce)) {
         Exception::internal_error(state, call_frame, "no method_missing");
         return 0;
       }
 
       args.unshift(state, cache->name);
-      cache->execute_backend_ = check_cache_mm;
-    } else {
-      if(recv->fixnum_p()) {
-        cache->execute_backend_ = check_cache_fixnum;
-      } else if(recv->symbol_p()) {
-        cache->execute_backend_ = check_cache_symbol;
-      } else if(recv->reference_p()) {
-        cache->execute_backend_ = check_cache_reference;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
       } else {
-        cache->execute_backend_ = check_cache;
+        cache->execute_backend_ = check_cache_mm;
+      }
+    } else {
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        if(recv->fixnum_p()) {
+          cache->execute_backend_ = check_cache_fixnum;
+        } else if(recv->symbol_p()) {
+          cache->execute_backend_ = check_cache_symbol;
+        } else if(recv->reference_p()) {
+          cache->execute_backend_ = check_cache_reference;
+        } else {
+          cache->execute_backend_ = check_cache;
+        }
       }
     }
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache->cache_, mce);
+    cache->set_cache(mce);
 
-    cache->update_seen_classes(mce);
-
-    call_frame->cm->write_barrier(state, mce);
+    call_frame->compiled_code->write_barrier(state, mce);
 
     Executable* meth = mce->method();
     Module* mod = mce->stored_module();
@@ -387,25 +402,28 @@ namespace rubinius {
     if(!cache->fill_private(state, cache->name, recv_class, recv_class, mce)) {
       state->vm()->set_method_missing_reason(eNormal);
 
-      if(!cache->fill_method_missing(state, recv_class, mce)) {
+      if(!cache->fill_method_missing(state, recv_class, eNormal, mce)) {
         Exception::internal_error(state, call_frame, "no method_missing");
         return 0;
       }
 
       args.unshift(state, cache->name);
-      cache->execute_backend_ = check_cache_mm;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache_mm;
+      }
     } else {
-      cache->execute_backend_ = check_cache;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache;
+      }
     }
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache->cache_, mce);
+    cache->set_cache(mce);
 
-    cache->update_seen_classes(mce);
-
-    call_frame->cm->write_barrier(state, mce);
+    call_frame->compiled_code->write_barrier(state, mce);
 
     Executable* meth = mce->method();
     Module* mod = mce->stored_module();
@@ -420,30 +438,33 @@ namespace rubinius {
     Object* const recv = args.recv();
     Class* const recv_class = recv->lookup_begin(state);
 
-    MethodCacheEntry* mce = 0;
+    MethodCacheEntry* mce = NULL;
 
     if(!cache->fill_private(state, cache->name, recv_class, recv_class, mce)) {
       state->vm()->set_method_missing_reason(eVCall);
 
-      if(!cache->fill_method_missing(state, recv_class, mce)) {
+      if(!cache->fill_method_missing(state, recv_class, eVCall, mce)) {
         Exception::internal_error(state, call_frame, "no method_missing");
         return 0;
       }
 
       args.unshift(state, cache->name);
-      cache->execute_backend_ = check_cache_mm;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache_mm;
+      }
     } else {
-      cache->execute_backend_ = check_cache;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache;
+      }
     }
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache->cache_, mce);
+    cache->set_cache(mce);
 
-    cache->update_seen_classes(mce);
-
-    call_frame->cm->write_barrier(state, mce);
+    call_frame->compiled_code->write_barrier(state, mce);
 
     Executable* meth = mce->method();
     Module* mod = mce->stored_module();
@@ -467,31 +488,35 @@ namespace rubinius {
 
     Module* const start = call_frame->module()->superclass();
 
-    if(start->nil_p() || !cache->fill_private(state, cache->name, start, recv_class, mce)) {
+    if(start->nil_p() || !cache->fill_private(state, cache->name, start, recv_class, mce, true)) {
       state->vm()->set_method_missing_reason(eSuper);
 
       // Don't use start when looking up method_missing!
       // Always completely redispatch for method_missing.
       // github#157
-      if(!cache->fill_method_missing(state, recv_class, mce)) {
+      if(!cache->fill_method_missing(state, recv_class, eSuper, mce)) {
         Exception::internal_error(state, call_frame, "no method_missing");
         return 0;
       }
 
       args.unshift(state, cache->name);
-      cache->execute_backend_ = check_cache_super_mm;
+
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache_super_mm;
+      }
     } else {
-      cache->execute_backend_ = check_cache_super;
+      if(unlikely(cache->cache_size() > 0)) {
+        cache->execute_backend_ = check_cache_poly;
+      } else {
+        cache->execute_backend_ = check_cache_super;
+      }
     }
 
-    // Make sure we sync here, so the MethodCacheEntry mce is
-    // guaranteed completely initialized. Otherwise another thread
-    // might see an incompletely initialized MethodCacheEntry.
-    atomic::write(&cache->cache_, mce);
+    cache->set_cache(mce);
 
-    cache->update_seen_classes(mce);
-
-    call_frame->cm->write_barrier(state, mce);
+    call_frame->compiled_code->write_barrier(state, mce);
 
     Executable* meth = mce->method();
     Module* mod = mce->stored_module();
@@ -502,14 +527,19 @@ namespace rubinius {
   Object* InlineCache::check_cache_fixnum(STATE, InlineCache* cache,
       CallFrame* call_frame, Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
-
     args.set_name(cache->name);
-    if(likely(mce && mce->receiver_class() == G(fixnum_class)
-                  && args.recv()->fixnum_p())) {
+    Object* const recv = args.recv();
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+    if(unlikely(!recv->fixnum_p())) {
+      return cache->initialize(state, call_frame, args);
+    }
+
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(G(fixnum_class), entry);
+    if(likely(ic)) {
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -520,14 +550,20 @@ namespace rubinius {
   Object* InlineCache::check_cache_symbol(STATE, InlineCache* cache,
       CallFrame* call_frame, Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
-
     args.set_name(cache->name);
-    if(likely(mce && mce->receiver_class() == G(symbol)
-                  && args.recv()->symbol_p())) {
+    Object* const recv = args.recv();
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+    if(unlikely(!recv->symbol_p())) {
+      return cache->initialize(state, call_frame, args);
+    }
+
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(G(symbol), entry);
+
+    if(likely(ic)) {
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -538,20 +574,20 @@ namespace rubinius {
   Object* InlineCache::check_cache_reference(STATE, InlineCache* cache,
       CallFrame* call_frame, Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
-
     args.set_name(cache->name);
     Object* const recv = args.recv();
 
-    if(likely(mce && recv->reference_p() &&
-              recv->reference_class() == mce->receiver_class())) {
+    if(unlikely(!recv->reference_p())) {
+      return cache->initialize(state, call_frame, args);
+    }
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv->reference_class(), entry);
 
-      // if(mce->execute) {
-        // return mce->execute(state, call_frame, meth, mod, args);
-      // }
+    if(likely(ic)) {
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -562,13 +598,16 @@ namespace rubinius {
   Object* InlineCache::check_cache(STATE, InlineCache* cache, CallFrame* call_frame,
                                    Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
-
     args.set_name(cache->name);
-    if(likely(mce && mce->receiver_class() == args.recv()->lookup_begin(state))) {
+    Object* const recv_class = args.recv()->lookup_begin(state);
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv_class, entry);
+
+    if(likely(ic)) {
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -579,15 +618,20 @@ namespace rubinius {
   Object* InlineCache::check_cache_mm(STATE, InlineCache* cache, CallFrame* call_frame,
                                    Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
 
     args.set_name(cache->name);
-    if(likely(mce && mce->receiver_class() == args.recv()->lookup_begin(state))) {
+    Object* const recv_class = args.recv()->lookup_begin(state);
 
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv_class, entry);
+
+    if(likely(ic)) {
       args.unshift(state, cache->name);
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+      state->vm()->set_method_missing_reason(entry->method_missing());
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -598,16 +642,18 @@ namespace rubinius {
   Object* InlineCache::check_cache_super(STATE, InlineCache* cache, CallFrame* call_frame,
                                    Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
     Symbol* current_name = call_frame->original_name();
-
     args.set_name(cache->name);
+    Object* const recv_class = args.recv()->lookup_begin(state);
 
-    if(likely(mce && mce->receiver_class() == args.recv()->lookup_begin(state)
-                  && current_name == cache->name))
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv_class, entry);
+
+    if(likely(ic && current_name == cache->name))
     {
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -620,18 +666,21 @@ namespace rubinius {
   Object* InlineCache::check_cache_super_mm(STATE, InlineCache* cache, CallFrame* call_frame,
                                    Arguments& args)
   {
-    MethodCacheEntry* mce = cache->cache_;
     Symbol* current_name = call_frame->original_name();
-
     args.set_name(cache->name);
+    Object* const recv_class = args.recv()->lookup_begin(state);
 
-    if(likely(mce && mce->receiver_class() == args.recv()->lookup_begin(state)
-                  && current_name == cache->name))
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv_class, entry);
+
+    if(likely(ic))
     {
       args.unshift(state, cache->name);
 
-      Executable* meth = mce->method();
-      Module* mod = mce->stored_module();
+      state->vm()->set_method_missing_reason(entry->method_missing());
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
 
       return meth->execute(state, call_frame, meth, mod, args);
     }
@@ -641,39 +690,37 @@ namespace rubinius {
     return cache->initialize(state, call_frame, args);
   }
 
-  void InlineCache::update_seen_classes(MethodCacheEntry* mce) {
 
-    for(int i = 0; i < cTrackedICHits; i++) {
-      Module* mod = seen_classes_[i].klass();
-      if(mod == mce->receiver_class()) {
-        return;
+  Object* InlineCache::check_cache_poly(STATE, InlineCache* cache, CallFrame* call_frame,
+                                   Arguments& args)
+  {
+    args.set_name(cache->name);
+    Object* const recv_class = args.recv()->lookup_begin(state);
+
+    MethodCacheEntry* entry;
+    InlineCacheHit* ic = cache->get_inline_cache(recv_class, entry);
+
+    if(likely(ic)) {
+      if(entry->method_missing() != eNone) {
+        args.unshift(state, cache->name);
       }
-    }
-
-    // This comparison is potentially thread unsafe,
-    // but since we never decrease seen_classes_overflow_,
-    // it's not possible to cause any issues here
-    if( seen_classes_overflow_ < cTrackedICHits - 1) {
-      // Ok, we've arrived here and found no hit. There's
-      // potentially room for registering another class,
-      // so we should lock it here before we're allowed to write it.
-
-      private_lock_.lock();
-
-      for(int i = 0; i < cTrackedICHits; i++) {
-        if(!seen_classes_[i].klass()) {
-          // An empty space, record it.
-          seen_classes_[i].assign(mce->receiver_class());
-          private_lock_.unlock();
-          return;
+      if(entry->super()) {
+        Symbol* current_name = call_frame->original_name();
+        if(current_name != cache->name) {
+          cache->name = current_name;
+          return cache->initialize(state, call_frame, args);
         }
       }
+
+      state->vm()->set_method_missing_reason(entry->method_missing());
+      Executable* meth = entry->method();
+      Module* mod = entry->stored_module();
+      ic->hit();
+
+      return meth->execute(state, call_frame, meth, mod, args);
     }
 
-    // Hmmm, what do we do when this is full? Just ignore them?
-    // For now, just keep track of how many times we overflow.
-    seen_classes_overflow_++;
-    private_lock_.unlock();
+    return cache->initialize(state, call_frame, args);
   }
 
   void InlineCache::print_location(STATE, std::ostream& stream) {
@@ -692,19 +739,21 @@ namespace rubinius {
            << "classes:\n";
 
     for(int i = 0; i < cTrackedICHits; i++) {
-      Module* mod = seen_classes_[i].klass();
-      if(mod) {
-        if(SingletonClass* sc = try_as<SingletonClass>(mod)) {
-          if(Module* inner = try_as<Module>(sc->attached_instance())) {
-            stream << "  SingletonClass:" << inner->debug_str(state);
+      if(cache_[i].entry()) {
+        Module* mod = cache_[i].entry()->receiver_class();
+        if(mod) {
+          if(SingletonClass* sc = try_as<SingletonClass>(mod)) {
+            if(Module* inner = try_as<Module>(sc->attached_instance())) {
+              stream << "  SingletonClass:" << inner->debug_str(state);
+            } else {
+              stream << "  SingletonClass:" << sc->attached_instance()->class_object(state)->debug_str(state);
+            }
           } else {
-            stream << "  SingletonClass:" << sc->attached_instance()->class_object(state)->debug_str(state);
+            stream << "  " << mod->debug_str(state);
           }
-        } else {
-          stream << "  " << mod->debug_str(state);
-        }
 
-        stream << "\n";
+          stream << "\n";
+        }
       }
     }
   }

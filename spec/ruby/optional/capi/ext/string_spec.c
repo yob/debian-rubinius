@@ -131,6 +131,12 @@ VALUE string_spec_rb_str_freeze(VALUE self, VALUE str) {
 }
 #endif
 
+#ifdef HAVE_RB_STR_INSPECT
+VALUE string_spec_rb_str_inspect(VALUE self, VALUE str) {
+  return rb_str_inspect(str);
+}
+#endif
+
 #ifdef HAVE_RB_STR_INTERN
 VALUE string_spec_rb_str_intern(VALUE self, VALUE str) {
   return rb_str_intern(str);
@@ -140,6 +146,12 @@ VALUE string_spec_rb_str_intern(VALUE self, VALUE str) {
 #ifdef HAVE_RB_STR_LEN
 VALUE string_spec_rb_str_len(VALUE self, VALUE str) {
   return INT2FIX(rb_str_len(str));
+}
+#endif
+
+#ifdef HAVE_RB_STR_LENGTH
+VALUE string_spec_rb_str_length(VALUE self, VALUE str) {
+  return rb_str_length(str);
 }
 #endif
 
@@ -156,6 +168,12 @@ VALUE string_spec_rb_str_new2(VALUE self, VALUE str) {
   } else {
     return rb_str_new2(RSTRING_PTR(str));
   }
+}
+#endif
+
+#ifdef HAVE_RB_STR_ENCODE
+VALUE string_spec_rb_str_encode(VALUE self, VALUE str, VALUE enc, VALUE flags, VALUE opts) {
+  return rb_str_encode(str, enc, FIX2INT(flags), opts);
 }
 #endif
 
@@ -301,6 +319,12 @@ VALUE string_spec_rb_str_split(VALUE self, VALUE str) {
 }
 #endif
 
+#ifdef HAVE_RB_STR_SUBSEQ
+VALUE string_spec_rb_str_subseq(VALUE self, VALUE str, VALUE beg, VALUE len) {
+  return rb_str_subseq(str, FIX2INT(beg), FIX2INT(len));
+}
+#endif
+
 #ifdef HAVE_RB_STR_SUBSTR
 VALUE string_spec_rb_str_substr(VALUE self, VALUE str, VALUE beg, VALUE len) {
   return rb_str_substr(str, FIX2INT(beg), FIX2INT(len));
@@ -439,6 +463,18 @@ static VALUE string_spec_rb_str_hash(VALUE self, VALUE str) {
 }
 #endif
 
+#ifdef HAVE_RB_STR_EQUAL
+VALUE string_spec_rb_str_equal(VALUE self, VALUE str1, VALUE str2) {
+  return rb_str_equal(str1, str2);
+}
+#endif
+
+#ifdef HAVE_RB_USASCII_STR_NEW
+static VALUE string_spec_rb_usascii_str_new(VALUE self, VALUE str, VALUE len) {
+  return rb_usascii_str_new(RSTRING_PTR(str), NUM2INT(len));
+}
+#endif
+
 #ifdef HAVE_RB_USASCII_STR_NEW_CSTR
 static VALUE string_spec_rb_usascii_str_new_cstr(VALUE self, VALUE str) {
   return rb_usascii_str_new_cstr(RSTRING_PTR(str));
@@ -505,6 +541,10 @@ void Init_string_spec() {
   rb_define_method(cls, "rb_str_freeze", string_spec_rb_str_freeze, 1);
 #endif
 
+#ifdef HAVE_RB_STR_INSPECT
+  rb_define_method(cls, "rb_str_inspect", string_spec_rb_str_inspect, 1);
+#endif
+
 #ifdef HAVE_RB_STR_INTERN
   rb_define_method(cls, "rb_str_intern", string_spec_rb_str_intern, 1);
 #endif
@@ -513,12 +553,20 @@ void Init_string_spec() {
   rb_define_method(cls, "rb_str_len", string_spec_rb_str_len, 1);
 #endif
 
+#ifdef HAVE_RB_STR_LENGTH
+  rb_define_method(cls, "rb_str_length", string_spec_rb_str_length, 1);
+#endif
+
 #ifdef HAVE_RB_STR_NEW
   rb_define_method(cls, "rb_str_new", string_spec_rb_str_new, 2);
 #endif
 
 #ifdef HAVE_RB_STR_NEW2
   rb_define_method(cls, "rb_str_new2", string_spec_rb_str_new2, 1);
+#endif
+
+#ifdef HAVE_RB_STR_ENCODE
+  rb_define_method(cls, "rb_str_encode", string_spec_rb_str_encode, 4);
 #endif
 
 #ifdef HAVE_RB_STR_NEW_CSTR
@@ -583,6 +631,10 @@ void Init_string_spec() {
   rb_define_method(cls, "rb_str_split", string_spec_rb_str_split, 1);
 #endif
 
+#ifdef HAVE_RB_STR_SUBSEQ
+  rb_define_method(cls, "rb_str_subseq", string_spec_rb_str_subseq, 3);
+#endif
+
 #ifdef HAVE_RB_STR_SUBSTR
   rb_define_method(cls, "rb_str_substr", string_spec_rb_str_substr, 3);
 #endif
@@ -627,6 +679,14 @@ void Init_string_spec() {
 
 #ifdef HAVE_RB_STR_HASH
   rb_define_method(cls, "rb_str_hash", string_spec_rb_str_hash, 1);
+#endif
+
+#ifdef HAVE_RB_STR_EQUAL
+  rb_define_method(cls, "rb_str_equal", string_spec_rb_str_equal, 2);
+#endif
+
+#ifdef HAVE_RB_USASCII_STR_NEW
+  rb_define_method(cls, "rb_usascii_str_new", string_spec_rb_usascii_str_new, 2);
 #endif
 
 #ifdef HAVE_RB_USASCII_STR_NEW_CSTR

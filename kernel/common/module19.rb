@@ -10,7 +10,7 @@ class Module
     while current
       constant = current.constant_table.fetch name, undefined
       unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
+        constant = constant.call(current) if constant.kind_of?(Autoload)
         return constant
       end
 
@@ -24,7 +24,7 @@ class Module
     if instance_of?(Module)
       constant = Object.constant_table.fetch name, undefined
       unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
+        constant = constant.call(current) if constant.kind_of?(Autoload)
         return constant
       end
     end
@@ -107,6 +107,8 @@ class Module
     end
 
     constant_table[name] = Autoload.new(name, self, path)
+    Object.singleton_class.constant_table[name] = constant_table[name] if self == Kernel
+
     Rubinius.inc_global_serial
     return nil
   end
@@ -141,7 +143,7 @@ class Module
       end
     end
 
-    Rubinius.convert_to_names tbl.keys
+    Rubinius::Type.convert_to_names tbl.keys
   end
 
   def private_constant(*names)

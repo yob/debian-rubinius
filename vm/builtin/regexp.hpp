@@ -28,7 +28,8 @@ namespace rubinius {
     LookupTable* names_; // slot
     regex_t* onig_data;
     bool fixed_encoding_;
-    thread::SpinLock lock_;
+    bool no_encoding_;
+    utilities::thread::SpinLock lock_;
 
   public:
     /* accessors */
@@ -47,7 +48,7 @@ namespace rubinius {
      */
     // Rubinius.primitive :regexp_initialize
     Regexp* initialize(STATE, String* pattern, Fixnum* options);
-    void maybe_recompile(STATE);
+    void maybe_recompile(STATE, String* string);
 
     // Rubinius.primitive :regexp_options
     Fixnum* options(STATE);

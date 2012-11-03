@@ -30,7 +30,7 @@ namespace rubinius {
   }
 
   VariableScope* VariableScope::of_sender(STATE, CallFrame* call_frame) {
-    CallFrame* dest = static_cast<CallFrame*>(call_frame->previous);
+    CallFrame* dest = call_frame->previous;
     // Skip any frames for native methods
     while(dest->native_method_p()) { dest = dest->previous; }
     return dest->promote_scope(state);
@@ -41,7 +41,7 @@ namespace rubinius {
     return call_frame->promote_scope(state);
   }
 
-  VariableScope* VariableScope::synthesize(STATE, CompiledMethod* method,
+  VariableScope* VariableScope::synthesize(STATE, CompiledCode* method,
                                            Module* module, Object* parent,
                                            Object* self, Object* block,
                                            Tuple* locals)
@@ -97,6 +97,48 @@ namespace rubinius {
     return cNil;
   }
 
+  void VariableScope::set_local(STATE, int pos, Object* val) {
+    if(isolated_) {
+      heap_locals_->put(state, pos, val);
+    } else {
+      set_local(pos, val);
+    }
+  }
+
+  void VariableScope::set_local(int pos, Object* val) {
+    assert(isolated_ == false);
+    Object** ary = locals_;
+
+    if(Fiber* fib = try_as<Fiber>(fiber_)) {
+      FiberData* data = fib->data();
+
+      AddressDisplacement dis(data->data_offset(),
+                              data->data_lower_bound(),
+                              data->data_upper_bound());
+
+      ary = dis.displace(ary);
+    }
+    ary[pos] = val;
+  }
+
+  Object* VariableScope::get_local(int pos) {
+    if(isolated_) {
+      return heap_locals_->at(pos);
+    }
+
+    Object** ary = locals_;
+    if(Fiber* fib = try_as<Fiber>(fiber_)) {
+      FiberData* data = fib->data();
+
+      AddressDisplacement dis(data->data_offset(),
+                              data->data_lower_bound(),
+                              data->data_upper_bound());
+
+      ary = dis.displace(ary);
+    }
+    return ary[pos];
+  }
+
   void VariableScope::Info::mark(Object* obj, ObjectMark& mark) {
     auto_mark(obj, mark);
 
@@ -105,7 +147,7 @@ namespace rubinius {
     vs->fixup();
 
     if(!vs->isolated()) {
-      Object** ary = vs->stack_locals();
+      Object** ary = vs->locals_;
 
       if(Fiber* fib = try_as<Fiber>(vs->fiber())) {
         FiberData* data = fib->data();

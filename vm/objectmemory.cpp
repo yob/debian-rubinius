@@ -28,7 +28,7 @@
 #include "builtin/array.hpp"
 #include "builtin/thread.hpp"
 
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
 #include "configuration.hpp"
 
 #include "global_cache.hpp"
@@ -61,14 +61,13 @@ namespace rubinius {
     , collect_young_now(false)
     , collect_mature_now(false)
     , root_state_(state)
+    , last_object_id(1)
   {
     // TODO Not sure where this code should be...
     if(char* num = getenv("RBX_WATCH")) {
       object_watch = (Object*)strtol(num, NULL, 10);
       std::cout << "Watching for " << object_watch << "\n";
     }
-
-    last_object_id = 0;
 
     large_object_threshold = config.gc_large_object;
     young_->set_lifetime(config.gc_lifetime);
@@ -112,12 +111,10 @@ namespace rubinius {
   }
 
   void ObjectMemory::assign_object_id(STATE, Object* obj) {
-    SYNC(state);
-
     // Double check we've got no id still after the lock.
     if(obj->object_id() > 0) return;
 
-    obj->set_object_id(state, state->memory(), ++last_object_id);
+    obj->set_object_id(state, state->memory(), atomic::fetch_and_add(&last_object_id, (size_t)1));
   }
 
   Integer* ObjectMemory::assign_object_id_ivar(STATE, Object* obj) {
@@ -135,7 +132,7 @@ namespace rubinius {
   bool ObjectMemory::inflate_lock_count_overflow(STATE, ObjectHeader* obj,
                                                  int count)
   {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     // Inflation always happens with the ObjectMemory lock held, so we don't
     // need to worry about another thread concurrently inflating it.
@@ -144,20 +141,20 @@ namespace rubinius {
     if(obj->inflated_header_p()) return false;
 
     InflatedHeader* ih = inflated_headers_->allocate(obj);
-    ih->initialize_mutex(state->vm()->thread_id(), count);
 
-    if(!obj->set_inflated_header(ih)) {
+    if(!obj->set_inflated_header(state, ih)) {
       if(obj->inflated_header_p()) return false;
 
       // Now things are really in a weird state, just abort.
       rubinius::bug("Massive header state confusion detected. Call a doctor.");
     }
 
+    ih->initialize_mutex(state->vm()->thread_id(), count);
     return true;
   }
 
   LockStatus ObjectMemory::contend_for_lock(STATE, GCToken gct, ObjectHeader* obj,
-                                            bool* error, size_t us)
+                                            size_t us, bool interrupt)
   {
     bool timed = false;
     bool timeout = false;
@@ -182,19 +179,25 @@ step1:
       // contention condvar until the object is unlocked.
 
       HeaderWord orig = obj->header;
-      HeaderWord new_val = orig;
+      orig.f.inflated = 0;
 
-      orig.f.meaning = eAuxWordLock;
-
+      HeaderWord new_val      = orig;
+      orig.f.meaning          = eAuxWordLock;
       new_val.f.LockContended = 1;
 
       if(!obj->header.atomic_set(orig, new_val)) {
+        if(obj->inflated_header_p()) {
+          if(cDebugThreading) {
+            std::cerr << "[LOCK " << state->vm()->thread_id()
+              << " contend_for_lock error: object has been inflated.]" << std::endl;
+          }
+          return eLockError;
+        }
         if(new_val.f.meaning != eAuxWordLock) {
           if(cDebugThreading) {
             std::cerr << "[LOCK " << state->vm()->thread_id()
               << " contend_for_lock error: not thin locked.]" << std::endl;
           }
-          *error = true;
           return eLockError;
         }
 
@@ -225,7 +228,7 @@ step1:
         GCIndependent gc_guard(state);
 
         if(timed) {
-          timeout = (contention_var_.wait_until(contention_lock_, &ts) == thread::cTimedOut);
+          timeout = (contention_var_.wait_until(contention_lock_, &ts) == utilities::thread::cTimedOut);
           if(timeout) break;
         } else {
           contention_var_.wait(contention_lock_);
@@ -236,7 +239,7 @@ step1:
         }
 
         // Someone is interrupting us trying to lock.
-        if(state->vm()->check_local_interrupts) {
+        if(interrupt && state->vm()->check_local_interrupts) {
           state->vm()->check_local_interrupts = false;
 
           if(!state->vm()->interrupted_exception()->nil_p()) {
@@ -276,9 +279,9 @@ step1:
     InflatedHeader* ih = obj->inflated_header();
 
     if(timed) {
-      return ih->lock_mutex_timed(state, gct, &ts);
+      return ih->lock_mutex_timed(state, gct, &ts, interrupt);
     } else {
-      return ih->lock_mutex(state, gct);
+      return ih->lock_mutex(state, gct, 0, interrupt);
     }
   }
 
@@ -288,44 +291,52 @@ step1:
   }
 
   bool ObjectMemory::inflate_and_lock(STATE, ObjectHeader* obj) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     InflatedHeader* ih = 0;
     int initial_count = 0;
 
     HeaderWord orig = obj->header;
-    HeaderWord tmp = orig;
+    HeaderWord new_val = orig;
 
-    switch(tmp.f.meaning) {
+    if(orig.f.inflated) {
+      // Already inflated. ERROR, let the caller sort it out.
+      return false;
+    }
+
+    switch(new_val.f.meaning) {
     case eAuxWordEmpty:
       // ERROR, we can not be here because it's empty. This is only to
       // be called when the header is already in use.
-      return false;
-    case eAuxWordInflated:
-      // Already inflated. ERROR, let the caller sort it out.
       return false;
     case eAuxWordObjID:
       // We could be have made a header before trying again, so
       // keep using the original one.
       ih = inflated_headers_->allocate(obj);
-      ih->set_object_id(tmp.f.aux_word);
+      ih->set_object_id(new_val.f.aux_word);
       break;
     case eAuxWordLock:
       // We have to locking the object to inflate it, thats the law.
-      if(tmp.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
+      if(new_val.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
         return false;
       }
 
       ih = inflated_headers_->allocate(obj);
       initial_count = orig.f.aux_word & cAuxLockRecCountMask;
+      break;
+    case eAuxWordHandle:
+      // Handle in use so inflate and update handle
+      ih = inflated_headers_->allocate(obj);
+      ih->set_handle(state, obj->handle(state));
+      break;
     }
 
     ih->initialize_mutex(state->vm()->thread_id(), initial_count);
 
-    tmp.all_flags = ih;
-    tmp.f.meaning = eAuxWordInflated;
+    new_val.all_flags = ih;
+    new_val.f.inflated = 1;
 
-    while(!obj->header.atomic_set(orig, tmp)) {
+    while(!obj->header.atomic_set(orig, new_val)) {
       // The header can't have been inflated by another thread, the
       // inflation process holds the OM lock.
       //
@@ -335,28 +346,39 @@ step1:
       // Sanity check that the meaning is still the same, if not, then
       // something is really wrong.
       orig = obj->header;
-      if(orig.f.meaning != tmp.f.meaning) {
+      if(orig.f.inflated) {
+        return false;
+      }
+      if(orig.f.meaning != new_val.f.meaning) {
         if(cDebugThreading) {
           std::cerr << "[LOCK object header consistence error detected.]" << std::endl;
         }
         return false;
       }
 
-      tmp.all_flags = ih;
-      tmp.f.meaning = eAuxWordInflated;
+      new_val = orig;
+      new_val.all_flags = ih;
+      new_val.f.inflated = 1;
     }
 
     return true;
   }
 
   bool ObjectMemory::inflate_for_contention(STATE, ObjectHeader* obj) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     for(;;) {
       HeaderWord orig = obj->header;
       HeaderWord new_val = orig;
 
       InflatedHeader* ih = 0;
+
+      if(orig.f.inflated) {
+        if(cDebugThreading) {
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " asked to inflated already inflated lock]" << std::endl;
+        }
+        return false;
+      }
 
       switch(orig.f.meaning) {
       case eAuxWordEmpty:
@@ -367,6 +389,10 @@ step1:
         // keep using the original one.
         ih = inflated_headers_->allocate(obj);
         ih->set_object_id(orig.f.aux_word);
+        break;
+      case eAuxWordHandle:
+        ih = inflated_headers_->allocate(obj);
+        ih->set_handle(state, obj->handle(state));
         break;
       case eAuxWordLock:
         // We have to be locking the object to inflate it, thats the law.
@@ -382,20 +408,15 @@ step1:
 
         ih = inflated_headers_->allocate(obj);
         break;
-      case eAuxWordInflated:
-        if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->vm()->thread_id() << " asked to inflated already inflated lock]" << std::endl;
-        }
-        return false;
       }
 
-      ih->flags().LockContended = 0;
-
       new_val.all_flags = ih;
-      new_val.f.meaning = eAuxWordInflated;
+      new_val.f.inflated = 1;
 
       // Try it all over again if it fails.
       if(!obj->header.atomic_set(orig, new_val)) continue;
+
+      obj->clear_lock_contended();
 
       if(cDebugThreading) {
         std::cerr << "[LOCK " << state->vm()->thread_id() << " inflated lock for contention.]" << std::endl;
@@ -406,25 +427,8 @@ step1:
     }
   }
 
-  // WARNING: This returns an object who's body may not have been initialized.
-  // It is the callers duty to initialize it.
-  Object* ObjectMemory::new_object_fast(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
-
-    if(Object* obj = young_->raw_allocate(bytes, &collect_young_now)) {
-      gc_stats.young_object_allocated(bytes);
-
-      if(collect_young_now) shared_.gc_soon();
-      obj->init_header(cls, YoungObjectZone, type);
-      return obj;
-    } else {
-      UNSYNC;
-      return new_object_typed(state, cls, bytes, type);
-    }
-  }
-
   bool ObjectMemory::refill_slab(STATE, gc::Slab& slab) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Address addr = young_->allocate_for_slab(slab_size_);
 
@@ -536,6 +540,10 @@ step1:
         std::cerr << "[GC " << std::fixed << std::setprecision(1) << stats.percentage_used << "% "
                   << stats.promoted_objects << "/" << stats.excess_objects << " "
                   << stats.lifetime << " " << diff << "ms]" << std::endl;
+
+        if(state->shared().config.gc_noisy) {
+          std::cerr << "\a" << std::flush;
+        }
       }
     }
 
@@ -563,6 +571,10 @@ step1:
         int diff = (fin_time - start_time) / 1000000;
         size_t kb = mature_bytes_allocated() / 1024;
         std::cerr << "[Full GC " << before_kb << "kB => " << kb << "kB " << diff << "ms]" << std::endl;
+
+        if(state->shared().config.gc_noisy) {
+          std::cerr << "\a\a" << std::flush;
+        }
       }
     }
 
@@ -586,15 +598,11 @@ step1:
     timer::Running<1000000> timer(gc_stats.total_young_collection_time,
                                   gc_stats.last_young_collection_time);
 
-    // validate_handles(data.handles());
-    // validate_handles(data.cached_handles());
-
     young_->reset_stats();
 
     young_->collect(data, stats);
 
-    prune_handles(data.handles(), true);
-    prune_handles(data.cached_handles(), true);
+    prune_handles(data.handles(), data.cached_handles(), young_);
     gc_stats.young_collection_count++;
 
     data.global_cache()->prune_young();
@@ -619,9 +627,6 @@ step1:
 
   void ObjectMemory::collect_mature(GCData& data) {
 
-    // validate_handles(data.handles());
-    // validate_handles(data.cached_handles());
-
     timer::Running<1000000> timer(gc_stats.total_full_collection_time,
                                   gc_stats.last_full_collection_time);
 
@@ -639,8 +644,7 @@ step1:
 
     data.global_cache()->prune_unmarked(mark());
 
-    prune_handles(data.handles(), false);
-    prune_handles(data.cached_handles(), false);
+    prune_handles(data.handles(), data.cached_handles(), NULL);
 
 
     // Have to do this after all things that check for mark bits is
@@ -663,7 +667,7 @@ step1:
   InflatedHeader* ObjectMemory::inflate_header(STATE, ObjectHeader* obj) {
     if(obj->inflated_header_p()) return obj->inflated_header();
 
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     // Gotta check again because while waiting for the lock,
     // the object could have been inflated!
@@ -671,7 +675,7 @@ step1:
 
     InflatedHeader* header = inflated_headers_->allocate(obj);
 
-    if(!obj->set_inflated_header(header)) {
+    if(!obj->set_inflated_header(state, header)) {
       if(obj->inflated_header_p()) return obj->inflated_header();
 
       // Now things are really in a weird state, just abort.
@@ -682,18 +686,19 @@ step1:
   }
 
   void ObjectMemory::inflate_for_id(STATE, ObjectHeader* obj, uint32_t id) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     HeaderWord orig = obj->header;
 
-    if(orig.f.meaning == eAuxWordInflated) {
+    if(orig.f.inflated) {
       rubinius::bug("Massive header state confusion detected. Call a doctor.");
     }
 
     InflatedHeader* header = inflated_headers_->allocate(obj);
+    header->set_handle(state, obj->handle(state));
     header->set_object_id(id);
 
-    if(!obj->set_inflated_header(header)) {
+    if(!obj->set_inflated_header(state, header)) {
       if(obj->inflated_header_p()) {
         obj->inflated_header()->set_object_id(id);
         return;
@@ -705,88 +710,33 @@ step1:
 
   }
 
-  void ObjectMemory::validate_handles(capi::Handles* handles) {
-#ifndef NDEBUG
-    capi::Handle* handle = handles->front();
-    capi::Handle* current;
+  void ObjectMemory::inflate_for_handle(STATE, ObjectHeader* obj, capi::Handle* handle) {
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
-    while(handle) {
-      current = handle;
-      handle = static_cast<capi::Handle*>(handle->next());
+    HeaderWord orig = obj->header;
 
-      if(!handle->in_use_p()) continue;
-
-      Object* obj = current->object();
-
-      assert(obj->inflated_header_p());
-      InflatedHeader* ih = obj->inflated_header();
-
-      assert(ih->handle() == current);
-      assert(ih->object() == obj);
+    if(orig.f.inflated) {
+      rubinius::bug("Massive header state confusion detected. Call a doctor.");
     }
-#endif
+
+    InflatedHeader* header = inflated_headers_->allocate(obj);
+    header->set_handle(state, handle);
+    header->set_object_id(obj->object_id());
+
+    if(!obj->set_inflated_header(state, header)) {
+      if(obj->inflated_header_p()) {
+        obj->inflated_header()->set_handle(state, handle);
+        return;
+      }
+
+      // Now things are really in a weird state, just abort.
+      rubinius::bug("Massive header state confusion detected. Call a doctor.");
+    }
+
   }
 
-  void ObjectMemory::prune_handles(capi::Handles* handles, bool check_forwards) {
-    capi::Handle* handle = handles->front();
-    capi::Handle* current;
-
-    int total = 0;
-    int count = 0;
-
-    while(handle) {
-      current = handle;
-      handle = static_cast<capi::Handle*>(handle->next());
-
-      Object* obj = current->object();
-      total++;
-
-      if(!current->in_use_p()) {
-        count++;
-        handles->remove(current);
-        delete current;
-        continue;
-      }
-
-      // Strong references will already have been updated.
-      if(!current->weak_p()) {
-        if(check_forwards) assert(!obj->forwarded_p());
-        assert(obj->inflated_header()->object() == obj);
-      } else if(check_forwards) {
-        if(obj->young_object_p()) {
-
-          // A weakref pointing to a valid young object
-          //
-          // TODO this only works because we run prune_handles right after
-          // a collection. In this state, valid objects are only in current.
-          if(young_->in_current_p(obj)) {
-            continue;
-
-          // A weakref pointing to a forwarded young object
-          } else if(obj->forwarded_p()) {
-            current->set_object(obj->forward());
-            assert(current->object()->inflated_header_p());
-            assert(current->object()->inflated_header()->object() == current->object());
-
-          // A weakref pointing to a dead young object
-          } else {
-            count++;
-            handles->remove(current);
-            delete current;
-          }
-        }
-
-      // A weakref pointing to a dead mature object
-      } else if(!obj->marked_p(mark())) {
-        count++;
-        handles->remove(current);
-        delete current;
-      } else {
-        assert(obj->inflated_header()->object() == obj);
-      }
-    }
-
-    // std::cout << "Pruned " << count << " handles, " << total << "/" << handles->size() << " total.\n";
+  void ObjectMemory::prune_handles(capi::Handles* handles, std::list<capi::Handle*>* cached, BakerGC* young) {
+    handles->deallocate_handles(cached, mark(), young);
   }
 
   size_t ObjectMemory::mature_bytes_allocated() {
@@ -874,7 +824,7 @@ step1:
   }
 
   Object* ObjectMemory::new_object_typed(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj;
 
@@ -889,7 +839,7 @@ step1:
   }
 
   Object* ObjectMemory::new_object_typed_mature(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj;
 
@@ -913,7 +863,7 @@ step1:
   }
 
   Object* ObjectMemory::new_object_typed_enduring(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj = mark_sweep_->allocate(bytes, &collect_mature_now);
     gc_stats.mature_object_allocated(bytes);
@@ -970,7 +920,7 @@ step1:
   }
 
   void ObjectMemory::needs_finalization(Object* obj, FinalizerFunction func) {
-    SYNC_TL;
+    SCOPE_LOCK(ManagedThread::current(), finalizer_lock_);
 
     FinalizeObject fi;
     fi.object = obj;
@@ -982,7 +932,7 @@ step1:
   }
 
   void ObjectMemory::set_ruby_finalizer(Object* obj, Object* fin) {
-    SYNC_TL;
+    SCOPE_LOCK(ManagedThread::current(), finalizer_lock_);
 
     // See if there already one.
     for(std::list<FinalizeObject>::iterator i = finalize_.begin();
@@ -1032,6 +982,10 @@ step1:
 
   void ObjectMemory::in_finalizer_thread(STATE) {
     CallFrame* call_frame = 0;
+    utilities::thread::Thread::set_os_name("rbx.finalizer");
+
+    GCTokenImpl gct;
+    state->vm()->thread->hard_unlock(state, gct);
 
     // Forever
     for(;;) {
@@ -1057,13 +1011,9 @@ step1:
         (*fi->finalizer)(state, fi->object);
         // Unhook any handle used by fi->object so that we don't accidentally
         // try and mark it later (after we've finalized it)
-        if(fi->object->inflated_header_p()) {
-          InflatedHeader* ih = fi->object->inflated_header();
-
-          if(capi::Handle* handle = ih->handle()) {
-            handle->forget_object();
-            ih->set_handle(0);
-          }
+        if(capi::Handle* handle = fi->object->handle(state)) {
+          handle->forget_object();
+          fi->object->clear_handle(state);
         }
 
         // If the object was remembered, unremember it.
@@ -1081,7 +1031,7 @@ step1:
 
           OnStack<1> os(state, ary);
 
-          fi->ruby_finalizer->send(state, call_frame, state->symbol("call"), ary);
+          fi->ruby_finalizer->send(state, call_frame, G(sym_call), ary);
         }
       } else {
         std::cerr << "Unsupported object to be finalized: "
@@ -1090,8 +1040,6 @@ step1:
 
       fi->status = FinalizeObject::eFinalized;
     }
-
-    GCTokenImpl gct;
 
     state->checkpoint(gct, 0);
   }
@@ -1111,13 +1059,9 @@ step1:
         (*fi->finalizer)(state, fi->object);
         // Unhook any handle used by fi->object so that we don't accidentally
         // try and mark it later (after we've finalized it)
-        if(fi->object->inflated_header_p()) {
-          InflatedHeader* ih = fi->object->inflated_header();
-
-          if(capi::Handle* handle = ih->handle()) {
-            handle->forget_object();
-            ih->set_handle(0);
-          }
+        if(capi::Handle* handle = fi->object->handle(state)) {
+          handle->forget_object();
+          fi->object->clear_handle(state);
         }
 
         // If the object was remembered, unremember it.
@@ -1135,7 +1079,7 @@ step1:
 
           OnStack<1> os(state, ary);
 
-          fi->ruby_finalizer->send(state, call_frame, state->symbol("call"), ary);
+          fi->ruby_finalizer->send(state, call_frame, G(sym_call), ary);
         }
       } else {
         std::cerr << "Unsupported object to be finalized: "
@@ -1177,7 +1121,7 @@ step1:
 
             OnStack<1> os(state, ary);
 
-            fi.ruby_finalizer->send(state, 0, state->symbol("call"), ary);
+            fi.ruby_finalizer->send(state, 0, G(sym_call), ary);
           }
         } else {
           std::cerr << "During shutdown, unsupported object to be finalized: "
@@ -1222,7 +1166,7 @@ step1:
 
             OnStack<1> os(state, ary);
 
-            fi.ruby_finalizer->send(state, 0, state->symbol("call"), ary);
+            fi.ruby_finalizer->send(state, 0, G(sym_call), ary);
           }
         } else {
           std::cerr << "During shutdown, unsupported object to be finalized: "
@@ -1245,7 +1189,7 @@ step1:
 
   void ObjectMemory::start_finalizer_thread(STATE) {
     VM* vm = state->shared().new_vm();
-    Thread* thr = Thread::create(state, vm, G(thread), in_finalizer);
+    Thread* thr = Thread::create(state, vm, G(thread), in_finalizer, false, true);
     finalizer_thread_.set(thr);
     thr->fork(state);
   }
@@ -1259,7 +1203,7 @@ step1:
   }
 
   size_t& ObjectMemory::code_usage() {
-    return (size_t&)code_manager_.size();
+    return code_manager_.size();
   }
 
   void ObjectMemory::memstats() {

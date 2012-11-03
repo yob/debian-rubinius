@@ -9,6 +9,8 @@ require 'rbconfig'
 require 'tempfile'
 require 'fileutils'
 require 'stringio'
+require 'digest/md5'
+require 'net/http'
 
 root = File.expand_path File.dirname(__FILE__)
 
@@ -16,40 +18,38 @@ require File.join(root, "kernel", "delta", "options")
 
 class Configure
 
+  # Default settings only. All code that may depend on user-selected options
+  # must run after options are processed.
   def initialize(root)
     @log = Logger.new "configure.log"
 
+    @command_line = ARGV.dup
+    @log.log "Command line: #{@command_line.join(" ").inspect}"
+
+    @features = {}
     @defines = []
     @config = File.join(root, "config.rb")
 
+    # Platform settings
     @host = `sh -c ./rakelib/config.guess`.chomp
-    /([^-]+)-([^-]+)-(.*)/ =~ @host
-    @cpu, @vendor, @os = $1, $2, $3
+    @cpu = nil
+    @vendor = nil
+    @os = nil
+    @windows = nil
+    @darwin = nil
+    @bsd = nil
+    @linux = nil
     @little_endian = false
     @sizeof = {}
 
-    # TODO: For better cross-compiling support, it may be necessary to
-    # use the feature facility to check for a define in the compiler.
-    @windows = (@host =~ /mingw|mswin/) != nil
-    @darwin  = (@host =~ /darwin/) != nil
-    @bsd     = (@host =~ /bsd/) != nil
-    @linux   = (@host =~ /linux/) != nil
+    # Build tools
+    @cc = nil
+    @cxx = nil
+    @rake = nil
+    @tar = nil
+    @perl = nil
 
-    # Set up system commands to run in cmd.exe on Windows.
-    if @windows
-      alias :old_system    :system
-      alias :old_backquote :`
-      alias :system        :msys_system
-      alias :`             :msys_backquote
-    end
-
-    # Compiler / build settings
-    @cc = ENV['CC'] || 'gcc'
-    @cxx = ENV['CXX'] || 'g++'
-    @rake = ENV['RAKE'] || 'rake'
-    @tar = ENV['TAR'] || (@windows ? 'bsdtar' : 'tar')
-    @perl = ENV['PERL'] || 'perl'
-    @install = false
+    # Versions
     @default_version = "18"
     @version_list = ["18", "19"]
     @supported_versions = ["18", "19", "20"]
@@ -72,17 +72,8 @@ class Configure
     @llvm_source_url        = "http://llvm.org/releases/3.0/llvm-3.0.tar.gz"
     @llvm_asset_path        = "http://asset.rubini.us/prebuilt"
     @llvm_source_build      = false
-
-
-    if @host == "i686-pc-linux-gnu" || @host == "x86_64-unknown-linux-gnu"
-      check_tool_version @cc, '-dumpversion', [4, 1]
-      check_tool_version 'bison', '--version', [2, 3]
-
-      @gcc_major = `#{@cc} -dumpversion`.strip.split(".")[0,2].join(".")
-      @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}-#{@gcc_major}.tar.bz2"
-    else
-      @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}.tar.bz2"
-    end
+    @llvm_generic_prebuilt  = nil
+    @need_update_prebuilt   = false
 
     @llvm_parent_path       = File.join(root, "vendor")
     @llvm_default           = File.join(@llvm_parent_path, "llvm")
@@ -94,46 +85,43 @@ class Configure
     @x86_32       = false
     @x86_64       = false
     @fibers       = false
-    @include_dirs = ["/usr/local/include", "/opt/local/include"]
-    @lib_dirs     = ["/usr/local/lib", "/opt/local/lib"]
+    @include_dirs = []
+    @lib_dirs     = []
 
     # File system paths
-    @bindir       = root + "/bin"
-    @include18dir = root + "/vm/capi/18/include"
-    @include19dir = root + "/vm/capi/19/include"
-    @include20dir = root + "/vm/capi/19/include"
-    @libdir       = root
-    @runtime      = @libdir + "/runtime"
-    @kernel_path  = @libdir + "/kernel"
-    @lib_path     = @libdir + "/lib"
-    @mandir       = root + "/man"
-    @gemsdir      = root + "/gems"
+    @sourcedir    = root
+    @prefixdir    = nil
+    @bindir       = nil
+    @appdir       = nil
+    @librarydir   = nil
+    @runtimedir   = nil
+    @kerneldir    = nil
+    @sitedir      = nil
+    @vendordir    = nil
+    @mandir       = nil
+    @gemsdir      = nil
+    @libdir       = nil
 
-    # Some simple defaults for when running directly out of the build dir
-    @sitedir      = @lib_path + "/site"
-    @vendordir    = @lib_path + "/vendor"
+    # TODO: fix this
+    @include18dir = nil # root + "/vm/capi/18/include"
+    @include19dir = nil # root + "/vm/capi/19/include"
+    @include20dir = nil # root + "/vm/capi/19/include"
+
+    @preserve_prefix = false
 
     @program_name = "rbx"
+    @bin_links = ["rbx", "ruby", "rake", "gem", "irb", "rdoc", "ri"]
+    @use_bin_links = true
 
     # Library configuration
     @rb_readline = false
     @vendor_zlib = false
-    @libyaml = false
 
     # Essential settings (modify these for creating releases)
     @libversion = "2.0"
-    @version = "#{@libversion}.0dev"
-    @release_date = "yyyy-mm-dd"
-    @config_version = 156
-
-    # TODO: add conditionals for platforms
-    if RbConfig::CONFIG["build_os"] =~ /darwin/
-      @ldshared = "#{@cc} -bundle -undefined suppress -flat_namespace"
-    else
-      @ldshared = "#{@cc} -shared"
-    end
-
-    import_env
+    @version = "#{@libversion}.0rc1"
+    @release_date = "2012-11-02"
+    @config_version = 162
   end
 
   # Set up system commands to run in cmd.exe on Windows. Either Windows
@@ -150,18 +138,97 @@ class Configure
     old_backquote %[cmd.exe /C "#{cmd}"]
   end
 
-  def import_env
-    @user_cflags =   ENV['CFLAGS']
-    @user_cppflags = ENV['CPPFLAGS']
-    @user_ldflags =  ENV['LDFLAGS']
-  end
-
   def expand(path)
     File.expand_path(path)
   end
 
+  def expand_install_dir(dir)
+    dir = expand dir
+    if !@preserve_prefix and File.directory?(dir) and dir !~ /(rubinius|rbx).*\/?$/
+      original = dir
+      dir += "/rubinius/#{@libversion}"
+      @log.write "The directory #{original} already exists, installing to #{dir}"
+    end
+    dir
+  end
+
+  def set_host
+    /([^-]+)-([^-]+)-(.*)/ =~ @host
+    @cpu, @vendor, @os = $1, $2, $3
+
+    # TODO: For better cross-compiling support, it may be necessary to
+    # use the feature facility to check for a define in the compiler.
+    @windows = (@host =~ /mingw|mswin/) != nil
+    @darwin  = (@host =~ /darwin/) != nil
+    @bsd     = (@host =~ /bsd/) != nil
+    @linux   = (@host =~ /linux/) != nil
+  end
+
+  def set_system_commands
+    # Set up system commands to run in cmd.exe on Windows.
+    if @windows
+      alias :old_system    :system
+      alias :old_backquote :`
+      alias :system        :msys_system
+      alias :`             :msys_backquote
+    end
+  end
+
+  def set_filesystem_paths
+    @prefixdir = @prefixdir ? expand_install_dir(@prefixdir) : @sourcedir
+
+    if @appdir
+      dir = expand_install_dir @appdir
+
+      @librarydir = dir + "/lib"
+      @runtimedir = dir + "/runtime"
+      @kerneldir  = dir + "/kernel"
+      @sitedir    = dir + "/site"
+      @vendordir  = dir + "/vendor"
+    end
+
+    @bindir       = @prefixdir + "/bin" unless @bindir
+    @librarydir   = @prefixdir + "/lib" unless @librarydir
+    @runtimedir   = @prefixdir + "/runtime" unless @runtimedir
+    @kerneldir    = @prefixdir + "/kernel" unless @kerneldir
+    @sitedir      = @prefixdir + "/site" unless @sitedir
+    @vendordir    = @prefixdir + "/vendor" unless @vendordir
+    @mandir       = @prefixdir + "/man" unless @mandir
+    @gemsdir      = @prefixdir + "/gems" unless @gemsdir
+    @include18dir = @prefixdir + "/vm/capi/18/include" unless @include18dir
+    @include19dir = @prefixdir + "/vm/capi/19/include" unless @include19dir
+    @include20dir = @prefixdir + "/vm/capi/19/include" unless @include20dir
+
+    dirs = [@bindir, @librarydir, @runtimedir, @kerneldir, @sitedir, @vendordir,
+            @mandir, @gemsdir, @include18dir, @include19dir, @include20dir]
+
+    parts = dirs.map { |d| d.split "/" }
+
+    i = 0
+    total = parts[0].size
+    prefix = []
+
+    while i < total
+      part = parts[0][i]
+      break unless parts.all? { |p| p[i] == part }
+      prefix << part
+      i += 1
+    end
+
+    @prefixdir = prefix.join "/"
+    size = @prefixdir.size
+
+    dirs.each { |d| d.replace d[size..-1] }
+
+    unless @prefixdir == @sourcedir
+      @stagingdir = "#{@sourcedir}/staging"
+      @stagingdir = File.join @stagingdir, @prefixdir if @preserve_prefix
+    end
+  end
+
   def options
-    o = Rubinius::Options.new "Usage: configure [options]", 30
+    @options = Rubinius::Options.new "Usage: configure [options]", 30
+    o = @options
     o.left_align
 
     o.doc " Configure settings"
@@ -248,105 +315,103 @@ class Configure
     end
 
     o.on "--update-prebuilt", "Update prebuilt LLVM packages from the internet" do
-      update_prebuilt @llvm_generic_prebuilt, true
+      @need_update_prebuilt = true
     end
 
     o.doc "\n System settings"
 
-    o.on "--with-include-dir", "PATH", "Add path the default include search paths" do |path|
-      @include_dirs << path
+    o.on "--with-include-dir", "DIR", "Add DIR to the default include search paths" do |dir|
+      @include_dirs << dir
     end
 
-    o.on "--with-lib-dir", "PATH", "Add path the default library search paths" do |path|
-      @lib_dirs << path
+    o.on "--with-lib-dir", "DIR", "Add DIR to the default library search paths" do |dir|
+      @lib_dirs << dir
+    end
+
+    o.on "--with-opt-dir", "DIR", "Add DIR/include and DIR/lib to include and library search paths" do |dir|
+      @include_dirs << "#{dir}/include"
+      @lib_dirs     << "#{dir}/lib" << "#{dir}/lib64"
     end
 
     o.on "--libc", "NAME", "Use NAME as the libc for FFI" do |name|
       @libc = name
     end
 
+    o.on "--host", "HOST", "Override guessed platform with HOST specification" do |host|
+      @log.write "------------------------------------------------------"
+      @log.write "\nChanging the platform specification can cause Rubinius"
+      @log.write "to malfunction. The current platform specification is:"
+      @log.write "\n#{@host}"
+      @log.write "\n------------------------------------------------------"
+
+      @host = host
+    end
+
+    o.doc "\n Program names"
+
+    o.on "--program-name", "NAME", "Build Rubinius executable as NAME" do |name|
+      @program_name = name
+    end
+
+    o.on "--bin-link", "NAME", "Create NAME as binary symlink to program name" do |name|
+      @bin_links << name
+    end
+
+    o.on "--no-bin-links", "Do not create any symlinks to program name" do
+      @use_bin_links = false
+    end
+
     o.doc "\n File system paths for installing Rubinius"
 
     o.on "-P", "--prefix", "PATH", "Install Rubinius in subdirectories of PATH" do |dir|
-      @install = true
-      dir = File.expand_path dir
-
-      if !ENV['RELEASE'] and File.directory? dir and dir !~ /(rubinius|rbx).*\/?$/
-        old = dir
-        dir += "/rubinius/#{@libversion}"
-        @log.write "The directory #{old} already exists, installing to #{dir}"
-      end
-
-      @bindir       = dir + "/bin"
-      @include18dir = dir + "/18/include"
-      @include19dir = dir + "/19/include"
-      @include20dir = dir + "/19/include"
-      @libdir       = dir
-      @runtime      = @libdir + "/runtime"
-      @kernel_path  = @libdir + "/kernel"
-      @lib_path     = @libdir + "/lib"
-      @mandir       = dir + "/man"
-      @gemsdir      = dir + "/gems"
-
-      @sitedir      = dir + "/site"
-      @vendordir    = dir + "/vendor"
+      @prefixdir = dir
     end
 
     o.on "-B", "--bindir", "PATH", "Install Rubinius executable in PATH" do |dir|
-      @install = true
       @bindir = expand dir
     end
 
     o.on "-I", "--includedir", "PATH", "Install Rubinius C-API include files in PATH" do |dir|
-      @install = true
-      path = expand dir
-      @include18dir = path + "/18"
-      @include19dir = path + "/19"
-      @include20dir = path + "/20"
+      dir = expand dir
+      @include18dir = dir + "/18"
+      @include19dir = dir + "/19"
+      @include20dir = dir + "/20"
     end
 
-    o.on "-L", "--libdir", "PATH", "Install Ruby library in PATH" do |dir|
-      @install      = true
-      @libdir       = expand(dir) + "/rubinius/#{@libversion}"
-      @runtime      = @libdir + "/runtime"
-      @kernel_path  = @libdir + "/kernel"
-      @lib_path     = @libdir + "/lib"
+    o.on "-A", "--appdir", "PATH", "Install Ruby runtime and libraries in PATH" do |dir|
+      @appdir = dir
+    end
 
-      @sitedir      = @libdir + "/site"
-      @vendordir    = @libdir + "/vendor"
+    o.on "-L", "--libdir", "PATH", "Install Rubinius shared library in PATH" do |dir|
+      @libdir = dir
     end
 
     o.on "-M", "--mandir", "PATH", "Install man pages in PATH" do |dir|
-      @install = true
       @mandir = expand dir
     end
 
     o.on "-G", "--gemsdir", "PATH", "Install gems in PATH" do |dir|
-      @install = true
       @gemsdir = expand dir
     end
 
     o.on "--sitedir", "PATH", "Install site-specific Ruby code in PATH" do |dir|
-      @install = true
       @sitedir = expand dir
     end
 
     o.on "--vendordir", "PATH", "Install vendor-specific Ruby code in PATH" do |dir|
-      @install = true
       @vendordir = expand dir
+    end
+
+    o.on "--preserve-prefix", "Use the configure prefix for staging Rubinius to install" do
+      @preserve_prefix = true
     end
 
     o.doc "\n Optional features"
 
-    @options = o
-
-    @features = {}
-
-    default_on = RUBY_PLATFORM !~ /openbsd/i
-    feature "execinfo", default_on
+    feature "execinfo", true
     feature "C-readline", true
     feature "ruby-readline", false
-    feature "vendor-zlib", !!@windows
+    feature "vendor-zlib", false
     feature "alloc-tracking", false
     feature "fibers", true
 
@@ -367,15 +432,15 @@ class Configure
 
   end
 
-  def feature(name, on_by_default=true)
-    @features[name] = on_by_default
+  def feature(name, default_value=true)
+    @features[name] = ConfigurationToggle.new default_value
 
     @options.on "--with-#{name}", "Enable #{name}" do
-      @features[name] = true
+      @features[name].configured = true
     end
 
     @options.on "--without-#{name}", "Disable #{name}" do
-      @features[name] = false
+      @features[name].configured = false
     end
   end
 
@@ -395,13 +460,9 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
     versions
   end
 
-  require 'digest/md5'
-
   def md5_checksum(md5_path, full_path)
     return Digest::MD5.file(full_path).hexdigest == File.read(md5_path).strip.split(" ").first
   end
-
-  require 'net/http'
 
   def download(url, full_path)
     begin
@@ -490,6 +551,7 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
 
     if File.exists?(@llvm_include_path)
       @llvm = :svn
+      @llvm_configure = llvm_config_cmd "#{@llvm_default}/Release/bin/llvm-config"
       return true
     else
       @log.write "  Code doesn't appear to be proper LLVM tree!"
@@ -571,6 +633,7 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
         end
         @log.write "done!"
         @llvm = :prebuilt
+        @llvm_configure = llvm_config_cmd "#{dir}/Release/bin/llvm-config"
         return true
       end
     end
@@ -586,8 +649,9 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
         sub = File.join(@llvm_path, which, "bin")
         if File.directory? sub
           @log.write "Ok! Using #{which}"
-          @llvm_configure = File.join(@llvm_path, which, "bin", "llvm-config")
+          config = File.join(@llvm_path, which, "bin", "llvm-config")
           @llvm = :config
+          @llvm_configure = llvm_config_cmd config
           return true
         end
       end
@@ -610,12 +674,17 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
   end
 
   def setup_auto
+    update_prebuilt @llvm_generic_prebuilt, true if @need_update_prebuilt
+
     @log.print "  Checking for existing LLVM library tree: "
     if File.directory?("#{@llvm_default}/Release")
-      version = `#{@perl} #{@llvm_default}/Release/bin/llvm-config --version`.strip
-      if version == "3.0"
+      config = llvm_config_cmd "#{@llvm_default}/Release/bin/llvm-config"
+      version = `#{config} --version`.strip
+      parts = version.sub(/svn$/, "").split(".").map { |i| i.to_i }
+      api_version = ("%d%02d" % parts[0..1]).to_i
+      if version >= "3.0"
         # See if this has rtti turned off and reject it.
-        if `#{@perl} #{@llvm_default}/Release/bin/llvm-config --cxxflags`.index("-fno-rtti")
+        if `#{config} --cxxflags`.index("-fno-rtti")
           @log.write "incorrectly configure (rtti is off)"
           remove_default
         else
@@ -625,7 +694,9 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
           else
             @llvm = :prebuilt
           end
-
+          @llvm_version     = version
+          @llvm_api_version = api_version
+          @llvm_configure   = config
           return
         end
       else
@@ -667,17 +738,17 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
     end
 
     if config
-      version = `#{@perl} #{config} --version`.strip
+      version = `#{llvm_config_cmd config} --version`.strip
       parts = version.sub(/svn$/, "").split(".").map { |i| i.to_i }
       api_version = ("%d%02d" % parts[0..1]).to_i
-      if `#{@perl} #{config} --cxxflags`.index("-fno-rtti")
+      if `#{llvm_config_cmd config} --cxxflags`.index("-fno-rtti")
         @log.write "incorrectly configured llvm (rtti is off)"
-      elsif api_version != 300
-        @log.write "only LLVM 3.0 is supported"
+      elsif api_version < 300
+        @log.write "only LLVM 3.x is supported"
       else
         @log.write "found! (version #{version} - api: #{api_version})"
-        @llvm_configure = config
         @llvm = :config
+        @llvm_configure = llvm_config_cmd config
         @llvm_api_version = api_version
         return true
       end
@@ -691,6 +762,12 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
   def c_includes
     @include_dirs.map do |d|
       "-I#{d}"
+    end.join(" ")
+  end
+
+  def c_libs
+    @lib_dirs.map do |d|
+      "-L#{d}"
     end.join(" ")
   end
 
@@ -714,6 +791,37 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
     exit 1
   end
 
+  def check_tools
+    @cc ||= ENV['CC'] || 'gcc'
+    @cxx ||= ENV['CXX'] || 'g++'
+
+    check_tool_version @cc, '-dumpversion', [4, 1]
+    check_tool_version @cxx, '-dumpversion', [4, 1]
+    check_tool_version 'bison', '--version', [2, 3]
+
+    @rake = ENV['RAKE'] || 'rake'
+    @tar = ENV['TAR'] || (@windows ? 'bsdtar' : 'tar')
+    @perl = ENV['PERL'] || 'perl'
+
+    @gcc_major = `#{@cc} -dumpversion`.strip.split(".")[0,2].join(".")
+    if @host == "i686-pc-linux-gnu" || @host == "x86_64-unknown-linux-gnu"
+      @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}-#{@gcc_major}.tar.bz2"
+    else
+      @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}.tar.bz2"
+    end
+
+    @user_cflags =   ENV['CFLAGS']
+    @user_cppflags = ENV['CPPFLAGS']
+    @user_ldflags =  ENV['LDFLAGS']
+
+    # TODO: add conditionals for platforms
+    if RbConfig::CONFIG["build_os"] =~ /darwin/
+      @ldshared = "#{@cc} -bundle -undefined suppress -flat_namespace"
+    else
+      @ldshared = "#{@cc} -shared"
+    end
+  end
+
   def check_program(run=true, link_libs=[])
     begin
       basename = "rbx-configure-test"
@@ -722,9 +830,13 @@ Unsupported language version requested: #{ver}. Options are #{@supported_version
         yield f
       end
 
+      File.open source, "rb" do |f|
+        @log.log f.read
+      end
+
       libs = (default_link_libs + link_libs).map { |l| "-l#{l}" }.join(" ")
 
-      cmd = "#{@cxx} #{env('CFLAGS')} -lstdc++ #{libs} -o #{basename} #{source} >>#{@log.path} 2>&1"
+      cmd = "#{@cxx} #{env('CPPFLAGS')} #{env('CXXFLAGS')} #{env('LDFLAGS')} -o #{basename} #{source} #{c_includes} #{c_libs} -lstdc++ #{libs} >>#{@log.path} 2>&1"
       @log.log cmd
       system cmd
       return $?.exitstatus unless run
@@ -892,11 +1004,11 @@ int main() { return tgetnum(""); }
   end
 
   def detect_include_dirs
-    @include_dirs = @include_dirs.select {|p| File.exists? p }
+    @include_dirs = @include_dirs.select {|p| File.directory? p }
   end
 
   def detect_lib_dirs
-    @lib_dirs = @lib_dirs.select {|p| File.exists? p }
+    @lib_dirs = @lib_dirs.select {|p| File.directory? p }
   end
 
   def has_struct_member(struct, member, includes = [])
@@ -934,6 +1046,21 @@ int main() { return tgetnum(""); }
     end
   end
 
+  def has_library(name, function, libraries, includes=[])
+    @log.print "Checking for library: #{name}: "
+
+    status = check_program true, libraries do |src|
+      includes.each do |i|
+        src.puts "#include <#{i}>"
+      end
+      src.puts "int main() { void* ptr = (void*)(&#{function}); return 0; }"
+    end
+
+    success = status == 0
+    @log.write(success ? "found!" : "not found!")
+    success
+  end
+
   def compile_check(logpart, &block)
     @log.print "Checking for #{logpart}: "
 
@@ -949,7 +1076,7 @@ int main() { return tgetnum(""); }
 
     @log.log string
 
-    cmd = "#{@cxx} -S -o - -x c #{c_includes} #{env('CFLAGS')} #{file.path} >>#{@log.path} 2>&1"
+    cmd = "#{@cxx} -S -o - -x c #{c_includes} #{c_libs} #{env('CPPFLAGS')} #{env('CFLAGS')} #{env('LDFLAGS')} #{file.path} >>#{@log.path} 2>&1"
     @log.log cmd
     system cmd
 
@@ -961,18 +1088,23 @@ int main() { return tgetnum(""); }
   end
 
   def detect_features
-    if @features["execinfo"] and has_function("backtrace", ["execinfo.h"])
+    # Default on OpenBSD is no execinfo
+    if RUBY_PLATFORM =~ /openbsd/i and @features["execinfo"].configured.nil?
+      @features["execinfo"].configured = false
+    end
+
+    if @features["execinfo"].value and has_function("backtrace", ["execinfo.h"])
       @defines << "HAS_EXECINFO"
     end
 
-    if @features["alloc-tracking"]
+    if @features["alloc-tracking"].value
       @defines << "RBX_ALLOC_TRACKING"
     end
 
-    if @features["ruby-readline"]
+    if @features["ruby-readline"].value
       @rb_readline = true
     else
-      if @features["C-readline"] and
+      if @features["C-readline"].value and
           (has_function("readline", ["stdio.h", "stdlib.h", "readline/readline.h"]) or
            has_function("readline", ["stdio.h", "stdlib.h", "editline/readline.h"]))
         @rb_readline = false
@@ -981,20 +1113,38 @@ int main() { return tgetnum(""); }
       end
     end
 
-   if @features["fibers"]
-     @fibers = true if @x86_32 or @x86_64
-   end
+    if @features["fibers"].value
+      @fibers = true if @x86_32 or @x86_64
+    end
 
-    @vendor_zlib = true if @features["vendor-zlib"]
+    # Default on Windows is vendor-zlib
+    if @windows and @features["vendor-zlib"].configured.nil?
+      @features["vendor-zlib"].configured = true
+    end
+
+    if @features["vendor-zlib"].value
+      @vendor_zlib = true
+      # Our vendored zlib uses long as the crc_table type
+      # If we update vendored zlib in the future, we have to
+      # review this and make sure we update it properly to
+      # match the newer version which like will have uint32_t
+      # as the type.
+      @include_dirs << "#{@vendordir}/zlib"
+      @lib_dirs     << "#{@vendordir}/zlib"
+    end
 
     @defines << "HAVE_SPT_REUSEARGV" if @linux || @darwin || @bsd
   end
 
-  def detect_functions
-    if has_function("yaml_parser_initialize", ["yaml.h"])
-      @libyaml = true
+  def detect_libraries
+    if @version_list.include? "19" or @version_list.include? "20"
+      unless has_library("libyaml", "yaml_parser_initialize", ["yaml"], ["yaml.h"])
+        failure "libyaml is required for 1.9 and above"
+      end
     end
+  end
 
+  def detect_functions
     if has_function("clock_gettime", ["time.h"])
       @defines << "HAVE_CLOCK_GETTIME"
     end
@@ -1068,9 +1218,17 @@ int main() { return tgetnum(""); }
     if has_header("sys/pstat.h")
       @defines << "HAVE_SYS_PSTAT_H"
     end
+
+    if has_header("valgrind/valgrind.h")
+      @defines << "HAVE_VALGRIND_H"
+    end
   end
 
   def process
+    set_host
+    set_system_commands
+    check_tools
+
     if @use_llvm
       @log.write "Configuring LLVM..."
       setup_auto
@@ -1079,6 +1237,11 @@ int main() { return tgetnum(""); }
     end
 
     @log.write ""
+
+    ["/usr/local", "/opt/local"].each do |dir|
+      @include_dirs << "#{dir}/include"
+      @lib_dirs     << "#{dir}/lib" << "#{dir}/lib64"
+    end
 
     detect_include_dirs
     detect_lib_dirs
@@ -1100,6 +1263,7 @@ int main() { return tgetnum(""); }
     detect_tr1_hash
     detect_x86
     detect_features
+    detect_libraries
     detect_functions
     detect_structures
     detect_globals
@@ -1125,6 +1289,24 @@ int main() { return tgetnum(""); }
       @build_ruby = File.join(RbConfig::CONFIG['bindir'], bin)
     end
     @build_ruby
+  end
+
+  # Checks whether the given config file is a Perl script by checking its first
+  # line for a Perl hashbang.
+  def llvm_config_cmd(config)
+    begin
+      File.open(config, "r") do |f|
+        first_line = f.readline
+        if first_line =~ /^#! ?\/usr(\/local)?\/bin\/(env )?perl/
+          "#{@perl} #{config}"
+        else
+          config
+        end
+      end
+    rescue Errno::ENOENT, ArgumentError
+      # The file doesn't exist (ENOENT) or it's a binary file (ArgumentError).
+      config
+    end
   end
 
   def get_system_name
@@ -1193,20 +1375,26 @@ int main() { return tgetnum(""); }
       @llvm_configure = ""
     end
 
+    @bin_links.delete @program_name
+
     # Write the config file used by the build system and rbconfig.rb.
     File.open @config, "wb" do |f|
       # TODO: Make this the actual data structure that is written out.
       f.puts <<-EOC
 module Rubinius
+  # Make this reload friendly without silly constant defined warnings.
   BUILD_CONFIG = {
+    :command_line   => #{@command_line.join(" ").inspect},
     :which_ruby     => :#{which_ruby},
     :build_ruby     => "#{build_ruby}",
     :build_rake     => "#{@rake}",
     :build_perl     => "#{@perl}",
     :llvm           => :#{@llvm},
     :llvm_configure => "#{@llvm_configure}",
+    :llvm_version   => "#{@llvm_version}",
     :cc             => "#{@cc}",
     :cxx            => "#{@cxx}",
+    :gcc_major      => "#{@gcc_major}",
     :user_cflags    => "#{@user_cflags}",
     :user_cppflags  => "#{@user_cppflags}",
     :user_ldflags   => "#{@user_ldflags}",
@@ -1223,19 +1411,23 @@ module Rubinius
     :x86_32         => #{@x86_32},
     :x86_64         => #{@x86_64},
     :fibers         => #{@fibers},
+    :sourcedir      => "#{@sourcedir}",
+    :stagingdir     => #{@stagingdir.inspect},
+    :prefixdir      => "#{@prefixdir}",
     :bindir         => "#{@bindir}",
-    :libdir         => "#{@libdir}",
-    :runtime        => "#{@runtime}",
-    :kernel_path    => "#{@kernel_path}",
-    :lib_path       => "#{@lib_path}",
+    :libdir         => "#{@librarydir}",
+    :runtimedir     => "#{@runtimedir}",
+    :kerneldir      => "#{@kerneldir}",
+    :sitedir        => "#{@sitedir}",
+    :vendordir      => "#{@vendordir}",
     :include18dir   => "#{@include18dir}",
     :include19dir   => "#{@include19dir}",
     :include20dir   => "#{@include20dir}",
     :mandir         => "#{@mandir}",
     :gemsdir        => "#{@gemsdir}",
-    :sitedir        => "#{@sitedir}",
-    :vendordir      => "#{@vendordir}",
     :program_name   => "#{@program_name}",
+    :bin_links      => #{@bin_links.inspect},
+    :use_bin_links  => #{@use_bin_links},
     :version        => "#{@version}",
     :libversion     => "#{@libversion}",
     :release_date   => "#{@release_date}",
@@ -1248,7 +1440,6 @@ module Rubinius
     :default_version => "#{@default_version}",
     :vendor_zlib    => #{@vendor_zlib},
     :readline       => :#{@rb_readline ? :rb_readline : :c_readline},
-    :libyaml        => #{@libyaml}
   }
 end
       EOC
@@ -1267,11 +1458,12 @@ end
 #define RBX_CPU              "#{@cpu}"
 #define RBX_VENDOR           "#{@vendor}"
 #define RBX_OS               "#{@os}"
+#define RBX_PREFIX_PATH      "#{@prefixdir}"
 #define RBX_BIN_PATH         "#{@bindir}"
 #define RBX_GEMS_PATH        "#{@gemsdir}"
-#define RBX_RUNTIME          "#{@runtime}"
-#define RBX_KERNEL_PATH      "#{@kernel_path}"
-#define RBX_LIB_PATH         "#{@lib_path}"
+#define RBX_RUNTIME_PATH     "#{@runtimedir}"
+#define RBX_KERNEL_PATH      "#{@kerneldir}"
+#define RBX_LIB_PATH         "#{@librarydir}"
 #define RBX_HDR18_PATH       "#{@include18dir}"
 #define RBX_HDR19_PATH       "#{@include19dir}"
 #define RBX_HDR20_PATH       "#{@include20dir}"
@@ -1285,12 +1477,6 @@ end
 #define RBX_LLVM_API_VER     #{@llvm_api_version}
 #define RBX_LIBC             "#{@libc}"
       EOC
-
-      if @vendor_zlib
-        f.puts %[#define RBX_ZLIB_PATH        "#{@lib_path}/zlib/"]
-      else
-        f.puts %[#define RBX_ZLIB_PATH        ""]
-      end
 
       @supported_versions.each do |ver|
         f.puts "#define RBX_DEFAULT_#{ver}       #{ver == @default_version}"
@@ -1526,6 +1712,8 @@ end
     options
     parse ARGV
 
+    set_filesystem_paths
+
     if File.join(@bindir, @program_name) == build_ruby
       @log.error "\nYou are attempting to build using the instance of Rubinius that you are building.\n\n"
 
@@ -1562,18 +1750,70 @@ irc.freenode.net and provide the following system information:
       EOM
     end
 
-    if @install
-      @log.write "\nConfigured. Run 'rake install' to install Rubinius."
-    else
-      @log.write <<-EOM
+    unless @stagingdir
+      build_msg = <<-EOM
+Rubinius has been configured.
 
-Configured. Run 'rake' to build and run VM tests and rubyspecs.
-
-After building, you may add '#{@bindir}' to your PATH or run commands directly from that directory. Available commands are:
-
-  #{@program_name}, ruby, rake, gem, irb, rdoc, ri
-
+Run 'rake' to build and test Rubinius.
       EOM
+    else
+      build_msg = <<-EOM
+Rubinius has been configured for the following paths:
+
+prefix:  #{@prefixdir}
+bin:     #{@bindir}
+lib:     #{@librarydir}
+runtime: #{@runtimedir}
+kernel:  #{@kerneldir}
+site:    #{@sitedir}
+vendor:  #{@vendordir}
+man:     #{@mandir}
+gems:    #{@gemsdir}
+
+Run 'rake' to build, test and install Rubinius.
+      EOM
+    end
+
+    links = (@bin_links + [@program_name]).uniq
+
+    @log.write <<-EOM
+------------------------------------------------------------------
+
+#{build_msg}
+After building, you may add
+
+'#{@prefixdir}#{@bindir}'
+
+to your PATH or run commands directly from that directory.
+
+Available commands are:
+
+  #{links.join(", ")}
+
+------------------------------------------------------------------
+    EOM
+  end
+
+
+  # Configuration item that has both a default and a configured value
+  class ConfigurationToggle
+    attr_reader :default, :configured
+
+    def initialize(default_value)
+      @default = !!default_value
+      @configured = nil
+    end
+
+    def configured=(value)
+      @configured = !!value
+    end
+
+    def value
+      unless @configured.nil?
+        @configured
+      else
+        @default
+      end
     end
   end
 

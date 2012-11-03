@@ -23,7 +23,7 @@ module Rubinius
       @early_option_stop = false
       @check_syntax = false
 
-      @enable_gems = Rubinius.ruby19?
+      @enable_gems = !Rubinius.ruby18?
       @load_gemfile = false
 
       version = RUBY_VERSION.split(".").first(2).join(".")
@@ -46,18 +46,8 @@ module Rubinius
 
       Object.const_set :ENV, EnvironmentVariables.new
 
-      # set terminal width
-      width = 80
-      if Terminal and ENV['TERM'] and !ENV['RBX_NO_COLS']
-        begin
-          `which tput &> /dev/null`
-          if $?.exitstatus == 0
-            res = `tput cols`.to_i
-            width = res if res > 0
-          end
-        end
-      end
-      Rubinius.const_set 'TERMINAL_WIDTH', width
+      # Set the default visibility for the top level binding
+      TOPLEVEL_BINDING.variables.method_visibility = :private
 
       $VERBOSE = false
 
@@ -74,25 +64,7 @@ module Rubinius
     def system_load_path
       @stage = "setting up system load path"
 
-      if env_lib = ENV['RBX_LIB'] and File.exists?(env_lib)
-        @main_lib = File.expand_path(env_lib)
-      else
-        # use configured library path and check its existence
-        @main_lib = Rubinius::LIB_PATH
-
-        unless File.exists?(@main_lib)
-          STDERR.puts <<-EOM
-Rubinius was configured to find standard library files at:
-
-  #{@main_lib}
-
-but that directory does not exist.
-
-Set the environment variable RBX_LIB to the directory
-containing the Rubinius standard library files.
-          EOM
-        end
-      end
+      @main_lib = Rubinius::LIB_PATH
 
       @main_lib_bin = File.join @main_lib, "bin"
       Rubinius.const_set :PARSER_EXT_PATH, "#{@main_lib}/ext/melbourne/rbx/melbourne20"
@@ -140,6 +112,12 @@ containing the Rubinius standard library files.
       # Set up a handler for SIGINT that raises Interrupt on the main thread
       Signal.trap("INT") do |sig|
         raise Interrupt, "Thread has been interrupted"
+      end
+
+      ["HUP", "QUIT", "TERM", "ALRM", "USR1", "USR2"].each do |signal|
+        Signal.trap(signal) do |sig|
+          raise SignalException, sig
+        end
       end
     end
 
@@ -244,7 +222,7 @@ containing the Rubinius standard library files.
       options.doc "\nRuby options"
       options.on "-", "Read and evaluate code from STDIN" do
         @run_irb = false
-        $0 = "-"
+        set_program_name "-"
         CodeLoader.execute_script STDIN.read
       end
 
@@ -270,7 +248,7 @@ containing the Rubinius standard library files.
         $DEBUG = true
       end
 
-      if Rubinius.ruby19?
+      unless Rubinius.ruby18?
         options.on "--disable-gems", "Do not automatically load rubygems on startup" do
           @enable_gems = false
         end
@@ -278,7 +256,7 @@ containing the Rubinius standard library files.
 
       options.on "-e", "CODE", "Compile and execute CODE" do |code|
         @run_irb = false
-        $0 = "(eval)"
+        set_program_name "(eval)"
         @evals << code
       end
 
@@ -318,14 +296,15 @@ containing the Rubinius standard library files.
           end
         end
       else
+        options.on "-K", "Ignored $KCODE option for compatibility"
         options.on "-U", "Set Encoding.default_internal to UTF-8" do
-          Encoding.default_internal = "UTF-8"
+          set_default_internal_encoding('UTF-8')
         end
 
         options.on "-E", "ENC", "Set external:internal character encoding to ENC" do |enc|
           ext, int = enc.split(":")
           Encoding.default_external = ext if ext and !ext.empty?
-          Encoding.default_internal = int if int and !int.empty?
+          set_default_internal_encoding(int) if int and !int.empty?
         end
       end
 
@@ -372,7 +351,7 @@ containing the Rubinius standard library files.
           end
         end
 
-        $0 = script if file
+        set_program_name script if file
 
         # if missing, let it die a natural death
         @script = file ? file : script
@@ -461,6 +440,8 @@ VM Options
         exit 0
       end
 
+      exit 0 if Rubinius::Config["config.print"]
+
       if str = Rubinius::Config['tool.require']
         begin
           require str
@@ -477,6 +458,22 @@ VM Options
         check_syntax
       end
     end
+
+    # Sets $0 ($PROGRAM_NAME) without changing the process title
+    def set_program_name(name)
+      Rubinius::Globals.set! :$0, name
+    end
+    private :set_program_name
+
+    def set_default_internal_encoding(encoding)
+      if @default_internal_encoding_set && Encoding.default_internal.name != encoding
+        raise RuntimeError, "Default internal encoding already set to '#{Encoding.default_internal.name}'."
+      else
+        @default_internal_encoding_set = true
+        Encoding.default_internal = encoding
+      end
+    end
+    private :set_default_internal_encoding
 
     RUBYOPT_VALID_OPTIONS = "IdvwWrKT"
 
@@ -547,17 +544,6 @@ to rebuild the compiler.
       end
     end
 
-    def agent
-      @stage = "starting agent ruby thread"
-
-      # Fixing a bug on OSX 10.5
-      return
-
-      if Rubinius::Config['agent.start']
-        Rubinius::AgentRegistry.spawn_thread
-      end
-    end
-
     def rubygems
       @stage = "loading Rubygems"
 
@@ -624,7 +610,7 @@ to rebuild the compiler.
         end
       end
 
-      $0 = @script
+      set_program_name @script
       CodeLoader.load_script @script, @debugging
     end
 
@@ -685,7 +671,7 @@ to rebuild the compiler.
 
       if Terminal
         repr = ENV['RBX_REPR'] || "bin/irb"
-        $0 = repr
+        set_program_name repr
         prog = File.join @main_lib, repr
         begin
           # HACK: this was load but load raises LoadError
@@ -699,7 +685,7 @@ to rebuild the compiler.
           exit 1
         end
       else
-        $0 = "(eval)"
+        set_program_name "(eval)"
         CodeLoader.execute_script "p #{STDIN.read}"
       end
     end
@@ -730,7 +716,7 @@ to rebuild the compiler.
       run_at_exits
 
       @stage = "running object finalizers"
-      GC.start
+      ::GC.start
       ObjectSpace.run_finalizers
 
       # TODO: Fix these with better -X processing
@@ -813,55 +799,56 @@ to rebuild the compiler.
 
     # Orchestrate everything.
     def main
-      begin
-        begin
-          preamble
-          system_load_path
-          signals
-          load_compiler
-          preload
-          detect_alias
-          options
-          load_paths
-          debugger
-          agent
-          rubygems
-          gemfile
-          requires
-          evals
-          script
-          irb
+      preamble
+      system_load_path
+      signals
+      load_compiler
+      preload
+      detect_alias
+      options
+      load_paths
+      debugger
+      rubygems
+      gemfile
+      requires
+      evals
+      script
+      irb
 
-        rescue SystemExit => e
-          # Let the outer rescue grab it
-          raise e
+    rescue SystemExit => e
+      @exit_code = e.status
 
-        rescue SyntaxError => e
-          @exit_code = 1
+      epilogue
+    rescue SyntaxError => e
+      @exit_code = 1
 
-          show_syntax_error(e)
+      show_syntax_error(e)
 
-          STDERR.puts "\nBacktrace:"
-          STDERR.puts e.awesome_backtrace.show
-        rescue Object => e
-          @exit_code = 1
+      STDERR.puts "\nBacktrace:"
+      STDERR.puts e.awesome_backtrace.show
+      epilogue
+    rescue Interrupt => e
+      @exit_code = 1
 
-          write_last_error(e)
-          e.render "An exception occurred #{@stage}"
-        end
+      write_last_error(e)
+      e.render "An exception occurred #{@stage}"
+      epilogue
+    rescue SignalException => e
+      Signal.trap(e.signo, "SIG_DFL")
+      Process.kill e.signo, Process.pid
+      epilogue
+    rescue Object => e
+      @exit_code = 1
 
-      # We do this, run epilogue both on catching SystemExit and
-      # if there was no exception so that the at_exit handlers
-      # can see $! as the SystemExit object the system is going to
-      # exit with.
-      rescue SystemExit => e
-        @exit_code = e.status
-        epilogue
-      else
-        epilogue
-      ensure
-        done
-      end
+      write_last_error(e)
+      e.render "An exception occurred #{@stage}"
+      epilogue
+    else
+      # We do this, run epilogue both in the rescue blocks and also here,
+      # so that at_exit{} hooks can read $!.
+      epilogue
+    ensure
+      done
     end
 
     # Creates an instance of the Loader and runs it. We catch any uncaught

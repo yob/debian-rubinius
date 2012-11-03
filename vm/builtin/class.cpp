@@ -5,13 +5,13 @@
 #include "on_stack.hpp"
 
 #include "builtin/class.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/lookuptable.hpp"
 #include "builtin/methodtable.hpp"
 #include "builtin/module.hpp"
 #include "builtin/symbol.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/string.hpp"
 #include "builtin/system.hpp"
 #include "builtin/packed_object.hpp"
@@ -82,7 +82,7 @@ namespace rubinius {
         obj->init_header(self, YoungObjectZone, PackedObject::type);
       } else {
         obj = reinterpret_cast<PackedObject*>(
-            state->memory()->new_object_fast(state, self, size, PackedObject::type));
+            state->memory()->new_object_typed(state, self, size, PackedObject::type));
       }
 
       // Don't use 'this' !!! The above code might have GC'd
@@ -116,7 +116,7 @@ namespace rubinius {
             obj->init_header(self, YoungObjectZone, PackedObject::type);
           } else {
             obj = reinterpret_cast<PackedObject*>(
-                state->memory()->new_object_fast(state, self, size, PackedObject::type));
+                state->memory()->new_object_typed(state, self, size, PackedObject::type));
           }
         } else {
           return collect_and_allocate(state, gct, self, calling_environment);

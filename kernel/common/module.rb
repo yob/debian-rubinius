@@ -20,7 +20,7 @@ class Module
   private :included
 
   def self.nesting
-    scope = Rubinius::CompiledMethod.of_sender.scope
+    scope = Rubinius::CompiledCode.of_sender.scope
     nesting = []
     while scope and scope.module != Object
       nesting << scope.module
@@ -76,11 +76,11 @@ class Module
   def __class_variables__
     Rubinius.primitive :module_class_variables
 
-    raise PrimitiveFailure, "module_class_variables failed"
+    raise PrimitiveFailure, "Module#__class_variables__ primitive failed"
   end
 
   def class_variables
-    Rubinius.convert_to_names(__class_variables__)
+    Rubinius::Type.convert_to_names(__class_variables__)
   end
 
   def name
@@ -137,7 +137,11 @@ class Module
     @method_table.store name, nil, :undef
     Rubinius::VM.reset_method_cache(name)
 
-    if Rubinius::Type.object_respond_to? self, :method_undefined
+    if Rubinius::Type.object_kind_of?(self, Class) and obj = Rubinius::Type.singleton_class_object(self)
+      Rubinius.privately do
+        obj.singleton_method_undefined(name)
+      end
+    else
       method_undefined(name)
     end
 
@@ -155,7 +159,11 @@ class Module
 
       Rubinius::VM.reset_method_cache(name)
 
-      if Rubinius::Type.object_respond_to? self, :method_removed
+      if Rubinius::Type.object_kind_of?(self, Class) and obj = Rubinius::Type.singleton_class_object(self)
+        Rubinius.privately do
+          obj.singleton_method_removed(name)
+        end
+      else
         method_removed(name)
       end
     end
@@ -245,7 +253,7 @@ class Module
       end
     end
 
-    Rubinius.convert_to_names ary
+    Rubinius::Type.convert_to_names ary
   end
 
   def public_instance_methods(all=true)
@@ -282,7 +290,7 @@ class Module
       end
     end
 
-    Rubinius.convert_to_names ary
+    Rubinius::Type.convert_to_names ary
   end
 
   private :filter_methods
@@ -298,11 +306,11 @@ class Module
 
     case meth
     when Proc::Method
-      cm = Rubinius::DelegatedMethod.new(name, :call, meth, false)
+      code = Rubinius::DelegatedMethod.new(name, :call, meth, false)
     when Proc
       be = meth.block.dup
       be.change_name name
-      cm = Rubinius::BlockEnvironment::AsMethod.new(be)
+      code = Rubinius::BlockEnvironment::AsMethod.new(be)
       meth = lambda(&meth)
     when Method
       exec = meth.executable
@@ -311,27 +319,23 @@ class Module
       # a huge delegated method chain. So instead, just see through them at one
       # level always.
       if exec.kind_of? Rubinius::DelegatedMethod
-        cm = exec
+        code = exec
       else
-        cm = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth.unbind, true)
+        code = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth.unbind, true)
       end
     when UnboundMethod
       exec = meth.executable
       # Same reasoning as above.
       if exec.kind_of? Rubinius::DelegatedMethod
-        cm = exec
+        code = exec
       else
-        cm = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth, true)
+        code = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth, true)
       end
     else
       raise TypeError, "wrong argument type #{meth.class} (expected Proc/Method)"
     end
 
-    @method_table.store name, cm, :public
-    Rubinius::VM.reset_method_cache name
-
-    method_added name
-
+    Rubinius.add_method name, code, self, :public
     meth
   end
 
@@ -340,11 +344,7 @@ class Module
   def thunk_method(name, value)
     thunk = Rubinius::Thunk.new(value)
     name = Rubinius::Type.coerce_to_symbol name
-
-    @method_table.store name, thunk, :public
-    Rubinius::VM.reset_method_cache name
-
-    method_added(name)
+    Rubinius.add_method name, thunk, self, :public
 
     name
   end
@@ -404,19 +404,21 @@ class Module
   def protected(*args)
     if args.empty?
       Rubinius::VariableScope.of_sender.method_visibility = :protected
-      return
+    else
+      args.each { |meth| set_visibility(meth, :protected) }
     end
 
-    args.each { |meth| set_visibility(meth, :protected) }
+    self
   end
 
   def public(*args)
     if args.empty?
       Rubinius::VariableScope.of_sender.method_visibility = nil
-      return
+    else
+      args.each { |meth| set_visibility(meth, :public) }
     end
 
-    args.each { |meth| set_visibility(meth, :public) }
+    self
   end
 
   def private_class_method(*args)
@@ -437,8 +439,8 @@ class Module
     raise LocalJumpError, "Missing block" unless block_given?
 
     env = prc.block
-    static_scope = env.repoint_scope self
-    return env.call_under(self, static_scope, *args)
+    constant_scope = env.repoint_scope self
+    return env.call_under(self, constant_scope, *args)
   end
   alias_method :class_exec, :module_exec
 
@@ -464,8 +466,10 @@ class Module
   # with the name.
 
   def const_missing(name)
-    mod_name = Rubinius::Type.module_name self
-    raise NameError, "Missing or uninitialized constant: #{mod_name}::#{name}"
+    unless self == Object
+      mod_name = "#{Rubinius::Type.module_name self}::"
+    end
+    raise NameError, "Missing or uninitialized constant: #{mod_name}#{name}"
   end
 
   def <(other)
@@ -567,6 +571,16 @@ class Module
 
   private :method_added
 
+  def method_removed(name)
+  end
+
+  private :method_removed
+
+  def method_undefined(name)
+  end
+
+  private :method_undefined
+
   def initialize_copy(other)
     @method_table = other.method_table.dup
 
@@ -591,10 +605,10 @@ class Module
 
   private :initialize_copy
 
-  def add_ivars(cm)
-    case cm
-    when Rubinius::CompiledMethod
-      new_ivars = cm.literals.select { |l| l.kind_of?(Symbol) and l.is_ivar? }
+  def add_ivars(code)
+    case code
+    when Rubinius::CompiledCode
+      new_ivars = code.literals.select { |l| l.kind_of?(Symbol) and l.is_ivar? }
       return if new_ivars.empty?
 
       if @seen_ivars
@@ -608,12 +622,12 @@ class Module
       end
     when Rubinius::AccessVariable
       if @seen_ivars
-        @seen_ivars << cm.name
+        @seen_ivars << code.name
       else
-        @seen_ivars = [cm.name]
+        @seen_ivars = [code.name]
       end
     else
-      raise "Unknown type of method to learn ivars - #{cm.class}"
+      raise "Unknown type of method to learn ivars - #{code.class}"
     end
   end
 
@@ -630,14 +644,14 @@ class Module
     g.use_detected
     g.encode
 
-    cm = g.package Rubinius::CompiledMethod
+    code = g.package Rubinius::CompiledCode
 
-    cm.scope =
-      Rubinius::StaticScope.new(self, Rubinius::StaticScope.new(Object))
+    code.scope =
+      Rubinius::ConstantScope.new(self, Rubinius::ConstantScope.new(Object))
 
-    Rubinius.add_method name, cm, self, :public
+    Rubinius.add_method name, code, self, :public
 
-    return cm
+    return code
   end
 
   def freeze

@@ -24,12 +24,14 @@ class Proc
 
     args = []
 
+    my_self = self
     m = lambda? ? :lambda : :proc
-    f = send(m) {|*x|
-      args += x
-      if args.length >= arity
-        self[*args]
+    f = __send__(m) {|*x|
+      call_args = args + x
+      if call_args.length >= my_self.arity
+        my_self[*call_args]
       else
+        args = call_args
         f
       end
     }
@@ -62,11 +64,15 @@ class Proc
 
   class Method < Proc 
     def self.__from_method__(meth)
-      obj = allocate()
+      obj = __allocate__
       obj.bound_method = meth
       obj.lambda_style!
 
       return obj
+    end
+
+    def __yield__(*args, &block)
+      @bound_method.call(*args, &block)
     end
   end
 

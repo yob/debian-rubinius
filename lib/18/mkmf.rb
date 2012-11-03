@@ -132,11 +132,7 @@ end
 
 # ---------------------- Changed for Rubinius --------------------------------
 if dir = ENV['RBX_CAPI_DIR']
-  if Rubinius.ruby18?
-    $topdir = "#{dir}/vm/capi/18/include"
-  else
-    $topdir = "#{dir}/vm/capi/19/include"
-  end
+  $topdir = "#{dir}/vm/capi/18/include"
 else
   $topdir = RbConfig::CONFIG["rubyhdrdir"]
 end
@@ -1720,6 +1716,19 @@ def init_mkmf(config = CONFIG)
   $LIBRUBYARG_SHARED = config['LIBRUBYARG_SHARED']
   $DEFLIBPATH = [$extmk ? "$(topdir)" : "$(libdir)"]
   $DEFLIBPATH.unshift(".")
+
+  # ---------------------- Changed for Rubinius --------------------------------
+  # Make sure that we include the lib paths here that we may find libraries so
+  # that built in extensions will also find them if they have been configured
+  # at build time for Rubinius.
+  Rubinius::BUILD_CONFIG[:include_dirs].each do |inc|
+    $INCFLAGS << " -I#{inc.quote}"
+  end
+  Rubinius::BUILD_CONFIG[:lib_dirs].each do |lib|
+    $DEFLIBPATH << lib
+  end
+  # ----------------------------------------------------------------------------
+
   $LIBPATH = []
   $INSTALLFILES = []
   $NONINSTALLFILES = [/~\z/, /\A#.*#\z/, /\A\.#/, /\.bak\z/i, /\.orig\z/, /\.rej\z/, /\.l[ao]\z/, /\.o\z/]

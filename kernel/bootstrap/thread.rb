@@ -31,6 +31,11 @@ class Thread
     Kernel.raise PrimitiveFailure, "Thread#raise primitive failed"
   end
 
+  def kill_prim
+    Rubinius.primitive :thread_kill
+    Kernel.raise PrimitiveFailure, "Thread#kill primitive failed"
+  end
+
   def wakeup
     Rubinius.primitive :thread_wakeup
     Kernel.raise ThreadError, "Thread#wakeup primitive failed, thread may be dead"
@@ -38,22 +43,22 @@ class Thread
 
   def priority
     Rubinius.primitive :thread_priority
-    Kernel.raise ThreadError, "Unable to get Thread priority"
+    Kernel.raise ThreadError, "Thread#priority primitive failed"
   end
 
   def priority=(val)
     Rubinius.primitive :thread_set_priority
-    Kernel.raise ThreadError, "Unable to set Thread priority"
+    Kernel.raise ThreadError, "Thread#priority= primitive failed"
   end
 
   def __context__
     Rubinius.primitive :thread_context
-    Kernel.raise PrimitiveFailure, "Thread#__context__ failed"
+    Kernel.raise PrimitiveFailure, "Thread#__context__ primitive failed"
   end
 
   def native_join
     Rubinius.primitive :thread_join
-    Kernel.raise PrimitiveFailure, "Thread#native_join failed"
+    Kernel.raise PrimitiveFailure, "Thread#native_join primitive failed"
   end
 
   def mri_backtrace
@@ -63,10 +68,13 @@ class Thread
 
   def unlock_locks
     Rubinius.primitive :thread_unlock_locks
-    Kernel.raise PrimitiveFailure, "Thread#unlock_locks failed"
+    Kernel.raise PrimitiveFailure, "Thread#unlock_locks primitive failed"
   end
 
-  class Die < Exception; end # HACK
+  def current_exception
+    Rubinius.primitive :thread_current_exception
+    Kernel.raise PrimitiveFailure, "Thread#current_exception primitive failed"
+  end
 
   @abort_on_exception = false
 
@@ -103,8 +111,7 @@ class Thread
       run obj
       dup
 
-      push_false
-      send :setup, 1, true
+      send :setup, 0, true
       pop
 
       run args
@@ -148,30 +155,19 @@ class Thread
   end
 
   def alive?
-    @lock.receive
-    @alive
-  ensure
-    @lock.send nil
+    Rubinius.synchronize(self) do
+      @alive
+    end
   end
 
   def stop?
     !alive? || @sleep
   end
 
-  def kill
-    @dying = true
-    @sleep = false
-    self.raise Die
-  end
-
-  alias_method :exit, :kill
-  alias_method :terminate, :kill
-
   def sleeping?
-    @lock.receive
-    @sleep
-  ensure
-    @lock.send nil
+    Rubinius.synchronize(self) do
+      @sleep
+    end
   end
 
   def status
@@ -204,12 +200,12 @@ class Thread
 
   def join_inner(timeout = undefined)
     result = nil
-    @lock.receive
+    Rubinius.lock(self)
     begin
       if @alive
         jc = Rubinius::Channel.new
         @joins << jc
-        @lock.send nil
+        Rubinius.unlock(self)
         begin
           if timeout.equal? undefined
             while true
@@ -230,32 +226,39 @@ class Thread
             end
           end
         ensure
-          @lock.receive
+          Rubinius.lock(self)
         end
       end
       Kernel.raise @exception if @exception
       result = yield
     ensure
-      @lock.send nil
+      Rubinius.unlock(self)
     end
     result
   end
   private :join_inner
 
-  def raise(exc=$!, msg=nil, trace=nil)
-    @lock.receive
+  def raise(exc=undefined, msg=nil, trace=nil)
+    Rubinius.lock(self)
 
     unless @alive
-      @lock.send nil
+      Rubinius.unlock(self)
       return self
     end
 
     begin
+      if exc.equal?(undefined)
+        no_argument = true
+        exc = active_exception
+      end
+
       if exc.respond_to? :exception
         exc = exc.exception msg
         Kernel.raise TypeError, 'exception class/object expected' unless Exception === exc
         exc.set_backtrace trace if trace
-      elsif exc.kind_of? String or !exc
+      elsif no_argument
+        exc = RuntimeError.exception nil
+      elsif exc.kind_of? String
         exc = RuntimeError.exception exc
       else
         Kernel.raise TypeError, 'exception class/object expected'
@@ -265,12 +268,14 @@ class Thread
         STDERR.puts "Exception: #{exc.message} (#{exc.class})"
       end
 
-      Kernel.raise exc if self == Thread.current
+      if self == Thread.current
+        Kernel.raise exc
+      else
+        raise_prim exc
+      end
     ensure
-      @lock.send nil
+      Rubinius.unlock(self)
     end
-
-    raise_prim exc
   end
   private :raise_prim
 

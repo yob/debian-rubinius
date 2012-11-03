@@ -5,10 +5,11 @@
 
 namespace rubinius {
   struct CallFrame;
+  class Object;
 
   class Park {
-    thread::Condition cond_;
-    thread::Mutex mutex_;
+    utilities::thread::Condition cond_;
+    utilities::thread::Mutex mutex_;
     bool sleeping_;
     bool wake_;
 
@@ -19,7 +20,7 @@ namespace rubinius {
     {}
 
     void unpark() {
-      thread::Mutex::LockGuard lg(mutex_);
+      utilities::thread::Mutex::LockGuard lg(mutex_);
       if(!sleeping_) return;
 
       wake_ = true;
@@ -27,12 +28,12 @@ namespace rubinius {
     }
 
     bool parked_p() {
-      thread::Mutex::LockGuard lg(mutex_);
+      utilities::thread::Mutex::LockGuard lg(mutex_);
       return sleeping_;
     }
 
-    void park(STATE, CallFrame* call_frame);
-    bool park_timed(STATE, CallFrame* call_frame, struct timespec* ts);
+    Object* park(STATE, CallFrame* call_frame);
+    Object* park_timed(STATE, CallFrame* call_frame, struct timespec* ts);
   };
 }
 

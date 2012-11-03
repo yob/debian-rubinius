@@ -119,7 +119,7 @@ namespace rubinius {
    * MarkSweepGC, which handles large objects.
    *
    * ObjectMemory also manages the memory used for CodeResources, which are
-   * internal objects used for executing Ruby code. This includes VMMethod,
+   * internal objects used for executing Ruby code. This includes MachineCode,
    * various JIT classes, and FFI data.
    *
    * Basic tasks:
@@ -131,6 +131,9 @@ namespace rubinius {
    */
 
   class ObjectMemory : public gc::WriteBarrier, public Lockable {
+
+    utilities::thread::SpinLock allocation_lock_;
+    utilities::thread::SpinLock inflation_lock_;
 
     /// BakerGC used for the young generation
     BakerGC* young_;
@@ -174,13 +177,13 @@ namespace rubinius {
 
     /// A condition variable used to control access to
     /// to_finalize_
-    thread::Condition finalizer_var_;
+    utilities::thread::Condition finalizer_var_;
 
     /// Mutex used to manage lock contention
-    thread::Mutex contention_lock_;
+    utilities::thread::Mutex contention_lock_;
 
     /// Condition variable used to manage lock contention
-    thread::Condition contention_var_;
+    utilities::thread::Condition contention_var_;
 
     TypedRoot<Thread*> finalizer_thread_;
 
@@ -278,8 +281,6 @@ namespace rubinius {
     Object* new_object_typed_mature(STATE, Class* cls, size_t bytes, object_type type);
     Object* new_object_typed_enduring(STATE, Class* cls, size_t bytes, object_type type);
 
-    Object* new_object_fast(STATE, Class* cls, size_t bytes, object_type type);
-
     template <class T>
       T* new_object_bytes(STATE, Class* cls, size_t& bytes) {
         bytes = ObjectHeader::align(sizeof(T) + bytes);
@@ -317,7 +318,7 @@ namespace rubinius {
     void assign_object_id(STATE, Object* obj);
     Integer* assign_object_id_ivar(STATE, Object* obj);
     bool inflate_lock_count_overflow(STATE, ObjectHeader* obj, int count);
-    LockStatus contend_for_lock(STATE, GCToken gct, ObjectHeader* obj, bool* error, size_t us=0);
+    LockStatus contend_for_lock(STATE, GCToken gct, ObjectHeader* obj, size_t us, bool interrupt);
     void release_contention(STATE, GCToken gct);
     bool inflate_and_lock(STATE, ObjectHeader* obj);
     bool inflate_for_contention(STATE, ObjectHeader* obj);
@@ -330,7 +331,7 @@ namespace rubinius {
     void memstats();
 
     void validate_handles(capi::Handles* handles);
-    void prune_handles(capi::Handles* handles, bool check_forwards);
+    void prune_handles(capi::Handles* handles, std::list<capi::Handle*>* cached, BakerGC* young);
 
     ObjectPosition validate_object(Object* obj);
     bool valid_young_object_p(Object* obj);
@@ -362,6 +363,7 @@ namespace rubinius {
 
     InflatedHeader* inflate_header(STATE, ObjectHeader* obj);
     void inflate_for_id(STATE, ObjectHeader* obj, uint32_t id);
+    void inflate_for_handle(STATE, ObjectHeader* obj, capi::Handle* handle);
 
     void in_finalizer_thread(STATE);
     void start_finalizer_thread(STATE);

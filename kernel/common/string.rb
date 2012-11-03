@@ -7,6 +7,13 @@ DEFAULT_RECORD_SEPARATOR = "\n"
 class String
   include Comparable
 
+  def self.allocate
+    str = super()
+    str.__data__ = Rubinius::ByteArray.new(1)
+    str.num_bytes = 0
+    str
+  end
+
   attr_accessor :data
 
   alias_method :__data__, :data
@@ -62,12 +69,14 @@ class String
   end
 
   def +(other)
-    String.new(self) << StringValue(other)
+    other = StringValue(other)
+    Rubinius::Type.check_encoding_compatible self, other
+    String.new(self) << other
   end
 
   def <=>(other)
     if other.kind_of?(String)
-      @data.compare_bytes(other.__data__, @num_bytes, other.size)
+      @data.compare_bytes(other.__data__, @num_bytes, other.bytesize)
     else
       return unless other.respond_to?(:to_str) && other.respond_to?(:<=>)
       return unless tmp = (other <=> self)
@@ -254,10 +263,28 @@ class String
     str.delete!(*strings) || str
   end
 
-  def clear
-    Rubinius.check_frozen
-    self.num_bytes = 0
-    self
+  def delete!(*strings)
+    raise ArgumentError, "wrong number of arguments" if strings.empty?
+
+    table = count_table(*strings).__data__
+
+    self.modify!
+
+    i, j = 0, -1
+    while i < @num_bytes
+      c = @data[i]
+      unless table[c] == 1
+        @data[j+=1] = c
+      end
+      i += 1
+    end
+
+    if (j += 1) < @num_bytes
+      self.num_bytes = j
+      self
+    else
+      nil
+    end
   end
 
   def downcase
@@ -570,7 +597,7 @@ class String
     end
 
     while match = pattern.match_from(self, index)
-      fin = match.end(0)
+      fin = match.full.at(1)
 
       if match.collapsing?
         if char = find_character(fin)
@@ -616,174 +643,35 @@ class String
   end
 
   def split(pattern=nil, limit=undefined)
-
-    # Odd edge case
-    return [] if empty?
-
-    tail_empty = false
-
-    if limit.equal?(undefined)
-      limited = false
-    else
-      limit = Rubinius::Type.coerce_to limit, Fixnum, :to_int
-
-      if limit > 0
-        return [self.dup] if limit == 1
-        limited = true
-      else
-        tail_empty = true
-        limited = false
-      end
-    end
-
-    pattern ||= ($; || " ")
-
-    if pattern == ' '
-      if limited
-        lim = limit
-      elsif tail_empty
-        lim = -1
-      else
-        lim = 0
-      end
-
-      return Rubinius.invoke_primitive :string_awk_split, self, lim
-    elsif pattern.nil?
-      pattern = /\s+/
-    elsif pattern.kind_of?(Regexp)
-      # Pass
-    else
-      pattern = StringValue(pattern) unless pattern.kind_of?(String)
-
-      if !limited and limit.equal?(undefined)
-        if pattern.empty?
-          ret = []
-          pos = 0
-
-          while pos < @num_bytes
-            ret << byteslice(pos, 1)
-            pos += 1
-          end
-
-          return ret
-        else
-          return split_on_string(pattern)
-        end
-      end
-
-      pattern = Regexp.new(Regexp.quote(pattern))
-    end
-
-    start = 0
-    ret = []
-
-    # Handle // as a special case.
-    if pattern.source.empty?
-      kcode = $KCODE
-
-      begin
-        if pattern.options and kc = pattern.kcode
-          $KCODE = kc
-        end
-
-        if limited
-          iterations = limit - 1
-          while c = self.find_character(start)
-            ret << c
-            start += c.size
-            iterations -= 1
-
-            break if iterations == 0
-          end
-
-          ret << self[start..-1]
-        else
-          while c = self.find_character(start)
-            ret << c
-            start += c.size
-          end
-
-          # Use #byteslice because it returns the right class and taints
-          # automatically. This is just appending a "", which is this
-          # strange protocol if a negative limit is passed in
-          ret << byteslice(0,0) if tail_empty
-        end
-      ensure
-        $KCODE = kcode
-      end
-
-      return ret
-    end
-
-    last_match = nil
-    last_match_end = 0
-
-    while match = pattern.match_from(self, start)
-      break if limited && limit - ret.size <= 1
-
-      collapsed = match.collapsing?
-
-      unless collapsed && (match.begin(0) == last_match_end)
-        ret << match.pre_match_from(last_match_end)
-        ret.push(*match.captures.compact)
-      end
-
-      if collapsed
-        start += 1
-      elsif last_match && last_match.collapsing?
-        start = match.end(0) + 1
-      else
-        start = match.end(0)
-      end
-
-      last_match = match
-      last_match_end = last_match.end(0)
-    end
-
-    if last_match
-      ret << last_match.post_match
-    elsif ret.empty?
-      ret << dup
-    end
-
-    # Trim from end
-    if !ret.empty? and (limit.equal?(undefined) || limit == 0)
-      while s = ret.last and s.empty?
-        ret.pop
-      end
-    end
-
-    ret
-  end
-
-  def split_on_string(pattern)
-    pos = 0
-
-    ret = []
-
-    pat_size = pattern.size
-
-    while pos < @num_bytes
-      nxt = find_string(pattern, pos)
-      break unless nxt
-
-      match_size = nxt - pos
-      ret << byteslice(pos, match_size)
-
-      pos = nxt + pat_size
-    end
-
-    # No more separators, but we need to grab the last part still.
-    ret << byteslice(pos, @num_bytes - pos)
-
-    ret.pop while !ret.empty? and ret.last.empty?
-
-    ret
+    Rubinius::Splitter.split(self, pattern, limit)
   end
 
   def squeeze(*strings)
     str = dup
     str.squeeze!(*strings) || str
+  end
+
+  def squeeze!(*strings)
+    return if @num_bytes == 0
+
+    table = count_table(*strings).__data__
+    self.modify!
+
+    i, j, last = 1, 0, @data[0]
+    while i < @num_bytes
+      c = @data[i]
+      unless c == last and table[c] == 1
+        @data[j+=1] = last = c
+      end
+      i += 1
+    end
+
+    if (j += 1) < @num_bytes
+      self.num_bytes = j
+      self
+    else
+      nil
+    end
   end
 
   def start_with?(*prefixes)
@@ -967,6 +855,9 @@ class String
     return if @num_bytes == 0
 
     invert = source[0] == ?^ && source.length > 1
+    if invert
+      source.slice!(0)
+    end
     expanded = source.tr_expand! nil, true
     size = source.size
     src = source.__data__
@@ -1096,13 +987,14 @@ class String
       str = StringValue(strings[i]).dup
       if str.size > 1 && str.getbyte(0) == 94 # ?^
         pos, neg = 0, 1
+        str.slice!(0)
       else
         pos, neg = 1, 0
       end
 
       set = String.pattern 256, neg
       str.tr_expand! nil, true
-      j, chars = -1, str.size
+      j, chars = -1, str.bytesize
       set.setbyte(str.getbyte(j), pos) while (j += 1) < chars
 
       table.apply_and! set

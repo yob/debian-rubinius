@@ -46,13 +46,13 @@ namespace rubinius {
      * the constructor for Globals, again, at the END of the list. */
 
     /* classes for the core 'types' */
-    TypedRoot<Class*> cmethod, tuple, module, basicobject, object, array;
+    TypedRoot<Class*> compiled_code, tuple, module, basicobject, object, array;
     TypedRoot<Class*> klass, methtbl, bytearray;
     TypedRoot<Class*> blokenv, bignum, regexp, matchdata;
     TypedRoot<Class*> string, symbol, io;
     TypedRoot<Class*> nil_class, true_class, false_class, fixnum_class, undef_class;
     TypedRoot<Class*> floatpoint, nmc, list, list_node;
-    TypedRoot<Class*> channel, thread, staticscope, lookuptable;
+    TypedRoot<Class*> channel, thread, constantscope, lookuptable;
     TypedRoot<Class*> iseq, executable, native_function, iobuffer;
     TypedRoot<Class*> included_module;
 
@@ -119,7 +119,7 @@ namespace rubinius {
     TypedRoot<Class*> special_classes[SPECIAL_CLASS_SIZE];
 
     Globals() :
-      cmethod(&roots),
+      compiled_code(&roots),
       tuple(&roots),
       module(&roots),
       basicobject(&roots),
@@ -146,7 +146,7 @@ namespace rubinius {
       list_node(&roots),
       channel(&roots),
       thread(&roots),
-      staticscope(&roots),
+      constantscope(&roots),
       lookuptable(&roots),
       iseq(&roots),
       executable(&roots),

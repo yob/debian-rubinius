@@ -3,35 +3,35 @@
 
 #include "llvm/state.hpp"
 
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/class.hpp"
 
 #include "object_utils.hpp"
 
 namespace rubinius {
   class BlockEnvironment;
-  class CompiledMethod;
+  class CompiledCode;
 
   class BackgroundCompileRequest {
-    CompiledMethod* method_;
+    CompiledCode* method_;
     Object* extra_;
 
     bool is_block_;
-    thread::Condition* waiter_;
+    utilities::thread::Condition* waiter_;
 
   public:
-    BackgroundCompileRequest(STATE, CompiledMethod* cm, Object* extra, bool is_block=false)
-      : method_(cm)
+    BackgroundCompileRequest(STATE, CompiledCode* code, Object* extra, bool is_block=false)
+      : method_(code)
       , extra_(extra)
       , is_block_(is_block)
       , waiter_(0)
     {}
 
-    VMMethod* vmmethod() {
-      return method_->backend_method();
+    MachineCode* machine_code() {
+      return method_->machine_code();
     }
 
-    CompiledMethod* method() {
+    CompiledCode* method() {
       return method_;
     }
 
@@ -51,15 +51,15 @@ namespace rubinius {
       return is_block_;
     }
 
-    void set_waiter(thread::Condition* cond) {
+    void set_waiter(utilities::thread::Condition* cond) {
       waiter_ = cond;
     }
 
-    thread::Condition* waiter() {
+    utilities::thread::Condition* waiter() {
       return waiter_;
     }
 
-    void set_method(CompiledMethod* meth) {
+    void set_method(CompiledCode* meth) {
       method_ = meth;
     }
 

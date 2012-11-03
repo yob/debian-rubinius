@@ -1,6 +1,10 @@
 #include "builtin/nativemethod.hpp"
+#include "objectmemory.hpp"
+#include "gc/baker.hpp"
+#include "util/allocator.hpp"
 #include "capi/capi.hpp"
 #include "capi/handle.hpp"
+#include "capi/handles.hpp"
 #include "capi/18/include/ruby.h"
 
 namespace rubinius {
@@ -8,16 +12,9 @@ namespace rubinius {
 
     bool Handle::valid_handle_p(STATE, Handle* handle) {
       Handles* global_handles = state->shared().global_handles();
-      Handles* cached_handles = state->shared().cached_handles();
-
-      for(Handles::Iterator i(*global_handles); i.more(); i.advance()) {
+      for(Allocator<Handle>::Iterator i(global_handles->allocator()); i.more(); i.advance()) {
         if(i.current() == handle) return true;
       }
-
-      for(Handles::Iterator i(*cached_handles); i.more(); i.advance()) {
-        if(i.current() == handle) return true;
-      }
-
       return false;
     }
 
@@ -60,24 +57,6 @@ namespace rubinius {
       std::cerr << "  references: " << references_ << std::endl;
       std::cerr << "  type:       " << type_ << std::endl;
       std::cerr << "  object:     " << object_ << std::endl;
-    }
-
-    Handle::~Handle() {
-      free_data();
-      invalidate();
-    }
-
-    Handles::~Handles() {
-      capi::Handle* handle = front();
-
-      while(handle) {
-        capi::Handle* next = static_cast<capi::Handle*>(handle->next());
-
-        remove(handle);
-        delete handle;
-
-        handle = next;
-      }
     }
 
     HandleSet::HandleSet()

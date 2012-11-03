@@ -15,11 +15,11 @@
 #include "dispatch.hpp"
 #include "call_frame.hpp"
 #include "builtin/class.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/tuple.hpp"
 #include "builtin/system.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/location.hpp"
 #include "builtin/nativemethod.hpp"
 
@@ -52,29 +52,29 @@ namespace rubinius {
     return env;
   }
 
-  VMMethod* BlockEnvironment::vmmethod(STATE, GCToken gct) {
-    return code_->internalize(state, gct);
+  MachineCode* BlockEnvironment::machine_code(STATE, GCToken gct) {
+    return compiled_code_->internalize(state, gct);
   }
 
   Object* BlockEnvironment::invoke(STATE, CallFrame* previous,
                             BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation)
   {
-    VMMethod* vmm = env->code_->backend_method();
+    MachineCode* mcode = env->compiled_code_->machine_code();
 
-    if(!vmm) {
+    if(!mcode) {
       OnStack<2> os(state, env, args.argument_container_location());
       GCTokenImpl gct;
-      vmm = env->vmmethod(state, gct);
-    }
+      mcode = env->machine_code(state, gct);
 
-    if(!vmm) {
-      Exception::internal_error(state, previous, "invalid bytecode method");
-      return 0;
+      if(!mcode) {
+        Exception::internal_error(state, previous, "invalid bytecode method");
+        return 0;
+      }
     }
 
 #ifdef ENABLE_LLVM
-    if(executor ptr = vmm->unspecialized) {
+    if(executor ptr = mcode->unspecialized) {
       return (*((BlockExecutor)ptr))(state, previous, env, args, invocation);
     }
 #endif
@@ -86,16 +86,16 @@ namespace rubinius {
   class GenericArguments {
   public:
     static bool call(STATE, CallFrame* call_frame,
-                     VMMethod* vmm, StackVariables* scope,
+                     MachineCode* mcode, StackVariables* scope,
                      Arguments& args, int flags)
     {
-      const bool has_splat = (vmm->splat_position >= 0);
+      const bool has_splat = (mcode->splat_position >= 0);
       native_int total_args = args.total();
 
       // expecting 0, got 0.
-      if(vmm->total_args == 0 && total_args == 0) {
+      if(mcode->total_args == 0 && total_args == 0) {
         if(has_splat) {
-          scope->set_local(vmm->splat_position, Array::create(state, 0));
+          scope->set_local(mcode->splat_position, Array::create(state, 0));
         }
 
         return true;
@@ -119,9 +119,9 @@ namespace rubinius {
          * the block's arguments.
          */
         if(total_args == 1
-            && (vmm->required_args > 1
-              || (vmm->required_args == 1
-                && (has_splat || vmm->splat_position < -2)))) {
+            && (mcode->required_args > 1
+              || (mcode->required_args == 1
+                && (has_splat || mcode->splat_position < -2)))) {
           Object* obj = args.get_argument(0);
           Array* ary = 0;
 
@@ -136,7 +136,7 @@ namespace rubinius {
           }
 
           if(ary) {
-            if(vmm->splat_position == -4 && vmm->required_args == 1) {
+            if(mcode->splat_position == -4 && mcode->required_args == 1) {
               args.use_argument(ary);
             } else {
               args.use_array(ary);
@@ -145,19 +145,19 @@ namespace rubinius {
         }
       }
 
-      const native_int P = vmm->post_args;
-      const native_int R = vmm->required_args;
+      const native_int P = mcode->post_args;
+      const native_int R = mcode->required_args;
 
       // M is for mandatory
       const native_int M = R - P;
       const native_int T = args.total();
 
       // DT is for declared total
-      const native_int DT = vmm->total_args;
+      const native_int DT = mcode->total_args;
       const native_int O = DT - R;
 
       // HS is for has splat
-      const native_int HS = vmm->splat_position >= 0 ? 1 : 0;
+      const native_int HS = mcode->splat_position >= 0 ? 1 : 0;
 
       // CT is for clamped total
       const native_int CT = HS ? T : MIN(T, DT);
@@ -243,7 +243,7 @@ namespace rubinius {
           ary = Array::create(state, 0);
         }
 
-        scope->set_local(vmm->splat_position, ary);
+        scope->set_local(mcode->splat_position, ary);
       }
 
       return true;
@@ -259,55 +259,57 @@ namespace rubinius {
                             BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation)
   {
-    // Don't use env->vmmethod() because it might lock and the work should already
-    // be done.
-    VMMethod* const vmm = env->code_->backend_method();
+    // Don't use env->machine_code() because it might lock and the work should
+    // already be done.
+    MachineCode* const mcode = env->compiled_code_->machine_code();
 
-    if(!vmm) {
+    if(!mcode) {
       Exception::internal_error(state, previous, "invalid bytecode method");
       return 0;
     }
 
 #ifdef ENABLE_LLVM
-    if(vmm->call_count >= 0) {
-      if(vmm->call_count >= state->shared().config.jit_call_til_compile) {
+    if(mcode->call_count >= 0) {
+      if(mcode->call_count >= state->shared().config.jit_call_til_compile) {
         LLVMState* ls = LLVMState::get(state);
 
-        ls->compile_soon(state, env->code(), env, true);
+        GCTokenImpl gct;
+        OnStack<1> os(state, env);
+        ls->compile_soon(state, gct, env->compiled_code(), previous, env, true);
 
       } else {
-        vmm->call_count++;
+        mcode->call_count++;
       }
     }
 #endif
 
-    StackVariables* scope = ALLOCA_STACKVARIABLES(vmm->number_of_locals);
+    StackVariables* scope = ALLOCA_STACKVARIABLES(mcode->number_of_locals);
 
     Module* mod = invocation.module;
     if(!mod) mod = env->module();
     scope->initialize(invocation.self, env->top_scope_->block(),
-                      mod, vmm->number_of_locals);
+                      mod, mcode->number_of_locals);
     scope->set_parent(env->scope_);
 
-    InterpreterCallFrame* frame = ALLOCA_CALLFRAME(vmm->stack_size);
+    InterpreterCallFrame* frame = ALLOCA_CALLFRAME(mcode->stack_size);
 
-    frame->prepare(vmm->stack_size);
+    frame->prepare(mcode->stack_size);
 
     frame->previous = previous;
-    frame->static_scope_ = invocation.static_scope;
+    frame->constant_scope_ = invocation.constant_scope;
 
     frame->arguments = &args;
     frame->dispatch_data = reinterpret_cast<BlockEnvironment*>(env);
-    frame->cm =       env->code_;
-    frame->scope =    scope;
+    frame->compiled_code = env->compiled_code_;
+    frame->scope = scope;
     frame->top_scope_ = env->top_scope_;
-    frame->flags =    invocation.flags | CallFrame::cCustomStaticScope
-                                       | CallFrame::cMultipleScopes
-                                       | CallFrame::cBlock;
+    frame->flags = invocation.flags | CallFrame::cCustomConstantScope
+                                    | CallFrame::cMultipleScopes
+                                    | CallFrame::cBlock;
 
     // TODO: this is a quick hack to process block arguments in 1.9.
     if(!LANGUAGE_18_ENABLED(state)) {
-      if(!GenericArguments::call(state, frame, vmm, scope, args, invocation.flags)) {
+      if(!GenericArguments::call(state, frame, mcode, scope, args, invocation.flags)) {
         return NULL;
       }
     }
@@ -333,19 +335,19 @@ namespace rubinius {
       }
 
       tooling::BlockEntry method(state, env, mod);
-      return (*vmm->run)(state, vmm, frame);
+      return (*mcode->run)(state, mcode, frame);
     } else {
-      return (*vmm->run)(state, vmm, frame);
+      return (*mcode->run)(state, mcode, frame);
     }
 #else
-    return (*vmm->run)(state, vmm, frame);
+    return (*mcode->run)(state, mcode, frame);
 #endif
   }
 
   Object* BlockEnvironment::call(STATE, CallFrame* call_frame,
                                  Arguments& args, int flags)
   {
-    BlockInvocation invocation(scope_->self(), code_->scope(), flags);
+    BlockInvocation invocation(scope_->self(), compiled_code_->scope(), flags);
     return invoke(state, call_frame, this, args, invocation);
   }
 
@@ -370,7 +372,7 @@ namespace rubinius {
 
     Object* recv = args.shift(state);
 
-    BlockInvocation invocation(recv, code_->scope(), flags);
+    BlockInvocation invocation(recv, compiled_code_->scope(), flags);
     return invoke(state, call_frame, this, args, invocation);
   }
 
@@ -388,33 +390,33 @@ namespace rubinius {
     }
 
     Object* recv = args.shift(state);
-    StaticScope* static_scope = as<StaticScope>(args.shift(state));
+    ConstantScope* constant_scope = as<ConstantScope>(args.shift(state));
 
-    BlockInvocation invocation(recv, static_scope, 0);
+    BlockInvocation invocation(recv, constant_scope, 0);
     return invoke(state, call_frame, this, args, invocation);
   }
 
 
   BlockEnvironment* BlockEnvironment::under_call_frame(STATE, GCToken gct,
-      CompiledMethod* cm, VMMethod* caller,
+      CompiledCode* ccode, MachineCode* caller,
       CallFrame* call_frame)
   {
-    OnStack<1> os(state, cm);
+    OnStack<1> os(state, ccode);
 
     state->set_call_frame(call_frame);
 
-    VMMethod* vmm = cm->internalize(state, gct);
-    if(!vmm) {
+    MachineCode* mcode = ccode->internalize(state, gct);
+    if(!mcode) {
       Exception::internal_error(state, call_frame, "invalid bytecode method");
       return 0;
     }
 
-    vmm->set_parent(caller);
+    mcode->set_parent(caller);
 
     BlockEnvironment* be = state->new_object<BlockEnvironment>(G(blokenv));
     be->scope(state, call_frame->promote_scope(state));
     be->top_scope(state, call_frame->top_scope(state));
-    be->code(state, cm);
+    be->compiled_code(state, ccode);
     be->module(state, call_frame->module());
     return be;
   }
@@ -424,7 +426,7 @@ namespace rubinius {
 
     be->scope(state, scope_);
     be->top_scope(state, top_scope_);
-    be->code(state, code_);
+    be->compiled_code(state, compiled_code_);
 
     return be;
   }
@@ -444,7 +446,7 @@ namespace rubinius {
       return cNil;
     }
 
-    target->cm->backend_method()->set_no_inline();
+    target->compiled_code->machine_code()->set_no_inline();
 
     if(target->scope) {
       return target->scope->block();
@@ -459,7 +461,7 @@ namespace rubinius {
     class_header(state, self);
     //indent_attribute(++level, "scope"); be->scope()->show(state, level);
     // indent_attribute(level, "top_scope"); be->top_scope()->show(state, level);
-    indent_attribute(level, "code"); be->code()->show(state, level);
+    indent_attribute(level, "compiled_code"); be->compiled_code()->show(state, level);
     close_body(level);
   }
 }

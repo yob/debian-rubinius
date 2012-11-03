@@ -1,13 +1,20 @@
 #ifndef RBX_CAPI_HANDLE_HPP
 #define RBX_CAPI_HANDLE_HPP
 
+#include "detection.hpp"
+
+#ifdef OS_X_10_5
+#ifndef RBX_HAVE_TR1_HASH
+#include "missing/leopard_hashtable"
+#endif
+#endif
+
 #include "vm.hpp"
 #include "gc/root.hpp"
 
 #include "capi/value.hpp"
 
 #include <tr1/unordered_set>
-#include <vector>
 
 #ifndef RIO
 #define RIO rb_io_t
@@ -35,7 +42,7 @@ namespace rubinius {
       cRFile
     };
 
-    class Handle : public LinkedList::Node {
+    class Handle {
       Object* object_;
       HandleType type_;
       int references_;
@@ -54,16 +61,16 @@ namespace rubinius {
         RFloat*   rfloat;
         RIO*      rio;
         RFile*    rfile;
+        uintptr_t next_index_;
         intptr_t  cache_data;
       } as_;
 
     public:
-      Handle(STATE, Object* obj)
-        : LinkedList::Node()
-        , object_(obj)
+      Handle()
+        : object_(NULL)
         , type_(cUnknown)
         , references_(0)
-        , checksum_(0xffff)
+        , checksum_(0)
         , flush_(0)
         , update_(0)
       {
@@ -71,8 +78,6 @@ namespace rubinius {
       }
 
       static bool valid_handle_p(STATE, Handle* handle);
-
-      ~Handle();
 
       void flush(NativeMethodEnvironment* env) {
         if(flush_) (*flush_)(env, this);
@@ -82,19 +87,23 @@ namespace rubinius {
         if(update_) (*update_)(env, this);
       }
 
-      bool valid_p() {
-        return checksum_ == 0xffff;
+      bool valid_p() const {
+        return checksum_ & 0xffff;
+      }
+
+      void validate() {
+        checksum_ = 0xffff;
       }
 
       void invalidate() {
         checksum_ = 0;
       }
 
-      Object* object() {
+      Object* object() const {
         return object_;
       }
 
-      bool in_use_p() {
+      bool in_use_p() const {
         return object_ != 0;
       }
 
@@ -102,7 +111,7 @@ namespace rubinius {
         object_ = obj;
       }
 
-      bool weak_p() {
+      bool weak_p() const {
         return references_ == 0;
       }
 
@@ -117,7 +126,7 @@ namespace rubinius {
       void debug_print();
 
       // Explict conversion functions, to keep the code clean.
-      VALUE as_value() {
+      VALUE as_value() const {
         return reinterpret_cast<VALUE>(this);
       }
 
@@ -125,41 +134,58 @@ namespace rubinius {
         return reinterpret_cast<Handle*>(val);
       }
 
-      bool is_rarray() {
+      bool is_rarray() const {
         return type_ == cRArray;
       }
 
-      bool is_rdata() {
+      bool is_rdata() const {
         return type_ == cRData;
       }
 
-      bool is_rstring() {
+      bool is_rstring() const {
         return type_ == cRString;
       }
 
-      bool is_rfloat() {
+      bool is_rfloat() const {
         return type_ == cRFloat;
       }
 
-      bool is_rio() {
+      bool is_rio() const {
         return type_ == cRIO;
       }
 
-      bool is_rfile() {
+      bool is_rfile() const {
         return type_ == cRFile;
       }
 
-      HandleType type() {
+      HandleType type() const {
          return type_;
+      }
+
+      void clear() {
+        forget_object();
+        type_ = cUnknown;
+        references_ = 0;
+        flush_ = 0;
+        update_ = 0;
       }
 
       void forget_object() {
         free_data();
+        invalidate();
         object_ = 0;
       }
 
-      RString* get_rstring() {
+      RString* get_rstring() const {
         return as_.rstring;
+      }
+
+      uintptr_t next() const {
+        return as_.next_index_;
+      }
+
+      void set_next(uintptr_t next_index) {
+        as_.next_index_ = next_index;
       }
 
       RData*  create_rdata(NativeMethodEnvironment* env);
@@ -181,23 +207,37 @@ namespace rubinius {
       bool rio_close();
     };
 
-    class Handles : public LinkedList {
+    class GlobalHandle {
+    private:
+      Handle** handle_;
+      const char* file_;
+      int line_;
+
     public:
+      GlobalHandle(Handle** handle, const char* file, int line)
+        : handle_(handle)
+        , file_(file)
+        , line_(line)
+      {}
 
-      ~Handles();
+      GlobalHandle(Handle** handle)
+        : handle_(handle)
+        , file_(NULL)
+        , line_(0)
+      {}
 
-      Handle* front() {
-        return static_cast<Handle*>(head());
+      Handle** handle() {
+        return handle_;
       }
 
-      void move(Node* node, Handles* handles) {
-        remove(node);
-        handles->add(node);
+      const char* file() {
+        return file_;
       }
 
-      typedef LinkedList::Iterator<Handles, Handle> Iterator;
+      int line() {
+        return line_;
+      }
     };
-
 
     typedef std::tr1::unordered_set<Handle*> SlowHandleSet;
 

@@ -14,7 +14,7 @@
 #include "builtin/tuple.hpp"
 #include "builtin/array.hpp"
 #include "builtin/float.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/system.hpp"
 #include "builtin/methodtable.hpp"
 #include "builtin/packed_object.hpp"
@@ -152,12 +152,28 @@ namespace rubinius {
   }
 
   Object* Object::freeze(STATE) {
-    if(reference_p()) set_frozen();
+    if(reference_p()) {
+      set_frozen();
+    } else if(!LANGUAGE_18_ENABLED(state)) {
+      LookupTable* tbl = try_as<LookupTable>(G(external_ivars)->fetch(state, this));
+
+      if(!tbl) {
+        tbl = LookupTable::create(state);
+        G(external_ivars)->store(state, this, tbl);
+      }
+      tbl->set_frozen();
+    }
+
     return this;
   }
 
   Object* Object::frozen_p(STATE) {
-    if(reference_p() && is_frozen_p()) return cTrue;
+    if(reference_p()) {
+      if(is_frozen_p()) return cTrue;
+    } else if(!LANGUAGE_18_ENABLED(state)) {
+      LookupTable* tbl = try_as<LookupTable>(G(external_ivars)->fetch(state, this));
+      if(tbl && tbl->is_frozen_p()) return cTrue;
+    }
     return cFalse;
   }
 
@@ -466,6 +482,18 @@ namespace rubinius {
        */
       if(!sc || sc->attached_instance() != this) {
         sc = SingletonClass::attach(state, this);
+      }
+
+      /* We might have to fixup the chain further here. If we have inherited
+       * from another class with a singleton class, this might be incorrect.
+       * We have to correct this until we either find the correctly attached
+       * class or when we have hit the cycle of the class being the singleton
+       * class itself.
+       */
+      if(SingletonClass* sc_klass = try_as<SingletonClass>(sc->klass())) {
+        if(sc != sc_klass->attached_instance() && sc_klass != sc_klass->klass()) {
+          SingletonClass::attach(state, sc);
+        }
       }
 
       infect(state, sc);

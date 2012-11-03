@@ -108,7 +108,7 @@ namespace rubinius {
 
     JITBasicBlock* current_jbb_;
 
-    Value* vmm_debugging_;
+    Value* machine_code_debugging_;
 
   public:
 
@@ -189,7 +189,7 @@ namespace rubinius {
 
       init_out_args();
 
-      vmm_debugging_ = constant(&info().vmm->debugging, llvm::PointerType::getUnqual(ls_->Int32Ty));
+      machine_code_debugging_ = constant(&info().machine_code->debugging, llvm::PointerType::getUnqual(ls_->Int32Ty));
     }
 
     void set_has_side_effects() {
@@ -325,7 +325,7 @@ namespace rubinius {
         return check_active;
       }
 
-      Value* is_debugging = b().CreateLoad(vmm_debugging_, "loaded_debugging_flag");
+      Value* is_debugging = b().CreateLoad(machine_code_debugging_, "loaded_debugging_flag");
 
       BasicBlock* restart_in_interp = new_block("restart");
 
@@ -1070,10 +1070,11 @@ namespace rubinius {
     }
 
     Value* get_literal(opcode which) {
-      Value* gep = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos");
-      Value* cm =  b().CreateLoad(gep, "cm");
+      Value* gep = b().CreateConstGEP2_32(call_frame_, 0,
+          offset::CallFrame::compiled_code, "code_pos");
+      Value* code =  b().CreateLoad(gep, "code");
 
-      gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::literals, "literals_pos");
+      gep = b().CreateConstGEP2_32(code, 0, offset::CompiledCode::literals, "literals_pos");
       Value* lits = b().CreateLoad(gep, "literals");
 
       Value* idx2[] = {
@@ -1141,12 +1142,12 @@ namespace rubinius {
     }
 
     void visit_push_stack_local(opcode which) {
-      Value* pos = stack_slot_position(vmmethod()->stack_size - which - 1);
+      Value* pos = stack_slot_position(machine_code()->stack_size - which - 1);
       stack_push(b().CreateLoad(pos, "stack_local"));
     }
 
     void visit_set_stack_local(opcode which) {
-      Value* pos = stack_slot_position(vmmethod()->stack_size - which - 1);
+      Value* pos = stack_slot_position(machine_code()->stack_size - which - 1);
       b().CreateStore(stack_top(), pos);
     }
 
@@ -1464,69 +1465,76 @@ namespace rubinius {
     void visit_send_stack(opcode which, opcode args) {
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
 
-      MethodCacheEntry* mce = cache->cache();
-      atomic::memory_barrier();
+      int classes_seen = cache->classes_seen();
 
-      if(mce) {
-        BasicBlock* failure = new_block("fallback");
-        BasicBlock* cont = new_block("continue");
-
-        Inliner inl(context(), *this, cache, args, failure);
-        if(inl.consider()) {
-          if(!inl.fail_to_send() && !in_inlined_block()) {
-            BasicBlock* cur = b().GetInsertBlock();
-
-            set_block(failure);
-            emit_uncommon();
-
-            set_block(cur);
-            stack_remove(args+1);
-            if(inl.check_for_exception()) {
-              check_for_exception(inl.result());
-            }
-            stack_push(inl.result());
-
-            type::KnownType kt = inl.guarded_type();
-
-            if(kt.local_source_p() && kt.known_p()) {
-              current_jbb_->add_local(kt.local_id(), kt);
-            }
-
-            b().CreateBr(cont);
-
-            set_block(cont);
-          } else {
-            // Emit both the inlined code and a send for it
-            BasicBlock* inline_block = b().GetInsertBlock();
-
-            b().CreateBr(cont);
-
-            set_block(failure);
-            Value* send_res = inline_cache_send(args, cache);
-            b().CreateBr(cont);
-
-            set_block(cont);
-            PHINode* phi = b().CreatePHI(ObjType, 2, "send_result");
-            phi->addIncoming(inl.result(), inline_block);
-            phi->addIncoming(send_res, failure);
-
-            stack_remove(args + 1);
-            check_for_exception(phi);
-
-            stack_push(phi);
-          }
-
-          allow_private_ = false;
-          return;
-        }
+      if(!classes_seen) {
+        invoke_inline_cache(cache, args);
+        return;
       }
 
-      set_has_side_effects();
+      BasicBlock* failure = new_block("fallback");
+      BasicBlock* cont = new_block("continue");
 
-      Value* ret = inline_cache_send(args, cache);
-      stack_remove(args + 1);
-      check_for_exception(ret);
-      stack_push(ret);
+      Inliner inl(context(), *this, cache, args, failure);
+      bool res = classes_seen > 1 ? inl.consider_poly() : inl.consider_mono();
+
+      // If we have tried to reoptimize here a few times and failed, we use
+      // a regular send as the fallback so we don't try to keep reoptimizing in
+      // the future.
+      if(cache->seen_classes_overflow() > state()->shared().config.jit_deoptimize_overflow_threshold) {
+        inl.use_send_for_failure();
+      }
+
+      if(!res) {
+        invoke_inline_cache(cache, args);
+        return;
+      }
+
+      if(!inl.fail_to_send() && !in_inlined_block()) {
+        BasicBlock* cur = b().GetInsertBlock();
+
+        set_block(failure);
+        emit_uncommon();
+
+        set_block(cur);
+        stack_remove(args+1);
+        if(inl.check_for_exception()) {
+          check_for_exception(inl.result());
+        }
+        stack_push(inl.result());
+
+        if(classes_seen == 1) {
+          type::KnownType kt = inl.guarded_type();
+
+          if(kt.local_source_p() && kt.known_p()) {
+            current_jbb_->add_local(kt.local_id(), kt);
+          }
+        }
+
+        b().CreateBr(cont);
+
+        set_block(cont);
+
+      } else {
+        // Emit both the inlined code and a send for it
+        BasicBlock* inline_block = b().GetInsertBlock();
+
+        b().CreateBr(cont);
+
+        set_block(failure);
+        Value* send_res = inline_cache_send(args, cache);
+        b().CreateBr(cont);
+
+        set_block(cont);
+        PHINode* phi = b().CreatePHI(ObjType, 2, "send_result");
+        phi->addIncoming(inl.result(), inline_block);
+        phi->addIncoming(send_res, failure);
+
+        stack_remove(args + 1);
+        check_for_exception(phi);
+
+        stack_push(phi);
+      }
 
       allow_private_ = false;
     }
@@ -1571,7 +1579,7 @@ namespace rubinius {
         nfo = *i;
 
         JITInlineBlock* ib = nfo->inline_block();
-        if(ib && ib->code() && (always || !ib->created_object_p())) {
+        if(ib && ib->machine_code() && (always || !ib->created_object_p())) {
           JITMethodInfo* creator = ib->creation_scope();
           assert(creator);
 
@@ -1677,37 +1685,23 @@ namespace rubinius {
     }
 
     void visit_create_block(opcode which) {
-      // If we're creating a block to pass directly to
-      // send_stack_with_block, delay doing so.
-      if(next_op() == InstructionSequence::insn_send_stack_with_block) {
-        // Push a placeholder and register which literal we would
-        // use for the block. The later send handles whether to actually
-        // emit the call to create the block (replacing the placeholder)
-        stack_push(constant(cNil));
-        current_block_ = (int)which;
-      } else {
-        current_block_ = -1;
-        emit_create_block(which, true);
-      }
+      emit_create_block(which, true);
+      current_block_ = (int) which;
     }
 
     void visit_send_stack_with_block(opcode which, opcode args) {
       set_has_side_effects();
 
       bool has_literal_block = (current_block_ >= 0);
-      bool block_on_stack = !has_literal_block;
 
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-      CompiledMethod* block_code = 0;
+      CompiledCode* block_code = 0;
 
-      MethodCacheEntry* mce = cache->cache();
-      atomic::memory_barrier();
-
-      if(mce &&
+      if(cache->classes_seen() &&
           ls_->config().jit_inline_blocks &&
           !context().inlined_block()) {
         if(has_literal_block) {
-          block_code = try_as<CompiledMethod>(literal(current_block_));
+          block_code = try_as<CompiledCode>(literal(current_block_));
 
           // Run the policy on the block code here, if we're not going to
           // inline it, don't inline this either.
@@ -1719,7 +1713,7 @@ namespace rubinius {
           }
 
           InlineDecision decision = inline_policy()->inline_p(
-                                      block_code->backend_method(), opts);
+                                      block_code->machine_code(), opts);
           if(decision == cTooComplex) {
             if(state()->config().jit_inline_debug) {
               context().inline_log("NOT inlining")
@@ -1744,8 +1738,8 @@ namespace rubinius {
 
         Inliner inl(context(), *this, cache, args, failure);
 
-        VMMethod* code = 0;
-        if(block_code) code = block_code->backend_method();
+        MachineCode* code = 0;
+        if(block_code) code = block_code->machine_code();
         JITInlineBlock block_info(ls_, send_result, cleanup, block_code, code, &info(),
                                   current_block_);
 
@@ -1756,17 +1750,13 @@ namespace rubinius {
         // So that the inliner can find recv and args properly.
         inl.set_block_on_stack();
 
-        if(inl.consider()) {
+        if(inl.consider_mono()) {
           if(!inl.fail_to_send() && !in_inlined_block()) {
             send_result->addIncoming(inl.result(), b().GetInsertBlock());
 
             b().CreateBr(cleanup);
 
             set_block(failure);
-            if(!block_on_stack) {
-              emit_create_block(current_block_);
-              block_on_stack = true;
-            }
             emit_uncommon();
 
             set_block(cleanup);
@@ -1792,10 +1782,6 @@ namespace rubinius {
             b().CreateBr(cleanup);
 
             set_block(failure);
-            if(!block_on_stack) {
-              emit_create_block(current_block_);
-              block_on_stack = true;
-            }
 
             Value* send_res = block_send(cache, args, allow_private_);
             b().CreateBr(cleanup);
@@ -1825,11 +1811,6 @@ namespace rubinius {
 
 use_send:
 
-      // Detect a literal block being created and passed here.
-      if(!block_on_stack) {
-        emit_create_block(current_block_);
-      }
-
       Value* ret = block_send(cache, args, allow_private_);
       stack_remove(args + 2);
       check_for_return(ret);
@@ -1841,10 +1822,6 @@ use_send:
 
     void visit_send_stack_with_splat(opcode which, opcode args) {
       set_has_side_effects();
-
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
 
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
       Value* ret = splat_send(cache->name, args, allow_private_);
@@ -1913,7 +1890,7 @@ use_send:
         //
         JITInlineBlock* ib = info().inline_block();
 
-        if(ib && ib->code()) {
+        if(ib && ib->machine_code()) {
           stack_push(constant(cTrue));
         } else {
           stack_push(constant(cFalse));
@@ -1948,10 +1925,6 @@ use_send:
     void visit_send_super_stack_with_block(opcode which, opcode args) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
-
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
 
       b().CreateStore(get_self(), out_args_recv_);
@@ -1974,10 +1947,6 @@ use_send:
     void visit_send_super_stack_with_splat(opcode which, opcode args) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
-
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
       Value* ret = super_send(cache->name, args, true);
       stack_remove(args + 2);
@@ -1989,10 +1958,6 @@ use_send:
 
     void visit_zsuper(opcode which) {
       set_has_side_effects();
-
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
 
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
 
@@ -2250,26 +2215,27 @@ use_send:
       if(info().is_block && !in_inlined_block()) {
         Value* scope = b().CreateLoad(
             b().CreateConstGEP2_32(call_frame_, 0,
-                                   offset::CallFrame::static_scope, "scope_pos"),
-            "cm");
+                                   offset::CallFrame::constant_scope, "scope_pos"),
+            "compiled_code");
 
         stack_push(scope);
       } else {
-        Value* cm;
+        Value* code;
 
         if(in_inlined_block()) {
           JITMethodInfo* creator = info().creator_info();
           assert(creator);
-          cm = b().CreateLoad(
-              b().CreateConstGEP2_32(creator->call_frame(), 0, offset::CallFrame::cm, "cm_pos"),
-              "cm");
+          code = b().CreateLoad(
+              b().CreateConstGEP2_32(creator->call_frame(), 0,
+                  offset::CallFrame::compiled_code, "code_pos"), "compiled_code");
         } else {
-          cm = b().CreateLoad(
-              b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos"),
-              "cm");
+          code = b().CreateLoad(
+              b().CreateConstGEP2_32(call_frame_, 0,
+                  offset::CallFrame::compiled_code, "code_pos"), "compiled_code");
         }
 
-        Value* gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::scope, "scope_pos");
+        Value* gep = b().CreateConstGEP2_32(code, 0,
+            offset::CompiledCode::scope, "scope_pos");
         stack_push(b().CreateLoad(gep, "scope"));
       }
     }
@@ -2718,14 +2684,14 @@ use_send:
 
       // Hey! Look at that! We know the block we'd be yielding to
       // statically! woo! ok, lets just emit the code for it here!
-      if(ib && ib->code()) {
+      if(ib && ib->machine_code()) {
         context().set_inlined_block(true);
 
         JITMethodInfo* creator = ib->creation_scope();
         assert(creator);
 
         // Count the block against the policy size total
-        inline_policy()->increase_size(ib->code());
+        inline_policy()->increase_size(ib->machine_code());
 
         // We inline unconditionally here, since we make the decision
         // wrt the block when we are considering inlining the send that
@@ -3207,7 +3173,7 @@ use_send:
 
         // Hey! Look at that! We know the block we'd be yielding to
         // statically! woo! ok, lets just emit the code for it here!
-        if(ib && ib->code()) {
+        if(ib && ib->machine_code()) {
           skip_yield_stack_ = true; // skip the yield_stack, we're doing the work here.
 
           context().set_inlined_block(true);
@@ -3216,7 +3182,7 @@ use_send:
           assert(creator);
 
           // Count the block against the policy size total
-          inline_policy()->increase_size(ib->code());
+          inline_policy()->increase_size(ib->machine_code());
 
           // We inline unconditionally here, since we make the decision
           // wrt the block when we are considering inlining the send that
@@ -3289,7 +3255,7 @@ use_send:
     }
 
     void visit_passed_arg(opcode count) {
-      count += vmmethod()->post_args;
+      count += machine_code()->post_args;
 
       if(called_args_ >= 0) {
         if((int)count < called_args_) {

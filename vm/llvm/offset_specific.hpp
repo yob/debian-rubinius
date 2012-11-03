@@ -77,9 +77,9 @@ namespace Class {
 }
 namespace CallFrame {
   const static int previous = 0;
-  const static int static_scope = 1;
+  const static int constant_scope = 1;
   const static int dispatch_data = 2;
-  const static int cm = 3;
+  const static int compiled_code = 3;
   const static int flags = 4;
   const static int ip = 5;
   const static int jit_data = 6;
@@ -133,7 +133,7 @@ namespace UnwindInfo {
   const static int stack_depth = 1;
   const static int type = 2;
 }
-namespace CompiledMethod {
+namespace CompiledCode {
   const static int header = 0;
   const static int metadata = 1;
   const static int name = 2;
@@ -156,7 +156,7 @@ namespace CompiledMethod {
 namespace BlockInvocation {
   const static int flags = 0;
   const static int self = 1;
-  const static int static_scope = 2;
+  const static int constant_scope = 2;
   const static int module = 3;
 }
 namespace ObjectFlags {

@@ -6,6 +6,8 @@
 #include "builtin/class.hpp"
 #include "builtin/exception.hpp"
 
+#include "capi/handles.hpp"
+
 #include "objectmemory.hpp"
 #include "configuration.hpp"
 
@@ -22,21 +24,27 @@ namespace rubinius {
                                      nw.flags64);
   }
 
-  bool ObjectHeader::set_inflated_header(InflatedHeader* ih) {
+  bool ObjectHeader::set_inflated_header(STATE, InflatedHeader* ih) {
     HeaderWord orig = header;
 
-    ih->reset_object(this);
-    if(!ih->update(header)) return false;
+    if(orig.f.inflated) return false;
 
-    HeaderWord new_val = header;
-    new_val.all_flags = ih;
-    new_val.f.meaning = eAuxWordInflated;
+    ih->reset_object(this);
+    if(!ih->update(state, orig)) return false;
+
+    HeaderWord new_val = orig;
+    new_val.all_flags  = ih;
+    new_val.f.inflated = 1;
+
+    // Make sure to include a barrier to the header is all properly initialized
+    atomic::memory_barrier();
 
     // Do a spin update so if someone else is trying to update it at the same time
     // we catch that and keep trying until we get our version in.
     while(!header.atomic_set(orig, new_val)) {
       orig = header;
-      if(!ih->update(header)) return false;
+      if(orig.f.inflated) return false;
+      if(!ih->update(state, orig)) return false;
     }
 
     return true;
@@ -47,15 +55,16 @@ namespace rubinius {
     // we don't hit currently, so don't worry about it for now.
     InflatedHeader* ih = inflated_header();
     header.f = ih->flags();
+    header.f.inflated = 0;
     header.f.meaning = eAuxWordEmpty;
     header.f.aux_word = 0;
 
     return ih;
   }
 
-  bool InflatedHeader::update(HeaderWord header) {
+  bool InflatedHeader::update(STATE, HeaderWord header) {
     // Gain exclusive access to the insides of the InflatedHeader.
-    thread::Mutex::LockGuard lg(mutex_);
+    utilities::thread::Mutex::LockGuard lg(mutex_);
 
     flags_ = header.f;
 
@@ -78,7 +87,11 @@ namespace rubinius {
       }
 
       return true;
-
+    case eAuxWordHandle:
+      handle_ = state->shared().global_handles()->find_index(state, flags_.aux_word);
+      flags_.meaning = eAuxWordEmpty;
+      flags_.aux_word = 0;
+      return true;
     // Unsupported state, abort.
     default:
       return false;
@@ -95,7 +108,8 @@ namespace rubinius {
     // the new one into place.
     HeaderWord orig = header;
 
-    orig.f.meaning = eAuxWordEmpty;
+    orig.f.inflated = 0;
+    orig.f.meaning  = eAuxWordEmpty;
     orig.f.aux_word = 0;
 
     HeaderWord new_val = orig;
@@ -107,22 +121,350 @@ namespace rubinius {
 
     orig = header;
 
+    if(orig.f.inflated) {
+      ObjectHeader::header_to_inflated_header(orig)->set_object_id(id);
+      return;
+    }
+
     switch(orig.f.meaning) {
     case eAuxWordEmpty:
+      rubinius::bug("ObjectHeader claimed to be empty");
     case eAuxWordObjID:
-      assert(0);
-    case eAuxWordInflated:
-      ObjectHeader::header_to_inflated_header(orig)->set_object_id(id);
+      // Someone beat us to it, ignore it
       break;
     case eAuxWordLock:
-      // not inflated, and the aux_word is being used for locking.
+    case eAuxWordHandle:
+      // not inflated, and the aux_word is being used for locking
+      // or a handle.
       // Inflate!
 
       om->inflate_for_id(state, this, id);
     }
   }
 
-  LockStatus ObjectHeader::lock(STATE, GCToken gct, size_t us) {
+  // Run only while om's lock is held.
+  void ObjectHeader::set_handle_index(STATE, uintptr_t handle_index) {
+    // Construct 2 new headers: one is the version we hope that
+    // is in use and the other is what we want it to be. The CAS
+    // the new one into place.
+    HeaderWord orig = header;
+
+    orig.f.inflated = 0;
+    orig.f.meaning  = eAuxWordEmpty;
+    orig.f.aux_word = 0;
+
+    HeaderWord new_val = orig;
+
+    new_val.f.meaning = eAuxWordHandle;
+    new_val.f.aux_word = (uint32_t) handle_index;
+
+    if(handle_index < UINT32_MAX && header.atomic_set(orig, new_val)) return;
+
+    capi::Handle* handle = state->shared().global_handles()->find_index(state, handle_index);
+
+    orig = header;
+
+    if(orig.f.inflated) {
+      ObjectHeader::header_to_inflated_header(orig)->set_handle(state, handle);
+      return;
+    }
+
+    switch(orig.f.meaning) {
+    case eAuxWordEmpty:
+      rubinius::bug("ObjectHeader claimed to be empty");
+    case eAuxWordHandle:
+      // Someone else has beaten us to it, clear the allocated
+      // header so it can be cleaned up on the next GC
+      handle->clear();
+      break;
+    case eAuxWordLock:
+    case eAuxWordObjID:
+      // not inflated, and the aux_word is being used for locking
+      // or a handle.
+      // Inflate!
+
+      state->memory()->inflate_for_handle(state, this, handle);
+    }
+  }
+
+  unsigned int ObjectHeader::inc_age() {
+    for(;;) {
+      if(inflated_header_p()) {
+        return inflated_header()->inc_age();
+      } else {
+        HeaderWord orig      = header;
+        orig.f.inflated      = 0;
+        HeaderWord new_val   = orig;
+        unsigned int new_age = new_val.f.age++;
+
+        if(header.atomic_set(orig, new_val)) return new_age;
+      }
+    }
+  }
+
+  void ObjectHeader::set_age(unsigned int age) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_age(age);
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.age      = age;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::mark(unsigned int which) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->mark(which);
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Marked   = which;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::clear_mark() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->clear_mark();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Marked   = 0;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  bool ObjectHeader::pin() {
+    // Can't pin young objects!
+    if(young_object_p()) return false;
+
+    for(;;) {
+      if(inflated_header_p()) {
+        return inflated_header()->pin();
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Pinned   = 1;
+
+        if(header.atomic_set(orig, new_val)) return true;
+      }
+    }
+    return true;
+  }
+
+  void ObjectHeader::unpin() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->unpin();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Pinned   = 0;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_in_immix() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_in_immix();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.InImmix  = 1;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_zone(gc_zone zone) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_zone(zone);
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.zone     = zone;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_lock_contended() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_lock_contended();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.LockContended = 1;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::clear_lock_contended() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->clear_lock_contended();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.LockContended = 0;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_remember() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_remember();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Remember = 1;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::clear_remember() {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->clear_remember();
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Remember = 0;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_frozen(int val) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_frozen(val);
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Frozen   = val;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_tainted(int val) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_tainted(val);
+        return;
+      } else {
+        HeaderWord orig    = header;
+        orig.f.inflated    = 0;
+        HeaderWord new_val = orig;
+        new_val.f.Tainted  = val;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::set_untrusted(int val) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_untrusted(val);
+        return;
+      } else {
+        HeaderWord orig     = header;
+        orig.f.inflated     = 0;
+        HeaderWord new_val  = orig;
+        new_val.f.Untrusted = val;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  void ObjectHeader::clear_handle(STATE) {
+    for(;;) {
+      if(inflated_header_p()) {
+        inflated_header()->set_handle(state, NULL);
+        return;
+      } else {
+        HeaderWord orig = header;
+        orig.f.inflated = 0;
+        orig.f.meaning  = eAuxWordHandle;
+
+        HeaderWord new_val = orig;
+        new_val.f.meaning  = eAuxWordEmpty;
+        new_val.f.aux_word = 0;
+
+        if(header.atomic_set(orig, new_val)) return;
+      }
+    }
+  }
+
+  capi::Handle* ObjectHeader::handle(STATE) {
+    HeaderWord tmp = header;
+    if(tmp.f.inflated) {
+      return header_to_inflated_header(tmp)->handle(state);
+    }
+
+    capi::Handle* h = NULL;
+    switch(tmp.f.meaning) {
+    case eAuxWordHandle:
+      h = state->shared().global_handles()->find_index(state, tmp.f.aux_word);
+      return h;
+    default:
+      return NULL;
+    }
+  }
+
+  LockStatus ObjectHeader::lock(STATE, GCToken gct, size_t us, bool interrupt) {
     // #1 Attempt to lock an unlocked object using CAS.
 
     ObjectHeader* self = this;
@@ -134,12 +476,13 @@ step1:
     // the new one into place.
     HeaderWord orig = self->header;
 
-    orig.f.meaning = eAuxWordEmpty;
+    orig.f.inflated = 0;
+    orig.f.meaning  = eAuxWordEmpty;
     orig.f.aux_word = 0;
 
     HeaderWord new_val = orig;
 
-    new_val.f.meaning = eAuxWordLock;
+    new_val.f.meaning  = eAuxWordLock;
     new_val.f.aux_word = state->vm()->thread_id() << cAuxLockTIDShift;
 
     if(self->header.atomic_set(orig, new_val)) {
@@ -148,16 +491,135 @@ step1:
       }
 
       // wonderful! Locked! weeeee!
-      state->vm()->add_locked_object(this);
+      state->vm()->add_locked_object(self);
       return eLocked;
     }
 
     // Ok, something went wrong.
     //
     // #2 See if we're locking the object recursively.
-
 step2:
     orig = self->header;
+
+    // The header is inflated, use the full lock.
+    if(orig.f.inflated) {
+      InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
+      return ih->lock_mutex(state, gct, us, interrupt);
+    }
+
+    switch(orig.f.meaning) {
+    case eAuxWordEmpty:
+      // O_o why is it empty? must be some weird concurrency stuff going
+      // on. Ok, well, start over then.
+      goto step1;
+
+    case eAuxWordLock:
+      if(orig.f.aux_word >> cAuxLockTIDShift == state->vm()->thread_id()) {
+        // We're going to do this over and over until we get the new
+        // header CASd into place.
+
+        // Yep, we've already got this object locked, so increment the count.
+        int count = orig.f.aux_word & cAuxLockRecCountMask;
+
+        // We've recursively locked this object more than we can handle.
+        // Inflate the lock then.
+        if(++count > cAuxLockRecCountMax) {
+          // If we can't inflate the lock, try the whole thing over again.
+          if(!state->memory()->inflate_lock_count_overflow(state, self, count)) {
+            goto step1;
+          }
+          // The header is now set to inflated, and the current thread
+          // is holding the inflated lock.
+          if(cDebugThreading) {
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " inflated due to recursion overflow: " << count << " ]\n";
+          }
+        } else {
+          new_val = orig;
+          new_val.f.aux_word = (state->vm()->thread_id() << cAuxLockTIDShift) | count;
+
+          // Because we've got the object already locked to use, no other
+          // thread is going to be trying to lock this thread, but another
+          // thread might ask for an object_id and the header will
+          // be inflated. So if we can't swap in the new header, we'll start
+          // this step over.
+          if(!self->header.atomic_set(orig, new_val)) goto step2;
+
+          if(cDebugThreading) {
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " recursively locked with CAS: " << count << " ]\n";
+          }
+
+          // wonderful! Locked! weeeee!
+          state->vm()->add_locked_object(self);
+        }
+        return eLocked;
+
+      // Our thread id isn't in the field, so we need to inflated the lock
+      // because another thread has it locked.
+      } else {
+        // We weren't able to contend for it, probably because the header changed.
+        // Do it all over again.
+        LockStatus ret = state->memory()->contend_for_lock(state, gct, self, us, interrupt);
+        if(ret == eLockError) goto step1;
+        return ret;
+      }
+
+    // The header is being used for something other than locking, so we need to
+    // inflate it.
+    case eAuxWordObjID:
+    case eAuxWordHandle:
+      // If we couldn't inflate the lock, that means the header was in some
+      // weird state that we didn't detect and handle properly. So redo
+      // the whole locking procedure again.
+      if(!state->memory()->inflate_and_lock(state, self)) goto step1;
+      return eLocked;
+    }
+
+    return eUnlocked;
+  }
+
+  void ObjectHeader::hard_lock(STATE, GCToken gct, size_t us) {
+    if(lock(state, gct, us) != eLocked) rubinius::bug("Unable to lock object");
+  }
+
+  LockStatus ObjectHeader::try_lock(STATE, GCToken gct) {
+
+    ObjectHeader* self = this;
+    OnStack<1> os(state, self);
+    // #1 Attempt to lock an unlocked object using CAS.
+
+step1:
+    // Construct 2 new headers: one is the version we hope that
+    // is in use and the other is what we want it to be. The CAS
+    // the new one into place.
+    HeaderWord orig = self->header;
+
+    orig.f.inflated = 0;
+    orig.f.meaning  = eAuxWordEmpty;
+    orig.f.aux_word = 0;
+
+    HeaderWord new_val = orig;
+
+    new_val.f.meaning  = eAuxWordLock;
+    new_val.f.aux_word = state->vm()->thread_id() << cAuxLockTIDShift;
+
+    if(self->header.atomic_set(orig, new_val)) {
+      // wonderful! Locked! weeeee!
+      state->vm()->add_locked_object(self);
+      return eLocked;
+    }
+
+    // Ok, something went wrong.
+    //
+    // #2 See if we're locking the object recursively.
+step2:
+    orig = self->header;
+
+    // The header is inflated, use the full lock.
+    if(orig.f.inflated) {
+      InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
+      return ih->try_lock_mutex(state, gct);
+    }
+
     switch(orig.f.meaning) {
     case eAuxWordEmpty:
       // O_o why is it empty? must be some weird concurrency stuff going
@@ -192,114 +654,8 @@ step2:
           // this step over.
           if(!self->header.atomic_set(orig, new_val)) goto step2;
 
-          if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->vm()->thread_id() << " recursively locked with CAS]\n";
-          }
-
           // wonderful! Locked! weeeee!
           state->vm()->add_locked_object(self);
-        }
-        return eLocked;
-
-      // Our thread id isn't in the field, so we need to inflated the lock
-      // because another thread has it locked.
-      } else {
-        // We weren't able to contend for it, probably because the header changed.
-        // Do it all over again.
-        bool error = false;
-        LockStatus ret = state->memory()->contend_for_lock(state, gct, self, &error, us);
-        if(error) goto step1;
-        return ret;
-      }
-
-    // The header is inflated, use the full lock.
-    case eAuxWordInflated: {
-      InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-      return ih->lock_mutex(state, gct, us);
-    }
-
-    // The header is being used for something other than locking, so we need to
-    // inflate it.
-    case eAuxWordObjID:
-      // If we couldn't inflate the lock, that means the header was in some
-      // weird state that we didn't detect and handle properly. So redo
-      // the whole locking procedure again.
-      if(!state->memory()->inflate_and_lock(state, self)) goto step1;
-      return eLocked;
-    }
-
-    return eUnlocked;
-  }
-
-  void ObjectHeader::hard_lock(STATE, GCToken gct, size_t us) {
-    if(lock(state, gct, us) != eLocked) rubinius::bug("Unable to lock object");
-  }
-
-  LockStatus ObjectHeader::try_lock(STATE, GCToken gct) {
-    // #1 Attempt to lock an unlocked object using CAS.
-
-step1:
-    // Construct 2 new headers: one is the version we hope that
-    // is in use and the other is what we want it to be. The CAS
-    // the new one into place.
-    HeaderWord orig = header;
-
-    orig.f.meaning = eAuxWordEmpty;
-    orig.f.aux_word = 0;
-
-    HeaderWord new_val = orig;
-
-    new_val.f.meaning = eAuxWordLock;
-    new_val.f.aux_word = state->vm()->thread_id() << cAuxLockTIDShift;
-
-    if(header.atomic_set(orig, new_val)) {
-      // wonderful! Locked! weeeee!
-      state->vm()->add_locked_object(this);
-      return eLocked;
-    }
-
-    // Ok, something went wrong.
-    //
-    // #2 See if we're locking the object recursively.
-
-step2:
-    orig = header;
-    switch(orig.f.meaning) {
-    case eAuxWordEmpty:
-      // O_o why is it empty? must be some weird concurrency stuff going
-      // on. Ok, well, start over then.
-      goto step1;
-
-    case eAuxWordLock:
-      if(orig.f.aux_word >> cAuxLockTIDShift == state->vm()->thread_id()) {
-        // We're going to do this over and over until we get the new
-        // header CASd into place.
-
-        // Yep, we've already got this object locked, so increment the count.
-        int count = orig.f.aux_word & cAuxLockRecCountMask;
-
-        // We've recursively locked this object more than we can handle.
-        // Inflate the lock then.
-        if(++count > cAuxLockRecCountMax) {
-          // If we can't inflate the lock, try the whole thing over again.
-          if(!state->memory()->inflate_lock_count_overflow(state, this, count)) {
-            goto step1;
-          }
-          // The header is now set to inflated, and the current thread
-          // is holding the inflated lock.
-        } else {
-          new_val = orig;
-          new_val.f.aux_word = (state->vm()->thread_id() << cAuxLockTIDShift) | count;
-
-          // Because we've got the object already locked to use, no other
-          // thread is going to be trying to lock this thread, but another
-          // thread might ask for an object_id and the header will
-          // be inflated. So if we can't swap in the new header, we'll start
-          // this step over.
-          if(!header.atomic_set(orig, new_val)) goto step2;
-
-          // wonderful! Locked! weeeee!
-          state->vm()->add_locked_object(this);
         }
 
         return eLocked;
@@ -309,19 +665,14 @@ step2:
         return eUnlocked;
       }
 
-    // The header is inflated, use the full lock.
-    case eAuxWordInflated: {
-      InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-      return ih->try_lock_mutex(state, gct);
-    }
-
     // The header is being used for something other than locking, so we need to
     // inflate it.
     case eAuxWordObjID:
+    case eAuxWordHandle:
       // If we couldn't inflate the lock, that means the header was in some
       // weird state that we didn't detect and handle properly. So redo
       // the whole locking procedure again.
-      if(!state->memory()->inflate_and_lock(state, this)) goto step1;
+      if(!state->memory()->inflate_and_lock(state, self)) goto step1;
       return eLocked;
     }
 
@@ -334,17 +685,18 @@ step2:
     // the new one into place.
     HeaderWord orig = header;
 
+    if(orig.f.inflated) {
+      InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
+      return ih->locked_mutex_p(state, gct);
+    }
+
     switch(orig.f.meaning) {
     case eAuxWordLock:
       return true;
     case eAuxWordEmpty:
     case eAuxWordObjID:
+    case eAuxWordHandle:
       return false;
-    case eAuxWordInflated:
-      {
-        InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-        return ih->locked_mutex_p(state, gct);
-      }
     }
     return false;
   }
@@ -355,9 +707,15 @@ step2:
     for(;;) {
       HeaderWord orig = header;
 
+      if(orig.f.inflated) {
+        InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
+        return ih->unlock_mutex(state, gct);
+      }
+
       switch(orig.f.meaning) {
       case eAuxWordEmpty:
       case eAuxWordObjID:
+      case eAuxWordHandle:
         // Um. well geez. We don't have this object locked.
         if(state->shared().config.thread_debug) {
           std::cerr << "[THREAD] Attempted to unlock an unlocked object.\n";
@@ -367,11 +725,6 @@ step2:
           std::cerr << "[LOCK " << state->vm()->thread_id() << " attempted to unlock an unlocked header]\n";
         }
         return eLockError;
-
-      case eAuxWordInflated: {
-        InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
-        return ih->unlock_mutex(state, gct);
-      }
 
       case eAuxWordLock: {
         unsigned int locker_tid = orig.f.aux_word >> cAuxLockTIDShift;
@@ -458,17 +811,18 @@ step2:
     for(;;) {
       HeaderWord orig = header;
 
-      switch(orig.f.meaning) {
-      case eAuxWordEmpty:
-      case eAuxWordObjID:
-        // Um. well geez. We don't have this object locked.
-        return;
-
-      case eAuxWordInflated: {
+      if(orig.f.inflated) {
         InflatedHeader* ih = ObjectHeader::header_to_inflated_header(orig);
         ih->unlock_mutex_for_terminate(state, gct);
         return;
       }
+
+      switch(orig.f.meaning) {
+      case eAuxWordEmpty:
+      case eAuxWordObjID:
+      case eAuxWordHandle:
+        // Um. well geez. We don't have this object locked.
+        return;
 
       case eAuxWordLock: {
         if(orig.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
@@ -519,8 +873,6 @@ step2:
     set_age(new_age);
     klass_ = other->klass_;
     ivars_ = other->ivars_;
-
-    clear_forwarded();
   }
 
   void ObjectHeader::initialize_full_state(VM* state, Object* other, unsigned int age) {
@@ -534,15 +886,10 @@ step2:
     switch(hdr.f.meaning) {
     case eAuxWordObjID:
     case eAuxWordLock:
+    case eAuxWordHandle:
       header.f.meaning = hdr.f.meaning;
       header.f.aux_word = hdr.f.aux_word;
     }
-
-    //if(other->object_id() > 0) {
-   //   set_object_id(state, state->om, other->object_id());
-    //}
-
-    clear_forwarded();
 
     if(other->is_tainted_p()) set_tainted();
 
@@ -553,8 +900,8 @@ step2:
 
     // This method is only used by the GC to move an object, so must retain
     // the settings flags.
-    flags().Frozen =  other->flags().Frozen;
-    flags().Tainted = other->flags().Tainted;
+    set_frozen(other->is_frozen_p());
+    set_tainted(other->is_tainted_p());
   }
 
   void ObjectHeader::copy_body(VM* state, Object* other) {
@@ -602,8 +949,8 @@ step2:
     rec_lock_count_ = count;
   }
 
-  LockStatus InflatedHeader::lock_mutex(STATE, GCToken gct, size_t us) {
-    if(us == 0) return lock_mutex_timed(state, gct, 0);
+  LockStatus InflatedHeader::lock_mutex(STATE, GCToken gct, size_t us, bool interrupt) {
+    if(us == 0) return lock_mutex_timed(state, gct, 0, interrupt);
 
     struct timeval tv;
     struct timespec ts;
@@ -613,11 +960,12 @@ step2:
     ts.tv_sec = tv.tv_sec + (us / 1000000);
     ts.tv_nsec = (us % 10000000) * 1000;
 
-    return lock_mutex_timed(state, gct, &ts);
+    return lock_mutex_timed(state, gct, &ts, interrupt);
   }
 
   LockStatus InflatedHeader::lock_mutex_timed(STATE, GCToken gct,
-                                              const struct timespec* ts)
+                                              const struct timespec* ts,
+                                              bool interrupt)
   {
     OnStack<1> os(state, object_);
 
@@ -661,14 +1009,14 @@ step2:
       while(owner_id_ != 0) {
 
         if(ts) {
-          timeout = (condition_.wait_until(mutex_, ts) == thread::cTimedOut);
+          timeout = (condition_.wait_until(mutex_, ts) == utilities::thread::cTimedOut);
           if(timeout) break;
         } else {
           condition_.wait(mutex_);
         }
 
         // Someone is interrupting us trying to lock.
-        if(state->vm()->check_local_interrupts) {
+        if(interrupt && state->vm()->check_local_interrupts) {
           state->vm()->check_local_interrupts = false;
 
           if(!state->vm()->interrupted_exception()->nil_p()) {
@@ -826,7 +1174,7 @@ step2:
   }
 
   void InflatedHeader::wakeup() {
-    thread::Mutex::LockGuard lg(mutex_);
+    utilities::thread::Mutex::LockGuard lg(mutex_);
     condition_.signal();
 
     if(cDebugThreading) {

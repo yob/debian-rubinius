@@ -4,8 +4,8 @@
 
 namespace rubinius {
   class WorldState {
-    thread::Mutex mutex_;
-    thread::Condition waiting_to_run_;
+    utilities::thread::Mutex mutex_;
+    utilities::thread::Condition waiting_to_run_;
     int pending_threads_;
     int should_stop_;
 
@@ -16,7 +16,10 @@ namespace rubinius {
       : pending_threads_(0)
       , should_stop_(0)
       , time_waiting_(0)
-    {}
+    {
+      mutex_.init();
+      waiting_to_run_.init();
+    }
 
     uint64_t time_waiting() {
       return time_waiting_.read();
@@ -78,7 +81,7 @@ namespace rubinius {
       case ManagedThread::eIndependent:
         // If the GC is running, wait here...
         if(should_stop_) {
-          thread::Mutex::LockGuard guard(mutex_);
+          utilities::thread::Mutex::LockGuard guard(mutex_);
           // We need to grab the mutex because we might want
           // to wait here.
           while(should_stop_) {
@@ -123,11 +126,7 @@ namespace rubinius {
                     << pending_threads_ << "]\n";
         }
         // We yield here so other threads are scheduled and can be run.
-        // We've benchmarked this and this turned out to cause the least
-        // cpu burn compared to not doing anything at all here or sleeping
-        // for 1 nanosecond with {0, 1}.
-        struct timespec ts = {0, 0};
-        nanosleep(&ts, NULL);
+        atomic::pause();
       }
 
       if(cDebugThreading) {
@@ -144,7 +143,7 @@ namespace rubinius {
         }
         // Wait around on the run condition variable until whoever is currently
         // working independently is done and sets should_stop_ to false.
-        thread::Mutex::LockGuard guard(mutex_);
+        utilities::thread::Mutex::LockGuard guard(mutex_);
         while(should_stop_) {
           waiting_to_run_.wait(mutex_);
         }
@@ -166,8 +165,7 @@ namespace rubinius {
         // We've benchmarked this and this turned out to cause the least
         // cpu burn compared to not doing anything at all here or sleeping
         // for 1 nanosecond with {0, 1}.
-        struct timespec ts = {0, 0};
-        nanosleep(&ts, NULL);
+        atomic::pause();
       }
 
       if(cDebugThreading) {
@@ -176,7 +174,7 @@ namespace rubinius {
     }
 
     void wake_all_waiters(THREAD) {
-      thread::Mutex::LockGuard guard(mutex_);
+      utilities::thread::Mutex::LockGuard guard(mutex_);
 
       if(!atomic::compare_and_swap(&should_stop_, 1, 0)) {
         // Ok, someone else has already restarted so we don't
@@ -201,7 +199,7 @@ namespace rubinius {
     }
 
     void restart_threads_externally() {
-      thread::Mutex::LockGuard guard(mutex_);
+      utilities::thread::Mutex::LockGuard guard(mutex_);
       if(!atomic::compare_and_swap(&should_stop_, 1, 0)) {
         // Ok, someone else has already restarted so we don't
         // have anything to do here anymore
@@ -244,7 +242,7 @@ namespace rubinius {
       state->run_state_ = ManagedThread::eSuspended;
       atomic::fetch_and_sub(&pending_threads_, 1);
 
-      thread::Mutex::LockGuard guard(mutex_);
+      utilities::thread::Mutex::LockGuard guard(mutex_);
       // Ok, since we have just locked that implies a barrier
       // so we don't have to add an explicit barrier here.
       while(should_stop_) {

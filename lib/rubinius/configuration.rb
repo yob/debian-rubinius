@@ -26,6 +26,9 @@ Rubinius::ConfigurationVariables.define do |c|
     s.vm_variable "show", :bool,
       "Display information whenever the GC runs"
 
+    s.vm_variable "noisy", :bool,
+      "Beep whenever the GC runs (once for young, twice for mature). Requires gc.show"
+
     s.vm_variable "immix.debug", :bool,
       "Print out collection stats when the Immix collector finishes"
 
@@ -55,6 +58,9 @@ Rubinius::ConfigurationVariables.define do |c|
     s.vm_variable "deoptimize_threshold", 500,
       "How many times an uncommon method is called before a method is deoptimized"
 
+    s.vm_variable "deoptimize_overflow_threshold", 5000,
+      "How many times an inline cache overflows before we fallback to using send instead of uncommon exit"
+
     s.vm_variable "max_method_size", 2048,
       "The max size of a method that will be JIT"
 
@@ -78,8 +84,8 @@ Rubinius::ConfigurationVariables.define do |c|
       i.vm_variable "blocks", true,
         "Have the JIT try and inline methods and their literal blocks"
     end
-    
-    s.vm_variable "log", :string, 
+
+    s.vm_variable "log", :string,
       "Send JIT debugging output to this file rather than stdout"
 
     s.vm_variable "debug", false,
@@ -127,8 +133,13 @@ Rubinius::ConfigurationVariables.define do |c|
     :as => "tool_to_load",
     :description => "Load a VM tool from a shared library"
 
-  c.vm_variable "capi.global_flush", false,
-    "Flush all CAPI handles at CAPI call boundaries"
+  c.section "capi" do |s|
+    s.vm_variable "global_flush", false,
+      "Flush all CAPI handles at CAPI call boundaries"
+
+    s.vm_variable "lock", false,
+      "Lock around using CAPI methods"
+  end
 
   c.vm_variable "int", false,
     :as => "jit_disabled",

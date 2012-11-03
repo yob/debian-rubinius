@@ -99,15 +99,22 @@ def add_mri_capi
   $LIBS << " #{DEFAULT_CONFIG["LIBS"]}"
   $LIBS << " #{DEFAULT_CONFIG["DLDLIBS"]}"
 
+  ldshared = DEFAULT_CONFIG["LDSHARED"]
+  if ldshared[0...DEFAULT_CONFIG["CC"].size] == DEFAULT_CONFIG["CC"]
+    ldshared = ldshared[DEFAULT_CONFIG["CC"].size..-1].strip
+  else
+    ldshared = DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ')
+  end
+
   case RUBY_PLATFORM
   when /mingw/
     # do nothing
   when /darwin/
     # necessary to avoid problems with RVM injecting flags into the MRI build
     # process.
-    add_ldflag DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ').gsub(/-dynamiclib/, "")
+    add_ldflag ldshared.gsub(/-dynamiclib/, "")
   else
-    add_ldflag DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ')
+    add_ldflag ldshared
   end
 
   add_ldflag DEFAULT_CONFIG["LDFLAGS"]
@@ -131,8 +138,8 @@ def include19_dir
 end
 
 def add_rbx_capi
-  add_cflag "-g -ggdb3"
-  add_cxxflag "-g -ggdb3"
+  add_cflag "-g"
+  add_cxxflag "-g"
   if ENV['DEV']
     add_cflag "-O0"
     add_cxxflag "-O0"
@@ -158,7 +165,7 @@ Rubinius::BUILD_CONFIG[:include_dirs].each do |i|
 end
 
 Rubinius::BUILD_CONFIG[:lib_dirs].each do |l|
-  add_include_dir l
+  add_link_dir l
 end
 
 add_define *Rubinius::BUILD_CONFIG[:defines]
