@@ -114,7 +114,12 @@ module Rubinius
       end
 
       if wait
-        return if req.wait
+        if req.wait
+          # While waiting the code was loaded by another thread.
+          # We need to release the lock so other threads can continue too.
+          req.unlock
+          return false
+        end
 
         # The other thread doing the lock raised an exception
         # through the require, so we try and load it again here.
@@ -204,7 +209,7 @@ module Rubinius
         case req.type
         when :ruby
           begin
-            Rubinius.run_script loader.cm
+            Rubinius.run_script loader.compiled_code
           else
             req.passed!
           ensure
@@ -225,9 +230,8 @@ module Rubinius
 
     # Returns true if the path exists, is a regular file, and is readable.
     def loadable?(path)
-      return false unless File.exists? path
-
-      @stat = File.stat path
+      @stat = File::Stat.stat path
+      return false unless @stat
       @stat.file? and @stat.readable?
     end
 
@@ -253,16 +257,16 @@ module Rubinius
     # name in $LOAD_PATH.
     #
     # Returns true if a loadable file is found, otherwise returns false.
-    def verify_load_path(path, loading=false)
-      path = File.expand_path path if home_path? path
+    def verify_load_path(file, loading=false)
+      file = File.expand_path file if home_path? file
 
-      if qualified_path? path
-        return false unless loadable? path
+      if qualified_path? file
+        return false unless loadable? file
       else
-        return false unless path = search_load_path(path, loading)
+        return false unless path = search_load_path(file, loading)
       end
 
-      update_paths(path, path)
+      update_paths(file, path || file)
 
       return true
     end

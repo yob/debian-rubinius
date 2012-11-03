@@ -25,6 +25,7 @@ artifacts/
 .depends.mf
 /rubinius_tasks.dot
 /nbproject
+/coverage
 .project
 CI-specs
 COMMIT
@@ -32,7 +33,6 @@ TAGS
 \#*
 autom4te.cache
 code-cache
-coverage
 /config.rb
 cscope.files
 cscope.out
@@ -48,6 +48,7 @@ tmtags
 /lib/site
 /share
 /work
+/staging
 
 # ignore gems and commands installed by gems
 /gems/*
@@ -63,7 +64,6 @@ tmtags
 !/bin/mkspec
 !/bin/mspec
 !/bin/prof.rb
-!/bin/rbx
 
 # don't ignore spec/tags
 !/spec/tags
@@ -79,7 +79,6 @@ tmtags
 
 /lib/etc.rb
 /lib/kernel.rb
-/lib/zlib.rb
 /lib/fcntl.rb
 /lib/syslog.rb
 /lib/readline.rb

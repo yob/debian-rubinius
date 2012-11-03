@@ -3,7 +3,7 @@
 
 #include "instruments/stats.hpp"
 
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
 #include "capi/tag.hpp"
 #include "object_watch.hpp"
 
@@ -95,8 +95,8 @@ namespace rubinius {
       obj->inflated_header()->set_object(obj);
     }
 
-    obj->flags().zone = MatureObjectZone;
-    obj->flags().age = 0;
+    obj->set_zone(MatureObjectZone);
+    obj->set_age(0);
 
     obj->set_in_immix();
 
@@ -121,7 +121,8 @@ namespace rubinius {
     if(copy && copy != obj && obj->inflated_header_p()) {
       InflatedHeader* ih = obj->deflate_header();
       ih->reset_object(copy);
-      if(!copy->set_inflated_header(ih)) {
+      State state_obj(state());
+      if(!copy->set_inflated_header(&state_obj, ih)) {
         rubinius::bug("Massive IMMIX inflated header screwup.");
       }
     }
@@ -166,27 +167,20 @@ namespace rubinius {
       }
     }
 
-    for(capi::Handles::Iterator i(*data.handles()); i.more(); i.advance()) {
+    for(Allocator<capi::Handle>::Iterator i(data.handles()->allocator()); i.more(); i.advance()) {
       if(i->in_use_p() && !i->weak_p()) {
         saw_object(i->object());
         via_handles_++;
       }
     }
 
-    for(capi::Handles::Iterator i(*data.cached_handles()); i.more(); i.advance()) {
-      if(i->in_use_p() && !i->weak_p()) {
-        saw_object(i->object());
-        via_handles_++;
-      }
-    }
-
-    std::list<capi::Handle**>* gh = data.global_handle_locations();
+    std::list<capi::GlobalHandle*>* gh = data.global_handle_locations();
 
     if(gh) {
-      for(std::list<capi::Handle**>::iterator i = gh->begin();
+      for(std::list<capi::GlobalHandle*>::iterator i = gh->begin();
           i != gh->end();
           ++i) {
-        capi::Handle** loc = *i;
+        capi::Handle** loc = (*i)->handle();
         if(capi::Handle* hdl = *loc) {
           if(!REFERENCE_P(hdl)) continue;
           if(hdl->valid_p()) {

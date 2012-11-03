@@ -10,7 +10,7 @@ namespace rubinius {
 
   /**
    * Manages memory for code-based resources that are owned by Ruby objects,
-   * such as VMMethod instances, JIT code, FFI resources etc.
+   * such as MachineCode instances, JIT code, FFI resources etc.
    *
    * These objects are not directly accessible via Ruby code, but are used by
    * the VM to support the running of Ruby code. As such, these objects also
@@ -41,7 +41,7 @@ namespace rubinius {
       ~Chunk();
     };
 
-    thread::Mutex mutex_;
+    utilities::thread::Mutex mutex_;
 
     SharedState* shared_;
 
@@ -56,7 +56,7 @@ namespace rubinius {
     int total_allocated_;
     int total_freed_;
 
-    int bytes_used_;
+    size_t bytes_used_;
 
   public:
     int freed_resources() {
@@ -75,7 +75,7 @@ namespace rubinius {
       return shared_;
     }
 
-    int& size() {
+    size_t& size() {
       return bytes_used_;
     }
 

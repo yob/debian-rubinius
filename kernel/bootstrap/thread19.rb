@@ -10,8 +10,7 @@ class Thread
       run obj
       dup
 
-      push_false
-      send :setup, 1, true
+      send :setup, 0, true
       pop
 
       run args
@@ -38,23 +37,44 @@ class Thread
   def __run__()
     begin
       begin
-        @lock.send nil
+        Rubinius.unlock(self)
         @result = @block.call(*@args)
       ensure
-        @lock.receive
-        unlock_locks
-        @joins.each { |join| join.send self }
+        begin
+          # We must lock self in a careful way.
+          #
+          # At this point, it's possible that an other thread does Thread#raise
+          # and then our execution is interrupted AT ANY GIVEN TIME. We
+          # absolutely must make sure to lock self as soon as possible to lock
+          # out interrupts from other threads.
+          #
+          # Rubinius.uninterrupted_lock(self) just does that.
+          #
+          # Notice that this can't be moved to other methods and there should be
+          # no preceding code before it in the enclosing ensure clause.
+          # These are to prevent any interrupted lock failures.
+          Rubinius.uninterrupted_lock(self)
+
+          # Now, we locked self. No other thread can interrupt this thread
+          # anymore.
+          # If there is any not-triggered interrupt, check and process it. In
+          # either case, we jump to the following ensure clause.
+          Rubinius.check_interrupts
+        ensure
+          @joins.each { |join| join.send self }
+        end
       end
-    rescue Die
-      @killed = true
-      @exception = nil
     rescue Exception => e
       # I don't really get this, but this is MRI's behavior. If we're dying
       # by request, ignore any raised exception.
       @exception = e # unless @dying
     ensure
+      if Rubinius.thread_state[0] == :thread_kill
+        @killed = true
+      end
       @alive = false
-      @lock.send nil
+      Rubinius.unlock(self)
+      unlock_locks
     end
 
     if @exception
@@ -66,22 +86,35 @@ class Thread
     end
   end
 
-  def setup(prime_lock)
+  def setup
     @group = nil
     @alive = true
     @result = false
     @exception = nil
     @critical = false
     @dying = false
-    @lock = Rubinius::Channel.new
-    @lock.send nil if prime_lock
     @joins = []
     @killed = false
   end
+
+  def kill
+    @dying = true
+    @sleep = false
+    Rubinius.synchronize(self) do
+      kill_prim
+    end
+  end
+
+  alias_method :exit, :kill
+  alias_method :terminate, :kill
 
   def value
     join_inner do
       @killed ? nil : @result
     end
+  end
+
+  def active_exception
+    nil
   end
 end

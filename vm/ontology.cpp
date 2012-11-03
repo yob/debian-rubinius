@@ -1,3 +1,5 @@
+#include <sys/ioctl.h>
+#include <stdio.h>
 #include <errno.h>
 
 #include "objectmemory.hpp"
@@ -10,7 +12,7 @@
 #include "builtin/bytearray.hpp"
 #include "builtin/class.hpp"
 #include "builtin/compactlookuptable.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/channel.hpp"
 #include "builtin/data.hpp"
 #include "builtin/dir.hpp"
@@ -27,7 +29,7 @@
 #include "builtin/nativefunction.hpp"
 #include "builtin/nativemethod.hpp"
 #include "builtin/regexp.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/system.hpp"
@@ -47,6 +49,7 @@
 #include "builtin/class.hpp"
 #include "builtin/atomic.hpp"
 
+#include "environment.hpp"
 #include "configuration.hpp"
 #include "config.h"
 #include "revision.h"
@@ -117,9 +120,9 @@ namespace rubinius {
      * them all at once */
 
     // Class's klass is Class
+    cls->set_obj_type(ClassType);
     cls->klass(state, cls);
     cls->ivars(state, cNil);
-    cls->set_obj_type(ClassType);
 
     cls->set_object_type(state, ClassType);
     cls->set_class_id(state->shared().inc_class_count(state));
@@ -293,13 +296,12 @@ namespace rubinius {
     Array::init(state);
     ByteArray::init(state);
     String::init(state);
-    Encoding::init(state);
-    kcode::init(state);
     Executable::init(state);
-    CompiledMethod::init(state);
+    CompiledCode::init(state);
+    AtomicReference::init(state);
     IO::init(state);
     BlockEnvironment::init(state);
-    StaticScope::init(state);
+    ConstantScope::init(state);
     Dir::init(state);
     CompactLookupTable::init(state);
     Time::init(state);
@@ -329,7 +331,9 @@ namespace rubinius {
     Fiber::init(state);
     Alias::init(state);
     Randomizer::init(state);
-    AtomicReference::init(state);
+
+    Encoding::init(state);
+    kcode::init(state);
   }
 
   // @todo document all the sections of bootstrap_ontology
@@ -346,6 +350,9 @@ namespace rubinius {
      * Everything is now setup for us to make fully initialized
      * classes.
      */
+
+    Object* undef = new_object<Object>(G(object));
+    GO(undefined).set(undef);
 
     /*
      * Create our Rubinius module that we hang stuff off
@@ -365,16 +372,13 @@ namespace rubinius {
     GO(main).set(main);
     G(object)->set_const(state, "MAIN", main); // HACK test hooking up MAIN
 
-    Object* undef = new_object<Object>(G(object));
-    GO(undefined).set(undef);
-
     GO(vm_class).set(ontology::new_class_under(state, "VM", G(rubinius)));
 
     GO(type).set(ontology::new_module(state, "Type", G(rubinius)));
 
     System::bootstrap_methods(state);
     Module::bootstrap_methods(state);
-    StaticScope::bootstrap_methods(state);
+    ConstantScope::bootstrap_methods(state);
     VariableScope::bootstrap_methods(state);
 
     /*
@@ -417,16 +421,33 @@ namespace rubinius {
      * because some are passed to e.g. File.expand_path and having them
      * be uniform is simpler.
      */
-    G(rubinius)->set_const(state, "BIN_PATH", String::create(state, RBX_BIN_PATH));
-    G(rubinius)->set_const(state, "KERNEL_PATH", String::create(state, RBX_KERNEL_PATH));
-    G(rubinius)->set_const(state, "LIB_PATH", String::create(state, RBX_LIB_PATH));
-    G(rubinius)->set_const(state, "HDR18_PATH", String::create(state, RBX_HDR18_PATH));
-    G(rubinius)->set_const(state, "HDR19_PATH", String::create(state, RBX_HDR19_PATH));
-    G(rubinius)->set_const(state, "HDR20_PATH", String::create(state, RBX_HDR20_PATH));
-    G(rubinius)->set_const(state, "GEMS_PATH", String::create(state, RBX_GEMS_PATH));
-    G(rubinius)->set_const(state, "SITE_PATH", String::create(state, RBX_SITE_PATH));
-    G(rubinius)->set_const(state, "VENDOR_PATH", String::create(state, RBX_VENDOR_PATH));
-    G(rubinius)->set_const(state, "ZLIB_PATH", String::create(state, RBX_ZLIB_PATH));
+    Environment* env = state->shared().env();
+
+    if(env) {
+      std::string prefix = env->system_prefix();
+      G(rubinius)->set_const(state, "PREFIX_PATH", String::create(state, prefix.c_str()));
+      std::string path = prefix + RBX_RUNTIME_PATH;
+      G(rubinius)->set_const(state, "RUNTIME_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_BIN_PATH;
+      G(rubinius)->set_const(state, "BIN_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_KERNEL_PATH;
+      G(rubinius)->set_const(state, "KERNEL_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_LIB_PATH;
+      G(rubinius)->set_const(state, "LIB_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_SITE_PATH;
+      G(rubinius)->set_const(state, "SITE_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_VENDOR_PATH;
+      G(rubinius)->set_const(state, "VENDOR_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_GEMS_PATH;
+      G(rubinius)->set_const(state, "GEMS_PATH", String::create(state, path.c_str()));
+
+      path = prefix + RBX_HDR18_PATH;
+      G(rubinius)->set_const(state, "HDR18_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_HDR19_PATH;
+      G(rubinius)->set_const(state, "HDR19_PATH", String::create(state, path.c_str()));
+      path = prefix + RBX_HDR20_PATH;
+      G(rubinius)->set_const(state, "HDR20_PATH", String::create(state, path.c_str()));
+    }
 
     G(rubinius)->set_const(state, "VERSION", String::create(state, RBX_VERSION));
     G(rubinius)->set_const(state, "LIB_VERSION", String::create(state, RBX_LIB_VERSION));
@@ -458,6 +479,12 @@ namespace rubinius {
     G(rubinius)->set_const(state, "SIZEOF_SHORT", Fixnum::from(sizeof(short)));
     G(rubinius)->set_const(state, "SIZEOF_INT", Fixnum::from(sizeof(int)));
     G(rubinius)->set_const(state, "SIZEOF_LONG", Fixnum::from(sizeof(long)));
+
+    struct winsize w;
+    if(ioctl(0, TIOCGWINSZ, &w)) {
+      w.ws_col = 80;
+    }
+    G(rubinius)->set_const(state, "TERMINAL_WIDTH", Fixnum::from(w.ws_col));
   }
 
   void VM::bootstrap_symbol(STATE) {

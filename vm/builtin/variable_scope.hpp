@@ -8,7 +8,7 @@
 
 namespace rubinius {
 
-  class CompiledMethod;
+  class CompiledCode;
   class Module;
   struct CallFrame;
   class Fiber;
@@ -24,7 +24,7 @@ namespace rubinius {
     /** Block given to method */
     Object*         block_;   // slot
     /** Method this scope is for. */
-    CompiledMethod* method_;  // slot
+    CompiledCode* method_;  // slot
     Module*         module_;  // slot
     VariableScope*  parent_;  // slot
     Tuple*          heap_locals_; // slot
@@ -43,7 +43,7 @@ namespace rubinius {
 
   public: /* Accessors */
     attr_accessor(block, Object);
-    attr_accessor(method, CompiledMethod);
+    attr_accessor(method, CompiledCode);
     attr_accessor(module, Module);
     attr_accessor(parent, VariableScope);
     attr_accessor(self, Object);
@@ -60,10 +60,6 @@ namespace rubinius {
       return isolated_;
     }
 
-    Object** stack_locals() {
-      return locals_;
-    }
-
     bool block_as_method_p() {
       return block_as_method_ == 1;
     }
@@ -72,31 +68,12 @@ namespace rubinius {
       block_as_method_ = (val ? 1 : 0);
     }
 
-    void set_local(STATE, int pos, Object* val) {
-      if(isolated_) {
-        heap_locals_->put(state, pos, val);
-      } else {
-        locals_[pos] = val;
-      }
-    }
+    void set_local(int pos, Object* val);
+    void set_local(STATE, int pos, Object* val);
 
-    void set_local(int pos, Object* val) {
-      assert(isolated_ == false);
-      locals_[pos] = val;
-    }
-
+    Object* get_local(int pos);
     Object* get_local(STATE, int pos) {
-      if(isolated_) {
-        return heap_locals_->at(state, pos);
-      }
-      return locals_[pos];
-    }
-
-    Object* get_local(int pos) {
-      if(isolated_) {
-        return heap_locals_->at(pos);
-      }
-      return locals_[pos];
+      return get_local(pos);
     }
 
     int number_of_locals() {
@@ -112,7 +89,7 @@ namespace rubinius {
     static VariableScope* current(STATE, CallFrame* calling_environment);
 
     // Rubinius.primitive :variable_scope_synthesize
-    static VariableScope* synthesize(STATE, CompiledMethod* method, Module* module, Object* parent, Object* self, Object* block, Tuple* locals);
+    static VariableScope* synthesize(STATE, CompiledCode* method, Module* module, Object* parent, Object* self, Object* block, Tuple* locals);
 
     // Rubinius.primitive :variable_scope_locals
     Tuple* locals(STATE);

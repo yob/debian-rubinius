@@ -9,8 +9,7 @@ module Rubinius
     end
 
     def self.loopback
-      Rubinius::AgentRegistry.spawn_thread
-      new Rubinius.agent_io
+      new Rubinius.agent_loopback
     end
 
     def initialize(io, password=nil)

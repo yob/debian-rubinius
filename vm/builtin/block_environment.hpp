@@ -6,25 +6,25 @@
 #include "executor.hpp"
 
 namespace rubinius {
-  class CompiledMethod;
+  class CompiledCode;
   class VariableScope;
   struct CallFrame;
-  class VMMethod;
+  class MachineCode;
   class VMExecutable;
 
   class BlockEnvironment;
-  class StaticScope;
+  class ConstantScope;
 
   struct BlockInvocation {
     int flags;
     Object* self;
-    StaticScope* static_scope;
+    ConstantScope* constant_scope;
     Module* module;
 
-    BlockInvocation(Object* self, StaticScope* static_scope, int flags)
+    BlockInvocation(Object* self, ConstantScope* constant_scope, int flags)
       : flags(flags)
       , self(self)
-      , static_scope(static_scope)
+      , constant_scope(constant_scope)
       , module(0)
     {}
   };
@@ -37,22 +37,22 @@ namespace rubinius {
     const static object_type type = BlockEnvironmentType;
 
   private:
-    VariableScope* scope_;      // slot
-    VariableScope* top_scope_;  // slot
-    CompiledMethod* code_;      // slot
-    Module* module_;            // slot
+    VariableScope* scope_;        // slot
+    VariableScope* top_scope_;    // slot
+    CompiledCode* compiled_code_; // slot
+    Module* module_;              // slot
 
   public:
     /* accessors */
     attr_accessor(scope, VariableScope);
     attr_accessor(top_scope, VariableScope);
-    attr_accessor(code, CompiledMethod);
+    attr_accessor(compiled_code, CompiledCode);
     attr_accessor(module, Module);
 
     /* interface */
 
     static void init(STATE);
-    VMMethod* vmmethod(STATE, GCToken gct);
+    MachineCode* machine_code(STATE, GCToken gct);
 
     // Rubinius.primitive :blockenvironment_allocate
     static BlockEnvironment* allocate(STATE);
@@ -61,8 +61,8 @@ namespace rubinius {
                             BlockEnvironment* env, Arguments& args,
                             BlockInvocation& invocation);
 
-    static BlockEnvironment* under_call_frame(STATE, GCToken gct, CompiledMethod* cm,
-      VMMethod* caller, CallFrame* call_frame);
+    static BlockEnvironment* under_call_frame(STATE, GCToken gct, CompiledCode* cm,
+      MachineCode* caller, CallFrame* call_frame);
 
     static Object* execute_interpreter(STATE, CallFrame* previous,
                             BlockEnvironment* env, Arguments& args,

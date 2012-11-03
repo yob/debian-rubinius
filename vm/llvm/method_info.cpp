@@ -6,7 +6,7 @@
 #include "llvm/jit_context.hpp"
 #include "llvm/jit_runtime.hpp"
 
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "object_utils.hpp"
 
 namespace rubinius {
@@ -17,7 +17,7 @@ namespace rubinius {
         function()->getEntryBlock().getTerminator());
   }
 
-  JITMethodInfo::JITMethodInfo(jit::Context& ctx, CompiledMethod* cm, VMMethod* v,
+  JITMethodInfo::JITMethodInfo(jit::Context& ctx, CompiledCode* code, MachineCode* mcode,
                   JITMethodInfo* parent)
     : context_(ctx)
     , entry_(0)
@@ -35,9 +35,8 @@ namespace rubinius {
     , return_pad_(0)
     , return_phi_(0)
     , self_class_(&ctx.state()->roots())
-    , runtime_data_(0)
 
-    , vmm(v)
+    , machine_code(mcode)
     , is_block(false)
     , inline_return(0)
     , return_value(0)
@@ -47,7 +46,7 @@ namespace rubinius {
     , stack_args(0)
     , root(0)
   {
-    method_.set(cm);
+    method_.set(code);
     self_class_.set(nil<Object>());
   }
 
@@ -61,15 +60,6 @@ namespace rubinius {
     return llvm::BasicBlock::Create(context_.state()->ctx(), name, function());
   }
 
-  jit::RuntimeData* JITMethodInfo::runtime_data() {
-    if(!runtime_data_) {
-      jit::RuntimeData* rd = new jit::RuntimeData(0, 0, 0);
-      context_.add_runtime_data(rd);
-      runtime_data_ = rd;
-    }
-
-    return runtime_data_;
-  }
 }
 
 #endif

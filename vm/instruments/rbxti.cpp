@@ -3,7 +3,7 @@
 #include "rbxti-internal.hpp"
 
 #include "vm/vm.hpp"
-#include "vmmethod.hpp"
+#include "machine_code.hpp"
 #include "configuration.hpp"
 #include "config_parser.hpp"
 
@@ -15,6 +15,8 @@
 #include "builtin/array.hpp"
 #include "builtin/class.hpp"
 #include "instruments/tooling.hpp"
+
+#include "gc/walker.hpp"
 
 #include "object_utils.hpp"
 
@@ -89,9 +91,9 @@ namespace rbxti {
     return NULL;
   }
 
-  rmethod Env::cast_to_rmethod(robject obj) {
-    if(CompiledMethod* c = try_as<CompiledMethod>((Object*)obj)) {
-      return o(c);
+  rcompiled_code Env::cast_to_rcompiled_code(robject obj) {
+    if(CompiledCode* ccode = try_as<CompiledCode>((Object*)obj)) {
+      return o(ccode);
     }
 
     return NULL;
@@ -212,22 +214,46 @@ namespace rbxti {
     return s(cNil);
   }
 
-  rsymbol Env::method_file(rmethod cm) {
-    return o(i(cm)->file());
+  rsymbol Env::method_file(rcompiled_code code) {
+    return o(i(code)->file());
   }
 
-  r_mint Env::method_line(rmethod cm) {
-    return i(cm)->start_line(private_->state());
+  r_mint Env::method_line(rcompiled_code code) {
+    return i(code)->start_line(private_->state());
   }
 
-  r_mint Env::method_id(rmethod meth) {
-    CompiledMethod* cm = i(meth);
+  r_mint Env::method_id(rcompiled_code code) {
+    CompiledCode* ccode = i(code);
 
-    if(VMMethod* vmm = cm->backend_method()) {
-      return (vmm->method_id() << 1) | 1;
+    if(MachineCode* mcode = ccode->machine_code()) {
+      return (mcode->method_id() << 1) | 1;
     }
 
     return 0;
+  }
+
+  void Env::find_all_compiled_code(compiled_code_iterator func, void* data) {
+    ObjectWalker walker(private_->state()->memory());
+    GCData gc_data(private_->state()->vm());
+
+    walker.seed(gc_data);
+
+    Env* env = private_->state()->vm()->tooling_env();
+    Object* obj = walker.next();
+
+    while(obj) {
+      if(CompiledCode* code = try_as<CompiledCode>(obj)) {
+        func(env, rbxti::o(code), data);
+      }
+
+      obj = walker.next();
+    }
+  }
+
+  r_mint Env::machine_code_id(rmachine_code code) {
+    MachineCode* mcode = i(code);
+
+    return (mcode->method_id() << 1) | 1;
   }
 
   rtable Env::table_new() {
@@ -345,6 +371,10 @@ namespace rbxti {
 
   void Env::set_tool_at_gc(at_gc_func func) {
     private_->global()->set_tool_at_gc(func);
+  }
+
+  void Env::set_tool_at_ip(at_ip_func func) {
+    private_->global()->set_tool_at_ip(func);
   }
 
   Env* create_env(VM* state) {

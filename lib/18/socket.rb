@@ -188,7 +188,7 @@ class Socket < BasicSocket
   module Foreign
     extend FFI::Library
 
-    class AddrInfo < FFI::Struct
+    class Addrinfo < FFI::Struct
       config("rbx.platform.addrinfo", :ai_flags, :ai_family, :ai_socktype,
              :ai_protocol, :ai_addrlen, :ai_addr, :ai_canonname, :ai_next)
     end
@@ -263,7 +263,7 @@ class Socket < BasicSocket
     end
 
     def self.getaddrinfo(host, service = nil, family = 0, socktype = 0,  protocol = 0, flags = 0)
-      hints = AddrInfo.new
+      hints = Addrinfo.new
       hints[:ai_family] = family
       hints[:ai_socktype] = socktype
       hints[:ai_protocol] = protocol
@@ -283,7 +283,7 @@ class Socket < BasicSocket
 
       return [] unless ptr
 
-      res = AddrInfo.new ptr
+      res = Addrinfo.new ptr
 
       addrinfos = []
 
@@ -300,7 +300,7 @@ class Socket < BasicSocket
 
         break unless res[:ai_next]
 
-        res = AddrInfo.new res[:ai_next]
+        res = Addrinfo.new res[:ai_next]
       end
 
       return addrinfos
@@ -391,7 +391,7 @@ class Socket < BasicSocket
     end
 
     def self.pack_sockaddr_in(host, port, family, type, flags)
-      hints = AddrInfo.new
+      hints = Addrinfo.new
       hints[:ai_family] = family
       hints[:ai_socktype] = type
       hints[:ai_flags] = flags
@@ -408,7 +408,7 @@ class Socket < BasicSocket
 
       return [] if res_p.read_pointer.null?
 
-      res = AddrInfo.new res_p.read_pointer
+      res = Addrinfo.new res_p.read_pointer
 
       return res[:ai_addr].read_string(res[:ai_addrlen])
 
@@ -899,6 +899,7 @@ class IPSocket < BasicSocket
 
   def recvfrom(maxlen, flags = 0)
     # FIXME 1 is hardcoded knowledge from io.cpp
+    flags = 0 if flags.nil?
     socket_recv maxlen, flags, 1
   end
 
@@ -906,6 +907,8 @@ class IPSocket < BasicSocket
     # Set socket to non-blocking, if we can
     # Todo: Ensure this works in Windows!  If not, I claim that's Fcntl's fault.
     fcntl(Fcntl::F_SETFL, Fcntl::O_NONBLOCK)
+    flags = 0 if flags.nil?
+    flags |= Socket::MSG_DONTWAIT
 
     # Wait until we have something to read
     # @todo  Why? ^^ --rue

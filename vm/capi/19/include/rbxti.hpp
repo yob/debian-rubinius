@@ -8,7 +8,8 @@ namespace rbxti {
   class InternalObject {};
   class InternalSymbol : public InternalObject {};
   class InternalTable : public InternalObject {};
-  class InternalMethod : public InternalObject {};
+  class InternalCompiledCode : public InternalObject {};
+  class InternalMachineCode : public InternalObject {};
   class InternalModule : public InternalObject {};
   class InternalString : public InternalObject {};
   class InternalInteger : public InternalObject {};
@@ -18,7 +19,8 @@ namespace rbxti {
   typedef InternalObject* robject;
   typedef InternalSymbol* rsymbol;
   typedef InternalTable* rtable;
-  typedef InternalMethod* rmethod;
+  typedef InternalCompiledCode* rcompiled_code;
+  typedef InternalMachineCode* rmachine_code;
   typedef InternalModule* rmodule;
   typedef InternalString* rstring;
   typedef InternalInteger* rinteger;
@@ -36,15 +38,23 @@ namespace rbxti {
 
   typedef robject (*results_func)(Env* env);
   typedef void  (*enable_func)(Env* env);
-  typedef void* (*enter_method)(Env* env, robject recv, rsymbol name, rmodule mod, rmethod cm);
-  typedef void* (*enter_block)(Env* env, rsymbol name, rmodule module, rmethod cm);
+  typedef void* (*enter_method)(Env* env, robject recv, rsymbol name,
+                                rmodule mod, rcompiled_code code);
+  typedef void* (*enter_block)(Env* env, rsymbol name,
+                               rmodule module, rcompiled_code code);
   typedef void  (*leave_func)(Env* env, void* tag);
   typedef void* (*enter_gc)(Env* env, int level);
-  typedef void* (*enter_script)(Env* env, rmethod cm);
+  typedef void* (*enter_script)(Env* env, rcompiled_code code);
   typedef void  (*shutdown_func)(Env* env);
 
   typedef void  (*thread_start_func)(Env* env);
   typedef void  (*thread_stop_func)(Env* env);
+
+  typedef void  (*at_gc_func)(Env* env);
+
+  typedef void  (*at_ip_func)(Env* env, rmachine_code code, int ip);
+
+  typedef void  (*compiled_code_iterator)(Env* env, rcompiled_code code, void* data);
 
   class Env {
   public:
@@ -57,7 +67,7 @@ namespace rbxti {
 
     rsymbol  cast_to_rsymbol  (robject obj);
     rtable   cast_to_rtable   (robject obj);
-    rmethod  cast_to_rmethod  (robject obj);
+    rcompiled_code  cast_to_rcompiled_code  (robject obj);
     rmodule  cast_to_rmodule  (robject obj);
     rstring  cast_to_rstring  (robject obj);
     rinteger cast_to_rinteger (robject obj);
@@ -94,9 +104,13 @@ namespace rbxti {
     bool is_nil(robject obj);
     robject nil();
 
-    rsymbol method_file(rmethod cm);
-    r_mint method_line(rmethod cm);
-    r_mint method_id(rmethod cm);
+    rsymbol method_file(rcompiled_code code);
+    r_mint method_line(rcompiled_code code);
+    r_mint method_id(rcompiled_code code);
+
+    void find_all_compiled_code(compiled_code_iterator func, void* data);
+
+    r_mint machine_code_id(rmachine_code code);
 
     rtable table_new();
     robject table_fetch(rtable tbl, robject key, bool* fetched);
@@ -128,6 +142,10 @@ namespace rbxti {
 
     void set_tool_thread_start(thread_start_func func);
     void set_tool_thread_stop(thread_stop_func func);
+
+    void set_tool_at_gc(at_gc_func func);
+
+    void set_tool_at_ip(at_ip_func func);
   };
 }
 

@@ -52,7 +52,7 @@ module FFI
         return type_size(TYPE_PTR)
       end
 
-      raise PrimitiveFailure, "Unable to find type size for #{type}"
+      raise PrimitiveFailure, "FFI.type_size primitive failed: #{type}"
     end
 
     def size_to_type(size)
@@ -208,11 +208,16 @@ module FFI::Platform
   case
   when Rubinius.windows?
     LIBSUFFIX = "dll"
+    IS_WINDOWS = true
   when Rubinius.darwin?
     LIBSUFFIX = "dylib"
+    IS_WINDOWS = false
   else
     LIBSUFFIX = "so"
+    IS_WINDOWS = false
   end
+
+  ARCH = Rubinius::CPU
 
   # ruby-ffi compatible
   LONG_SIZE = Rubinius::SIZEOF_LONG * 8

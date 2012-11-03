@@ -8,11 +8,30 @@ module Rubinius
         return obj
       when String
         return Encoding.find obj
-      when nil
-        # TODO: temporary until __ENCODING__ is fixed
       else
         return Encoding.find StringValue(obj)
       end
+    end
+
+    def self.try_convert_to_encoding(obj)
+      case obj
+      when Encoding
+        return obj
+      when String
+        str = obj
+      else
+        str = StringValue obj
+      end
+
+      key = str.upcase.to_sym
+
+      pair = Encoding::EncodingMap[key]
+      if pair
+        index = pair.last
+        return index && Encoding::EncodingList[index]
+      end
+
+      return undefined
     end
 
     def self.compatible_encoding(a, b)
@@ -22,7 +41,7 @@ module Rubinius
         enc_a = object_encoding a
         enc_b = object_encoding b
         message = "undefined conversion "
-        message << "for '#{a}' " if object_kind_of?(a, String)
+        message << "for '#{a.inspect}' " if object_kind_of?(a, String)
         message << "from #{enc_a} to #{enc_b}"
 
         raise Encoding::CompatibilityError, message
@@ -111,6 +130,10 @@ module Rubinius
       end
 
       offset
+    end
+
+    def self.coerce_to_pid(obj)
+      Rubinius::Type.coerce_to obj, Integer, :to_int
     end
   end
 end

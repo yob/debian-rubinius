@@ -2,9 +2,21 @@ Daedalus.blueprint do |i|
   gcc = i.gcc!
 
   gcc.cflags << "-Ivm -Ivm/test/cxxtest -I. "
+
+  # -fno-omit-frame-pointer is needed to get a backtrace on FreeBSD.
+  # It is enabled by default on OS X, on the other hand, not on Linux.
+  # To use same build flags across platforms, it is added explicitly.
   gcc.cflags << "-pipe -Wall -fno-omit-frame-pointer"
+
+  # Due to a Clang bug (http://llvm.org/bugs/show_bug.cgi?id=9825),
+  # -mno-omit-leaf-frame-pointer is needed for Clang on Linux.
+  # On other combinations of platform and compiler, this flag is implicitly
+  # assumed from -fno-omit-frame-pointer. To use same build flags across
+  # platforms, -mno-omit-leaf-frame-pointer is added explicitly.
+  gcc.cflags << "-mno-omit-leaf-frame-pointer" if Rubinius::BUILD_CONFIG[:cc] == "clang"
+
   gcc.cflags << "-Wno-unused-function"
-  gcc.cflags << "-g -ggdb3 -Werror"
+  gcc.cflags << "-g -Werror"
   gcc.cflags << "-DRBX_PROFILER"
   gcc.cflags << "-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS"
   gcc.cflags << "-D_LARGEFILE_SOURCE"
@@ -148,7 +160,7 @@ Daedalus.blueprint do |i|
     l.cflags = ["-Ivendor/libffi/include"]
     l.objects = [l.file(".libs/libffi.a")]
     l.to_build do |x|
-      x.command "sh -c ./configure" unless File.exists?("Makefile")
+      x.command "sh -c './configure --disable-builddir'" unless File.exists?("Makefile")
       x.command make
     end
   end
@@ -185,41 +197,42 @@ Daedalus.blueprint do |i|
   case Rubinius::BUILD_CONFIG[:llvm]
   when :prebuilt, :svn
     llvm = i.external_lib "vendor/llvm" do |l|
-      conf = "vendor/llvm/Release/bin/llvm-config"
-      flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
-      flags.delete_if { |x| x.index("-O") == 0 || x.index("-I") == 0 }
-      flags.delete_if { |x| x =~ /-D__STDC/ }
-      flags.delete_if { |x| x == "-DNDEBUG" }
-      flags << "-Ivendor/llvm/include" << "-DENABLE_LLVM"
-      l.cflags = flags
-
-      ldflags = `#{perl} #{conf} --ldflags`.strip
-      objects = `#{perl} #{conf} --libfiles`.strip.split(/\s+/)
-
-      if Rubinius::BUILD_CONFIG[:windows]
-        ldflags = ldflags.sub(%r[-L/([a-zA-Z])/], '-L\1:/')
-
-        objects.select do |f|
-          f.sub!(%r[^/([a-zA-Z])/], '\1:/')
-          File.file? f
-        end
-      end
-
-      l.ldflags = [ldflags]
-      l.objects = objects
+      l.cflags = ["-Ivendor/llvm/include"]
+      l.objects = []
     end
 
     gcc.add_library llvm
-    files << llvm
-  when :config
+  end
+
+  case Rubinius::BUILD_CONFIG[:llvm]
+  when :config, :prebuilt, :svn
     conf = Rubinius::BUILD_CONFIG[:llvm_configure]
-    flags = `#{perl} #{conf} --cflags`.strip.split(/\s+/)
+    flags = `#{conf} --cflags`.strip.split(/\s+/)
     flags.delete_if { |x| x.index("-O") == 0 }
     flags.delete_if { |x| x =~ /-D__STDC/ }
     flags.delete_if { |x| x == "-DNDEBUG" }
+    flags.delete_if { |x| x == "-fomit-frame-pointer" }
+    flags.delete_if { |x| x == "-pedantic" }
+    flags.delete_if { |x| x == "-W" }
+    flags.delete_if { |x| x == "-Wextra" }
+
     flags << "-DENABLE_LLVM"
+
+    ldflags = `#{conf} --ldflags`.strip.split(/\s+/)
+    objects = `#{conf} --libfiles`.strip.split(/\s+/)
+
+    if Rubinius::BUILD_CONFIG[:windows]
+      ldflags = ldflags.sub(%r[-L/([a-zA-Z])/], '-L\1:/')
+
+      objects.select do |f|
+        f.sub!(%r[^/([a-zA-Z])/], '\1:/')
+        File.file? f
+      end
+    end
+
     gcc.cflags.concat flags
-    gcc.ldflags.concat `#{perl} #{conf} --ldflags --libfiles`.strip.split(/\s+/)
+    gcc.ldflags.concat ldflags
+    gcc.ldflags.concat objects
   when :no
     # nothing, not using LLVM
   else

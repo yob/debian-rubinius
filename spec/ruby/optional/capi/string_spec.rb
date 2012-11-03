@@ -1,3 +1,4 @@
+# encoding: UTF-8
 require File.expand_path('../spec_helper', __FILE__)
 
 load_extension('string')
@@ -13,6 +14,13 @@ describe :rb_str_new2, :shared => true do
       lambda { @s.send(@method, nil) }.should raise_error(ArgumentError)
     end
   end
+
+  ruby_version_is "1.9" do
+    it "encodes the string with ASCII_8BIT" do
+      @s.send(@method, "hello").encoding.should == Encoding::ASCII_8BIT
+    end
+  end
+
 end
 
 describe "C-API String function" do
@@ -130,11 +138,56 @@ describe "C-API String function" do
       it_behaves_like :rb_str_new2, :rb_str_new_cstr
     end
 
+    describe "rb_usascii_str_new" do
+      it "creates a new String with US-ASCII Encoding from a char buffer of len characters" do
+        str = encode("abc", "us-ascii")
+        result = @s.rb_usascii_str_new("abcdef", 3)
+        result.should == str
+        result.encoding.should == Encoding::US_ASCII
+      end
+    end
+
     describe "rb_usascii_str_new_cstr" do
       it "creates a new String with US-ASCII Encoding" do
         str = encode("abc", "us-ascii")
         result = @s.rb_usascii_str_new_cstr("abc")
         result.should == str
+        result.encoding.should == Encoding::US_ASCII
+      end
+    end
+
+    describe "rb_str_encode" do
+      it "returns a String in the destination encoding" do
+        result = @s.rb_str_encode("abc", Encoding::ISO_8859_1, 0, nil)
+        result.encoding.should == Encoding::ISO_8859_1
+      end
+
+      it "transcodes the String" do
+        result = @s.rb_str_encode("ありがとう", "euc-jp", 0, nil)
+        result.should == "\xa4\xa2\xa4\xea\xa4\xac\xa4\xc8\xa4\xa6".force_encoding("euc-jp")
+        result.encoding.should == Encoding::EUC_JP
+      end
+
+      it "returns a dup of the original String" do
+        a = "abc"
+        b = @s.rb_str_encode("abc", "us-ascii", 0, nil)
+        a.should_not equal(b)
+      end
+
+      it "accepts encoding flags" do
+        result = @s.rb_str_encode("a\xffc", "us-ascii",
+                                  Encoding::Converter::INVALID_REPLACE, nil)
+        result.should == "a?c"
+        result.encoding.should == Encoding::US_ASCII
+      end
+
+      it "accepts an encoding options Hash specifying replacement String" do
+        # Yeah, MRI aborts with rb_bug() if the options Hash is not frozen
+        options = { :replace => "b" }.freeze
+        result = @s.rb_str_encode("a\xffc", "us-ascii",
+                                  Encoding::Converter::INVALID_REPLACE,
+                                  options)
+        result.should == "abc"
         result.encoding.should == Encoding::US_ASCII
       end
     end
@@ -277,6 +330,15 @@ describe "C-API String function" do
 
     it "converts a C string to a Fixnum strictly" do
       lambda { @s.rb_cstr_to_inum("1234a", 10, true) }.should raise_error(ArgumentError)
+    end
+  end
+
+  ruby_version_is "1.9" do
+    describe "rb_str_subseq" do
+      it "returns a byte-indexed substring" do
+        str = encode("\x00\x01\x02\x03\x04", "binary")
+        @s.rb_str_subseq(str, 1, 2).should == encode("\x01\x02", "binary")
+      end
     end
   end
 
@@ -423,6 +485,12 @@ describe "C-API String function" do
     end
   end
 
+  describe "rb_str_inspect" do
+    it "returns the equivalent of calling #inspect on the String" do
+      @s.rb_str_inspect("value").should == %["value"]
+    end
+  end
+
   describe "rb_str_intern" do
     it "returns a symbol created from the string" do
       @s.rb_str_intern("symbol").should == :symbol
@@ -544,6 +612,29 @@ describe "C-API String function" do
 end
 
 ruby_version_is "1.9" do
+
+  describe "rb_str_length" do
+    it "returns the string's length" do
+      @s.rb_str_length("dewdrops").should == 8
+    end
+
+    it "counts characters in multi byte encodings" do
+      @s.rb_str_length("düwdrops").should == 8
+    end
+  end
+
+  describe "rb_str_equal" do
+    it "compares two same strings" do
+      s = "hello"
+      @s.rb_str_equal(s, "hello").should be_true
+    end
+
+    it "compares two different strings" do
+      s = "hello"
+      @s.rb_str_equal(s, "hella").should be_false
+    end
+  end
+
   describe :rb_external_str_new, :shared => true do
     it "returns a String in the default external encoding" do
       Encoding.default_external = "UTF-8"

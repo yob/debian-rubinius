@@ -156,10 +156,13 @@ namespace rubinius {
     return s;
   }
 
-  void String::update_handle() {
-    if(!inflated_header_p()) return;
+  void String::update_handle(VM* vm) {
+    State state(vm);
+    update_handle(&state);
+  }
 
-    capi::Handle* handle = inflated_header()->handle();
+  void String::update_handle(STATE) {
+    capi::Handle* handle = this->handle(state);
     if(!handle) return;
 
     handle->update(NativeMethodEnvironment::get());
@@ -174,42 +177,6 @@ namespace rubinius {
 
     OnigEncodingType* e = enc->get_encoding();
     return ONIGENC_MBC_MAXLEN(e) == ONIGENC_MBC_MINLEN(e);
-  }
-
-  static const uint8_t* find_non_ascii(const uint8_t* data, int num) {
-    for(int i = 0; i < num; i++) {
-      if(!ISASCII(data[i])) {
-        return data + i;
-      }
-    }
-    return 0;
-  }
-
-  static int mbclen(const uint8_t* p, const uint8_t* e, OnigEncodingType* enc)
-  {
-    int n = ONIGENC_PRECISE_MBC_ENC_LEN(enc, (UChar*)p, (UChar*)e);
-
-    if (ONIGENC_MBCLEN_CHARFOUND_P(n) && ONIGENC_MBCLEN_CHARFOUND_LEN(n) <= e-p) {
-      return ONIGENC_MBCLEN_CHARFOUND_LEN(n);
-    } else {
-      int min = ONIGENC_MBC_MINLEN(enc);
-      return min <= e-p ? min : (int)(e-p);
-    }
-  }
-
-  static int precise_mbclen(const uint8_t* p, const uint8_t* e, OnigEncodingType* enc) {
-    int n;
-
-    if (e <= p) {
-      return ONIGENC_CONSTRUCT_MBCLEN_NEEDMORE(1);
-    }
-
-    n = ONIGENC_PRECISE_MBC_ENC_LEN(enc, (UChar*)p, (UChar*)e);
-    if (e-p < n) {
-      return ONIGENC_CONSTRUCT_MBCLEN_NEEDMORE(n-(int)(e-p));
-    }
-
-    return n;
   }
 
   static void invalid_codepoint_error(STATE, unsigned int c) {
@@ -406,10 +373,10 @@ namespace rubinius {
 
       do {
         buf[i++] = convert_byte();
-        n = precise_mbclen(buf, buf + i, enc);
+        n = Encoding::precise_mbclen(buf, buf + i, enc);
       } while(p < e && i < maxlen && ONIGENC_MBCLEN_NEEDMORE_P(n));
 
-      n = precise_mbclen(buf, buf + i, enc);
+      n = Encoding::precise_mbclen(buf, buf + i, enc);
       if(ONIGENC_MBCLEN_INVALID_P(n)) {
         raise_error("invalid multibyte escape");
       } else if(i > 1 || (*buf & 0x80)) {
@@ -418,7 +385,7 @@ namespace rubinius {
         }
         ascii = false;
 
-        append_bytes(buf, n);
+        append_bytes(buf, i);
 
       } else {
         int n = snprintf(reinterpret_cast<char*>(buf),
@@ -498,7 +465,7 @@ namespace rubinius {
     ces.enc = enc->get_encoding();
 
     while(ces.p < ces.e) {
-      int n = precise_mbclen(ces.p, ces.e, ces.enc);
+      int n = Encoding::precise_mbclen(ces.p, ces.e, ces.enc);
       if(!ONIGENC_MBCLEN_CHARFOUND_P(n)) {
         ces.raise_error("invalid multibyte character");
       }
@@ -614,36 +581,32 @@ namespace rubinius {
 
   native_int String::char_size(STATE) {
     if(num_chars_->nil_p()) {
-      if(LANGUAGE_18_ENABLED(state)) {
+      if(byte_compatible_p(encoding_)) {
         num_chars(state, num_bytes_);
       } else {
-        if(byte_compatible_p(encoding_)) {
-          num_chars(state, num_bytes_);
+        OnigEncodingType* enc = encoding_->get_encoding();
+        native_int chars;
+
+        if(fixed_width_p(encoding_)) {
+          chars = (byte_size() + ONIGENC_MBC_MINLEN(enc) - 1) / ONIGENC_MBC_MINLEN(enc);
         } else {
-          OnigEncodingType* enc = encoding_->get_encoding();
-          native_int chars;
+          uint8_t* p = byte_address();
+          uint8_t* e = p + byte_size();
 
-          if(fixed_width_p(encoding_)) {
-            chars = (byte_size() + ONIGENC_MBC_MINLEN(enc) - 1) / ONIGENC_MBC_MINLEN(enc);
-          } else {
-            uint8_t* p = byte_address();
-            uint8_t* e = p + byte_size();
+          for(chars = 0; p < e; chars++) {
+            int n = Encoding::precise_mbclen(p, e, enc);
 
-            for(chars = 0; p < e; chars++) {
-              int n = precise_mbclen(p, e, enc);
-
-              if(ONIGENC_MBCLEN_CHARFOUND_P(n)) {
-                p += ONIGENC_MBCLEN_CHARFOUND_LEN(n);
-              } else if(p + ONIGENC_MBC_MINLEN(enc) <= e) {
-                p += ONIGENC_MBC_MINLEN(enc);
-              } else {
-                p = e;
-              }
+            if(ONIGENC_MBCLEN_CHARFOUND_P(n)) {
+              p += ONIGENC_MBCLEN_CHARFOUND_LEN(n);
+            } else if(p + ONIGENC_MBC_MINLEN(enc) <= e) {
+              p += ONIGENC_MBC_MINLEN(enc);
+            } else {
+              p = e;
             }
           }
-
-          num_chars(state, Fixnum::from(chars));
         }
+
+        num_chars(state, Fixnum::from(chars));
       }
     }
 
@@ -656,7 +619,7 @@ namespace rubinius {
 
   Encoding* String::encoding(STATE) {
     if(encoding_->nil_p()) {
-      encoding(state, Encoding::usascii_encoding(state));
+      encoding(state, Encoding::ascii8bit_encoding(state));
     }
     return encoding_;
   }
@@ -824,15 +787,15 @@ namespace rubinius {
     native_int current_size = byte_size();
     native_int data_size = as<ByteArray>(data_)->size();
 
-    // Clamp the string size the maximum underlying byte array size
+    // Clamp the string size to the maximum underlying byte array size
     if(unlikely(current_size > data_size)) {
       current_size = data_size;
     }
 
     native_int new_size = current_size + length;
-    native_int capacity = data_size;
+    native_int capacity = data_size == 0 ? 2 : data_size;
 
-    if(capacity < new_size + 1) {
+    if(capacity <= new_size) {
       // capacity needs one extra byte of room for the trailing null
       do {
         // @todo growth should be more intelligent than doubling
@@ -937,95 +900,80 @@ namespace rubinius {
     return this;
   }
 
-  struct tr_data {
-    uint8_t tr[256];
-    native_int set[256];
-    native_int steps;
-    native_int last;
-    native_int limit;
-
-    bool assign(native_int chr) {
-      int j, i = set[chr];
-
-      if(limit >= 0 && steps >= limit) return true;
-
-      if(i < 0) {
-        tr[last] = chr;
-      } else {
-        last--;
-        for(j = i + 1; j <= last; j++) {
-          set[tr[j]]--;
-          tr[j-1] = tr[j];
-        }
-        tr[last] = chr;
-      }
-      set[chr] = last++;
-      steps++;
-
-      return false;
-    }
-  };
-
   Fixnum* String::tr_expand(STATE, Object* limit, Object* invalid_as_empty) {
-    struct tr_data tr_data;
-
-    tr_data.last = 0;
-    tr_data.steps = 0;
-
-    if(Fixnum* lim = try_as<Fixnum>(limit)) {
-      tr_data.limit = lim->to_native();
-    } else {
-      tr_data.limit = -1;
+    native_int lim = -1;
+    if(Fixnum* l = try_as<Fixnum>(limit)) {
+      lim = l->to_native();
     }
 
     uint8_t* str = byte_address();
     native_int bytes = byte_size();
-    native_int start = bytes > 1 && str[0] == '^' ? 1 : 0;
-    memset(tr_data.set, -1, sizeof(native_int) * 256);
 
-    for(native_int i = start; i < bytes;) {
+    for(native_int i = 0; i < bytes;) {
       native_int chr = str[i];
       native_int seq = ++i < bytes ? str[i] : -1;
 
       if(chr == '\\' && seq >= 0) {
         continue;
       } else if(seq == '-') {
+        native_int start = i - 1;
         native_int max = ++i < bytes ? str[i] : -1;
-        if(max >= 0 && chr > max && CBOOL(invalid_as_empty)) {
-          i++;
+        native_int next = max >= 0 ? i + 1 : i;
+        if(max >= 0 && chr > max && !LANGUAGE_18_ENABLED(state)) {
+          std::ostringstream message;
+          if (isprint(chr) && isprint(max)) {
+            message << "invalid range \"";
+            message << (char)chr << "-" << (char)max;
+            message << "\" in string transliteration";
+          } else {
+            message << "invalid range in string transliteration";
+          }
+          Exception::argument_error(state, message.str().c_str());
         } else if(max >= 0) {
-          do {
-            if(tr_data.assign(chr)) return tr_replace(state, &tr_data);
-            chr++;
-          } while(chr <= max);
-          i++;
-        } else {
-          if(tr_data.assign(chr)) return tr_replace(state, &tr_data);
-          if(tr_data.assign(seq)) return tr_replace(state, &tr_data);
+          if(chr > max) {
+            max = CBOOL(invalid_as_empty) ? chr - 1 : chr;
+          }
+          i = tr_replace(state, chr, max + 1, start, next);
+          str = byte_address();
+          bytes = byte_size();
         }
-      } else {
-        if(tr_data.assign(chr)) return tr_replace(state, &tr_data);
       }
     }
 
-    return tr_replace(state, &tr_data);
+    if(lim > 0 && byte_size() > lim) {
+      num_bytes(state, Fixnum::from(lim));
+      byte_address()[byte_size()] = 0;
+    }
+    return num_bytes();
   }
 
-  Fixnum* String::tr_replace(STATE, struct tr_data* tr_data) {
-    if(tr_data->last + 1 > byte_size() || shared_->true_p()) {
-      ByteArray* ba = ByteArray::create(state, tr_data->last + 1);
+  native_int String::tr_replace(STATE, native_int first, native_int last, native_int start, native_int next) {
+    native_int replace_length = last - first;
+    native_int added_chars = replace_length - next + start;
+    native_int new_size = byte_size() + added_chars + 1;
+
+    if(new_size > byte_size() || shared_->true_p()) {
+      ByteArray* ba = ByteArray::create(state, new_size);
+      memcpy(ba->raw_bytes(), byte_address(), byte_size());
 
       data(state, ba);
       shared(state, cFalse);
     }
 
-    memcpy(byte_address(), tr_data->tr, tr_data->last);
-    byte_address()[tr_data->last] = 0;
+    memmove(byte_address() + start + replace_length,
+            byte_address() + next,
+            byte_size() - next);
 
-    num_bytes(state, Fixnum::from(tr_data->last));
+    uint8_t* address_start = byte_address() + start;
+    while(first < last) {
+      *address_start = first;
+      ++address_start;
+      ++first;
+    }
+
+    num_bytes(state, Fixnum::from(new_size - 1));
     num_chars(state, nil<Fixnum>());
-
-    return Fixnum::from(tr_data->steps);
+    return start + replace_length;
   }
 
   String* String::transform(STATE, Tuple* tbl, Object* respect_kcode) {
@@ -1329,24 +1277,47 @@ namespace rubinius {
    * parameter is the byte index of a character at which to start searching.
    */
   native_int String::find_character_byte_index(STATE, native_int index,
-                                               native_int start)
-  {
+                                               native_int start) {
+    if(byte_compatible_p(encoding_)) {
+      return start + index;
+    } else if(fixed_width_p(encoding_)) {
+      return start + index * ONIGENC_MBC_MINLEN(encoding_->get_encoding());
+    } else {
+      native_int offset = Encoding::find_character_byte_index(byte_address() + start,
+                                                 byte_address() + byte_size(),
+                                                 index,
+                                                 encoding_->get_encoding());
+      return start + offset;
+    }
+  }
+
+  /* Returns the char index of the character at byte index 'index'. The 'start'
+   * parameter is the byte index of a character at which to start searching.
+   * Returns the char index of the first character starting at or after the
+   * given index.
+   */
+  native_int String::find_byte_character_index(STATE, native_int index,
+                                               native_int start) {
     if(byte_compatible_p(encoding_)) {
       return index;
     } else if(fixed_width_p(encoding_)) {
-      return index * ONIGENC_MBC_MINLEN(encoding_->get_encoding());
+      return index / ONIGENC_MBC_MINLEN(encoding_->get_encoding());
     } else {
-      OnigEncodingType* enc = encoding_->get_encoding();
-      uint8_t* p = byte_address() + start;
-      uint8_t* e = byte_address() + byte_size();
-
-      while(p < e && index--) {
-        p += mbclen(p, e, enc);
-      }
-
-      if(p > e) p = e;
-      return p - byte_address();
+      return Encoding::find_byte_character_index(byte_address() + start,
+                                                 byte_address() + byte_size(),
+                                                 index,
+                                                 encoding_->get_encoding());
     }
+  }
+
+  /* Returns the char index of the character at byte index 'index'. The 'start'
+   * parameter is the byte index of a character at which to start searching.
+   * Returns the char index of the first character starting at or after the
+   * given index.
+   */
+  Fixnum* String::find_byte_character_index_prim(STATE, Fixnum* index,
+                                                    Fixnum* start) {
+    return Fixnum::from(this->find_byte_character_index(state, index->to_native(), start->to_native()));
   }
 
   /* The 'index' and 'length' parameters are byte based. This method is a
@@ -1384,8 +1355,8 @@ namespace rubinius {
     native_int i = find_character_byte_index(state, index);
     native_int e = find_character_byte_index(state, length - 1, i);
 
-    int c = precise_mbclen(byte_address() + e, byte_address() + byte_size(),
-                           encoding_->get_encoding());
+    int c = Encoding::precise_mbclen(byte_address() + e, byte_address() + byte_size(),
+                                     encoding_->get_encoding());
 
     if(ONIGENC_MBCLEN_CHARFOUND_P(c)) {
       e += ONIGENC_MBCLEN_CHARFOUND_LEN(c);
@@ -1540,6 +1511,24 @@ namespace rubinius {
     }
   }
 
+  OnigEncodingType* String::get_encoding_kcode_fallback(STATE) {
+    if(encoding_->nil_p()) {
+      switch(state->shared().kcode_page()) {
+      default:
+      case kcode::eAscii:
+        return ONIG_ENCODING_ASCII;
+      case kcode::eEUC:
+        return ONIG_ENCODING_EUC_JP;
+      case kcode::eSJIS:
+        return ONIG_ENCODING_Shift_JIS;
+      case kcode::eUTF8:
+        return ONIG_ENCODING_UTF_8;
+      }
+    } else {
+      return encoding_->get_encoding();
+    }
+  }
+
   String* String::find_character(STATE, Fixnum* offset) {
     native_int o = offset->to_native();
     if(o >= byte_size()) return nil<String>();
@@ -1549,16 +1538,17 @@ namespace rubinius {
 
     String* output = 0;
 
-    kcode::table* tbl = state->shared().kcode_table();
-    if(kcode::mbchar_p(tbl, *cur)) {
-      native_int clen = kcode::mbclen(tbl, *cur);
-      if(o + clen <= byte_size()) {
-        output = String::create(state, reinterpret_cast<const char*>(cur), clen);
-      }
-    }
+    OnigEncodingType* enc = get_encoding_kcode_fallback(state);
 
-    if(!output) {
+    if(ONIGENC_MBC_MAXLEN(enc) == 1) {
       output = String::create(state, reinterpret_cast<const char*>(cur), 1);
+    } else {
+      int clen = Encoding::precise_mbclen(cur, cur + ONIGENC_MBC_MAXLEN(enc), enc);
+      if(ONIGENC_MBCLEN_CHARFOUND_P(clen)) {
+        output = String::create(state, reinterpret_cast<const char*>(cur), clen);
+      } else {
+        output = String::create(state, reinterpret_cast<const char*>(cur), 1);
+      }
     }
 
     output->klass(state, class_object(state));
@@ -1632,7 +1622,7 @@ namespace rubinius {
       } else {
         if(!CBOOL(encoding(state)->ascii_compatible_p(state))) {
           ascii_only(state, cFalse);
-        } else if(find_non_ascii(byte_address(), byte_size())) {
+        } else if(Encoding::find_non_ascii_index(byte_address(), byte_address() + byte_size()) >= 0) {
           ascii_only(state, cFalse);
         } else {
           ascii_only(state, cTrue);
@@ -1656,7 +1646,7 @@ namespace rubinius {
       uint8_t* e = p + byte_size();
 
       while(p < e) {
-        int n = precise_mbclen(p, e, enc);
+        int n = Encoding::precise_mbclen(p, e, enc);
 
         if(!ONIGENC_MBCLEN_CHARFOUND_P(n)) {
           valid_encoding(state, cFalse);
@@ -1682,7 +1672,7 @@ namespace rubinius {
       uint8_t* p = byte_address();
       uint8_t* e = p + byte_size();
 
-      int n = precise_mbclen(p, e, enc);
+      int n = Encoding::precise_mbclen(p, e, enc);
 
       if(ONIGENC_MBCLEN_CHARFOUND_P(n)) {
         return Fixnum::from(ONIGENC_MBC_TO_CODE(enc, (UChar*)p, (UChar*)e));
@@ -1690,6 +1680,30 @@ namespace rubinius {
     }
 
     return force_as<Fixnum>(Primitives::failure());
+  }
+
+  Object* String::chr_at(STATE, Fixnum* byte) {
+    native_int i = byte->to_native();
+    native_int size = byte_size();
+    int n = 1;
+
+    if(i < 0 || i >= size) return cNil;
+
+    if(!byte_compatible_p(encoding_)) {
+      OnigEncodingType* enc = encoding_->get_encoding();
+      uint8_t* p = byte_address() + i;
+      uint8_t* e = byte_address() + byte_size();
+
+      int c = Encoding::precise_mbclen(p, e, enc);
+
+      if(ONIGENC_MBCLEN_CHARFOUND_P(c)) {
+        n = ONIGENC_MBCLEN_CHARFOUND_LEN(c);
+      } else {
+        return cNil;
+      }
+    }
+
+    return byte_substring(state, i, n);
   }
 
   void String::Info::show(STATE, Object* self, int level) {

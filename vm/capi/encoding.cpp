@@ -18,6 +18,20 @@ using namespace rubinius;
 using namespace rubinius::capi;
 
 extern "C" {
+  int rb_enc_coderange_asciionly_p(VALUE obj) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    Object* val = env->get_object(obj);
+
+    if(String* str = try_as<String>(val)) {
+      if(CBOOL(str->ascii_only_p(env->state()))) return Qtrue;
+    } else {
+      rb_raise(rb_eArgError, "ENC_CODERANGE_ASCIIONLY is only defined for String");
+    }
+
+    return Qfalse;
+  }
+
   int rb_encdb_alias(const char *alias, const char *orig) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
@@ -129,6 +143,8 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     Object* val = env->get_object(obj);
+    if(!val->reference_p() && !val->symbol_p()) return -1;
+
     Encoding* enc = Encoding::get_object_encoding(env->state(), val);
 
     if(enc->nil_p()) return 0;
@@ -190,7 +206,7 @@ extern "C" {
   }
 
   VALUE rb_enc_associate(VALUE obj, rb_encoding *enc) {
-    return rb_enc_associate_index(obj, rb_enc_find_index(rb_enc_name(enc)));
+    return rb_enc_associate_index(obj, rb_enc_to_index(enc));
   }
 
   VALUE rb_enc_associate_index(VALUE obj, int index) {
@@ -251,7 +267,7 @@ extern "C" {
     if(enc) {
       return rb_enc_find_index(rb_enc_name(enc));
     } else {
-      return 0;
+      return Encoding::eBinary;
     }
   }
 
@@ -292,6 +308,18 @@ extern "C" {
       rb_raise(rb_eArgError, "invalid codepoint 0x%x in %s", c, rb_enc_name(enc));
     }
     return n;
+  }
+
+  char* rb_enc_nth(const char* p, const char* e, long nth, rb_encoding* enc) {
+    if (rb_enc_mbmaxlen(enc) == 1) {
+      p += nth;
+    } else if (rb_enc_mbmaxlen(enc) == rb_enc_mbminlen(enc)) {
+      p += nth * rb_enc_mbmaxlen(enc);
+    } else {
+      p += Encoding::find_character_byte_index((uint8_t*)p, (uint8_t*)e, nth, enc);
+    }
+    if (p > e) p = e;
+    return (char*)p;
   }
 
 #define ctype_test(c, ctype)  (rb_isascii(c) && ONIGENC_IS_ASCII_CODE_CTYPE((c), ctype))

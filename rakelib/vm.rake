@@ -1,5 +1,4 @@
 require 'rakelib/rubinius'
-require 'rakelib/build'
 require 'rakelib/instruction_parser'
 require 'rakelib/generator_task'
 
@@ -48,6 +47,7 @@ TYPE_GEN    = %w[ vm/gen/includes.hpp
 
 GENERATED = %W[ vm/gen/revision.h
                 vm/gen/config_variables.h
+                vm/gen/signature.h
                 #{encoding_database}
                 #{transcoders_database}
               ] + TYPE_GEN + INSN_GEN
@@ -72,7 +72,7 @@ field_extract_headers = %w[
   vm/builtin/channel.hpp
   vm/builtin/module.hpp
   vm/builtin/class.hpp
-  vm/builtin/compiledmethod.hpp
+  vm/builtin/compiledcode.hpp
   vm/builtin/data.hpp
   vm/builtin/dir.hpp
   vm/builtin/exception.hpp
@@ -87,7 +87,7 @@ field_extract_headers = %w[
   vm/builtin/packed_object.hpp
   vm/builtin/randomizer.hpp
   vm/builtin/regexp.hpp
-  vm/builtin/staticscope.hpp
+  vm/builtin/constantscope.hpp
   vm/builtin/encoding.hpp
   vm/builtin/string.hpp
   vm/builtin/symbol.hpp
@@ -111,6 +111,28 @@ field_extract_headers = %w[
   vm/builtin/atomic.hpp
 ]
 
+transcoders_src_dir = File.expand_path "../../vendor/oniguruma/enc/trans", __FILE__
+
+libdir = "#{BUILD_CONFIG[:stagingdir] || BUILD_CONFIG[:sourcedir]}/#{BUILD_CONFIG[:libdir]}"
+transcoders_lib_dir = File.expand_path "#{libdir}/19/encoding/converter", __FILE__
+directory transcoders_lib_dir
+
+TRANSCODING_LIBS = []
+
+Dir["#{transcoders_src_dir}/*.c"].each do |name|
+  name.sub!(/\.c$/, ".#{$dlext}")
+  target = File.join transcoders_lib_dir, File.basename(name)
+
+  task name do
+  end
+
+  file target => name do |t|
+    cp t.prerequisites.first, t.name, :preserve => true, :verbose => $verbose
+  end
+
+  TRANSCODING_LIBS << target
+end
+
 ############################################################
 # Other Tasks
 
@@ -123,6 +145,10 @@ namespace :build do
       unless File.file?("vendor/llvm/Release/bin/llvm-config")
         ENV["REQUIRES_RTTI"] = "1"
         Dir.chdir "vendor/llvm" do
+          host = Rubinius::BUILD_CONFIG[:host]
+          llvm_config_flags = "--build=#{host} --host=#{host} " \
+                              "--enable-optimized --disable-assertions "\
+                              " --enable-targets=host,cpp"
           sh %[sh -c "#{expand("./configure")} #{llvm_config_flags}"]
           sh make
         end
@@ -134,16 +160,24 @@ namespace :build do
   task :build => %W[
                      build:llvm
                      #{VM_EXE}
-                     kernel:build
                      build:ffi:preprocessor
-                     build:zlib
+                     compiler:generate
+                     stage:bin
+                     stage:extra_bins
+                     stage:capi_include
+                     stage:lib
+                     stage:tooling
+                     stage:kernel
+                     kernel:build
+                     stage:runtime
+                     stage:documentation
+                     stage:manpages
                      extensions
-                   ]
+                   ] + TRANSCODING_LIBS
 
   namespace :ffi do
 
     FFI_PREPROCESSABLES = %w[ lib/fcntl.rb
-                              lib/zlib.rb
                             ]
 
     unless BUILD_CONFIG[:windows]
@@ -157,18 +191,6 @@ namespace :build do
 
     FFI::FileProcessor::Task.new FFI_PREPROCESSABLES
 
-  end
-
-  if Rubinius::BUILD_CONFIG[:vendor_zlib]
-    directory 'lib/zlib'
-
-    task :zlib => ['lib/zlib', VM_EXE] do
-      FileList["vendor/zlib/libz.*"].each do |lib|
-        cp lib, 'lib/zlib/'
-      end
-    end
-  else
-    task :zlib
   end
 end
 
@@ -202,24 +224,9 @@ file encoding_database => encoding_extract do |t|
   ruby encoding_extract, dir, t.name
 end
 
-transcoders_lib_dir = File.expand_path "../../lib/19/encoding/converter", __FILE__
-directory transcoders_lib_dir
-
 transcoders_extract = 'vm/codegen/transcoders_extract.rb'
 
-transcoders_src_dir = File.expand_path "../../vendor/oniguruma/enc/trans", __FILE__
-
-TRANSCODING_LIBS = []
-
-Dir["#{transcoders_src_dir}/*#{$dlext}"].each do |name|
-  target = File.join transcoders_lib_dir, File.basename(name)
-  file target => name do |t|
-    cp t.prerequisites.first, t.name
-  end
-  TRANSCODING_LIBS << target
-end
-
-file transcoders_database => [transcoders_lib_dir, transcoders_extract] + TRANSCODING_LIBS do |t|
+file transcoders_database => [transcoders_lib_dir, transcoders_extract] do |t|
   ruby transcoders_extract, transcoders_src_dir, t.name
 end
 
@@ -264,15 +271,6 @@ end
 task 'vm/test/runner' => GENERATED do
   blueprint = Daedalus.load "rakelib/blueprint.rb"
   blueprint.build "vm/test/runner", @parallel_jobs
-end
-
-task :transcoders => 'vendor/oniguruma/libonig.a' do
-  dir = "lib/19/encoding/converter"
-  mkdir_p dir
-
-  Dir["vendor/oniguruma/enc/trans/*#{$dlext}"].each do |lib|
-    cp lib, dir
-  end
 end
 
 # Generate files for instructions and interpreters
@@ -366,9 +364,15 @@ namespace :vm do
       'vm/test/runner.cpp',
       'vm/test/runner.o',
       VM_EXE,
+      'bin/rbx',
+      'bin/ruby',
+      'bin/rake',
+      'bin/ri',
+      'bin/rdoc',
+      'bin/irb',
+      'bin/gem',
       'vm/.deps',
-      'lib/zlib/*',
-      'lib/zlib'
+      'staging'
     ].exclude("vm/gen/config.h")
 
     files.each do |filename|

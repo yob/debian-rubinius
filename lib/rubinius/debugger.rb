@@ -111,7 +111,7 @@ class Rubinius::Debugger
     # Feed info to the debugger thread!
     locs = Rubinius::VM.backtrace(offset + 1, true)
 
-    method = Rubinius::CompiledMethod.of_sender
+    method = Rubinius::CompiledCode.of_sender
 
     bp = BreakPoint.new "<start>", method, 0, 0
     channel = Rubinius::Channel.new
@@ -174,13 +174,16 @@ class Rubinius::Debugger
   def accept_commands
     cmd = Readline.readline "debug> "
 
-    if cmd.empty?
+    if cmd.nil?
+      # ^D was entered
+      cmd = "quit"
+    elsif cmd.empty?
       cmd = @last_command
     else
       @last_command = cmd
     end
 
-    command, args = cmd.strip.split(/\s+/, 2)
+    command, args = cmd.to_s.strip.split(/\s+/, 2)
 
     runner = Command.commands.find { |k| k.match?(command) }
 
@@ -225,7 +228,7 @@ class Rubinius::Debugger
   def set_breakpoint_method(descriptor, method, line=nil)
     exec = method.executable
 
-    unless exec.kind_of?(Rubinius::CompiledMethod)
+    unless exec.kind_of?(Rubinius::CompiledCode)
       error "Unsupported method type: #{exec.class}"
       return
     end

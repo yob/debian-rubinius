@@ -3,10 +3,10 @@
 module Kernel
   def method(name)
     name = Rubinius::Type.coerce_to_symbol name
-    cm = Rubinius.find_method(self, name)
+    code = Rubinius.find_method(self, name)
 
-    if cm
-      Method.new(self, cm[1], cm[0], name)
+    if code
+      Method.new(self, code[1], code[0], name)
     elsif respond_to_missing?(name, true)
       Method.new(self, self.class, Rubinius::MissingMethod.new(self,  name), name)
     else
@@ -16,10 +16,10 @@ module Kernel
 
   def public_method(name)
     name = Rubinius::Type.coerce_to_symbol name
-    cm = Rubinius.find_public_method(self, name)
+    code = Rubinius.find_public_method(self, name)
 
-    if cm
-      Method.new(self, cm[1], cm[0], name)
+    if code
+      Method.new(self, code[1], code[0], name)
     elsif respond_to_missing?(name, false)
       Method.new(self, self.class, Rubinius::MissingMethod.new(self,  name), name)
     else
@@ -124,12 +124,12 @@ module Kernel
   #
   def send(message, *args)
     Rubinius.primitive :object_send
-    raise PrimitiveFailure, "#send primitive failed"
+    raise PrimitiveFailure, "Kernel#send primitive failed"
   end
 
   def public_send(message, *args)
     Rubinius.primitive :object_public_send
-    raise PrimitiveFailure, "#public_send primitive failed"
+    raise PrimitiveFailure, "Kernel#public_send primitive failed"
   end
 
   # In 1.8, :object_id is an alias to :__id__ because both methods are defined
@@ -137,7 +137,7 @@ module Kernel
   #
   def object_id
     Rubinius.primitive :object_id
-    raise PrimitiveFailure, "#object_id primitive failed"
+    raise PrimitiveFailure, "Kernel#object_id primitive failed"
   end
 
   def proc(&prc)
@@ -172,7 +172,7 @@ module Kernel
   # directory.
   #
   def require_relative(name)
-    scope = Rubinius::StaticScope.of_sender
+    scope = Rubinius::ConstantScope.of_sender
     Rubinius::CodeLoader.require_relative(name, scope)
   end
   module_function :require_relative

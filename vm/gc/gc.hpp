@@ -32,10 +32,10 @@ namespace rubinius {
   class GCData {
     Roots& roots_;
     capi::Handles* handles_;
-    capi::Handles* cached_handles_;
+    std::list<capi::Handle*>* cached_handles_;
     GlobalCache* global_cache_;
     std::list<ManagedThread*>* threads_;
-    std::list<capi::Handle**>* global_handle_locations_;
+    std::list<capi::GlobalHandle*>* global_handle_locations_;
     GCTokenImpl* gc_token_;
 #ifdef ENABLE_LLVM
     LLVMState* llvm_state_;
@@ -46,9 +46,9 @@ namespace rubinius {
     GCData(VM*);
 
     GCData(Roots& r,
-           capi::Handles* handles = NULL, capi::Handles* cached_handles = NULL,
+           capi::Handles* handles = NULL, std::list<capi::Handle*>* cached_handles = NULL,
            GlobalCache *cache = NULL, std::list<ManagedThread*>* ths = NULL,
-           std::list<capi::Handle**>* global_handle_locations = NULL)
+           std::list<capi::GlobalHandle*>* global_handle_locations = NULL)
       : roots_(r)
       , handles_(handles)
       , cached_handles_(cached_handles)
@@ -72,7 +72,7 @@ namespace rubinius {
       return handles_;
     }
 
-    capi::Handles* cached_handles() {
+    std::list<capi::Handle*>* cached_handles() {
       return cached_handles_;
     }
 
@@ -80,7 +80,7 @@ namespace rubinius {
       return global_cache_;
     }
 
-    std::list<capi::Handle**>* global_handle_locations() {
+    std::list<capi::GlobalHandle*>* global_handle_locations() {
       return global_handle_locations_;
     }
 

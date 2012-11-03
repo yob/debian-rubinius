@@ -6,6 +6,7 @@
 #include "vm.hpp"
 #include "objectmemory.hpp"
 #include "call_frame.hpp"
+#include "on_stack.hpp"
 
 #include "builtin/object.hpp"
 #include "builtin/symbol.hpp"
@@ -13,7 +14,7 @@
 #include "builtin/class.hpp"
 #include "builtin/string.hpp"
 #include "builtin/block_environment.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/proc.hpp"
 #include "builtin/autoload.hpp"
 #include "builtin/global_cache_entry.hpp"
@@ -33,7 +34,7 @@
 #include "dispatch.hpp"
 #include "lookup_data.hpp"
 #include "inline_cache.hpp"
-#include "vmmethod.hpp"
+#include "machine_code.hpp"
 #include "configuration.hpp"
 
 #include <stdarg.h>
@@ -80,15 +81,15 @@ extern "C" {
   }
 
   void rbx_begin_profiling(STATE, void* data, Executable* exec, Module* mod, Arguments& args,
-                           CompiledMethod* cm)
+                           CompiledCode* code)
   {
     // Use placement new to stick the class into data, which is on the callers
     // stack.
-    new(data) tooling::MethodEntry(state, exec, mod, args, cm);
+    new(data) tooling::MethodEntry(state, exec, mod, args, code);
   }
 
   void rbx_begin_profiling_block(STATE, void* data, BlockEnvironment* env,
-                                 Module* mod, CompiledMethod* cm)
+                                 Module* mod, CompiledCode* code)
   {
     // Use placement new to stick the class into data, which is on the callers
     // stack.
@@ -175,7 +176,7 @@ extern "C" {
     VariableScope* scope = call_frame->method_scope(state);
     assert(scope);
 
-    VMMethod* v = scope->method()->backend_method();
+    MachineCode* v = scope->method()->machine_code();
     Object* splat_obj = 0;
     Array* splat = 0;
 
@@ -249,22 +250,22 @@ extern "C" {
   Object* rbx_create_block(STATE, CallFrame* call_frame, int index) {
     CPP_TRY
 
-    Object* _lit = call_frame->cm->literals()->at(state, index);
-    CompiledMethod* cm = as<CompiledMethod>(_lit);
+    Object* _lit = call_frame->compiled_code->literals()->at(state, index);
+    CompiledCode* code = as<CompiledCode>(_lit);
 
     // TODO: We don't need to be doing this everytime.
-    if(cm->scope()->nil_p()) {
-      cm->scope(state, call_frame->static_scope());
+    if(code->scope()->nil_p()) {
+      code->scope(state, call_frame->constant_scope());
     }
 
-    VMMethod* vmm = call_frame->cm->backend_method();
+    MachineCode* mcode = call_frame->compiled_code->machine_code();
     GCTokenImpl gct;
-    return BlockEnvironment::under_call_frame(state, gct, cm, vmm, call_frame);
+    return BlockEnvironment::under_call_frame(state, gct, code, mcode, call_frame);
 
     CPP_CATCH
   }
 
-  Object* rbx_create_block_multi(STATE, CompiledMethod* cm, int count, ...) {
+  Object* rbx_create_block_multi(STATE, CompiledCode* code, int count, ...) {
     va_list ap;
 
     CallFrame* closest = 0;
@@ -287,11 +288,11 @@ extern "C" {
     va_end(ap);
 
     // TODO: We don't need to be doing this everytime.
-    cm->scope(state, closest->static_scope());
+    code->scope(state, closest->constant_scope());
 
-    VMMethod* vmm = closest->cm->backend_method();
+    MachineCode* mcode = closest->compiled_code->machine_code();
     GCTokenImpl gct;
-    return BlockEnvironment::under_call_frame(state, gct, cm, vmm, closest);
+    return BlockEnvironment::under_call_frame(state, gct, code, mcode, closest);
   }
 
   Object* rbx_promote_variables(STATE, CallFrame* call_frame) {
@@ -385,11 +386,11 @@ extern "C" {
     CPP_TRY
 
     Module* mod = as<Module>(top);
-    StaticScope* scope = StaticScope::create(state);
+    ConstantScope* scope = ConstantScope::create(state);
     scope->module(state, mod);
-    scope->parent(state, call_frame->static_scope());
-    call_frame->cm->scope(state, scope);
-    // call_frame->static_scope_ = scope;
+    scope->parent(state, call_frame->constant_scope());
+    call_frame->compiled_code->scope(state, scope);
+    // call_frame->constant_scope_ = scope;
 
     return cNil;
 
@@ -407,6 +408,7 @@ extern "C" {
          * object itself is wrapped in an Array and passed to the block.
          */
         if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
+          OnStack<1> os(state, obj);
           Object* ignored = obj->send(state, call_frame, state->symbol("to_ary"));
           if(!ignored->nil_p() && !kind_of<Array>(ignored)) {
             Exception::type_error(state, "to_ary must return an Array", call_frame);
@@ -478,6 +480,7 @@ extern "C" {
          * object itself is wrapped in an Array and passed to the block.
          */
         if(CBOOL(obj->respond_to(state, state->symbol("to_ary"), cFalse))) {
+          OnStack<1> os(state, obj);
           Object* ignored = obj->send(state, call_frame, state->symbol("to_ary"));
           if(!kind_of<Array>(ignored)) {
             Exception::type_error(state, "to_ary must return an Array", call_frame);
@@ -565,38 +568,43 @@ extern "C" {
                            int serial, Object* recv)
   {
     if(cache->update_and_validate(state, call_frame, recv)) {
-      MethodCacheEntry* mce = cache->cache();
-
-      if(mce && mce->method()->serial()->to_native() == serial) return cTrue;
+      InlineCacheHit* caches = cache->caches();
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        MethodCacheEntry* mce = caches[i].entry();
+        if(mce && mce->method()->serial()->to_native() != serial) return cFalse;
+      }
     }
 
-    return cFalse;
+    return cTrue;
   }
 
   Object* rbx_check_serial_private(STATE, CallFrame* call_frame, InlineCache* cache,
                            int serial, Object* recv)
   {
     if(cache->update_and_validate_private(state, call_frame, recv)) {
-      MethodCacheEntry* mce = cache->cache();
-
-      if(mce && mce->method()->serial()->to_native() == serial) return cTrue;
+      InlineCacheHit* caches = cache->caches();
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        MethodCacheEntry* mce = caches[i].entry();
+        if(mce && mce->method()->serial()->to_native() != serial) return cFalse;
+      }
     }
 
-    return cFalse;
+    return cTrue;
   }
 
   Object* rbx_find_const(STATE, CallFrame* call_frame, int index, Object* top) {
     CPP_TRY
 
+    GCTokenImpl gct;
     bool found;
     Module* under = as<Module>(top);
-    Symbol* sym = as<Symbol>(call_frame->cm->literals()->at(state, index));
+    Symbol* sym = as<Symbol>(call_frame->compiled_code->literals()->at(state, index));
     Object* res = Helpers::const_get_under(state, under, sym, &found);
 
     if(!found) {
       res = Helpers::const_missing_under(state, under, sym, call_frame);
     } else if(Autoload* autoload = try_as<Autoload>(res)) {
-      res = autoload->resolve(state, call_frame);
+      res = autoload->resolve(state, gct, call_frame, under);
     }
 
     return res;
@@ -761,13 +769,14 @@ extern "C" {
   }
 
   Object* rbx_push_const(STATE, CallFrame* call_frame, Symbol* sym) {
+    GCTokenImpl gct;
     bool found;
     Object* res = Helpers::const_get(state, call_frame, sym, &found);
 
     if(!found) {
       res = Helpers::const_missing(state, sym, call_frame);
     } else if(Autoload* autoload = try_as<Autoload>(res)) {
-      res = autoload->resolve(state, call_frame);
+      res = autoload->resolve(state, gct, call_frame);
     }
 
     return res;
@@ -777,17 +786,17 @@ extern "C" {
                               int association_index) {
     Object* res = 0;
 
-    Object* val = call_frame->cm->literals()->at(state, association_index);
+    Object* val = call_frame->compiled_code->literals()->at(state, association_index);
 
     // See if the cache is present, if so, validate it and use the value
     GlobalCacheEntry* cache;
     if((cache = try_as<GlobalCacheEntry>(val)) != NULL) {
-      if(cache->valid_p(state, call_frame->static_scope())) {
+      if(cache->valid_p(state, call_frame->constant_scope())) {
         res = cache->value();
       }
     } else {
       cache = GlobalCacheEntry::empty(state);
-      call_frame->cm->literals()->put(state, association_index, cache);
+      call_frame->compiled_code->literals()->put(state, association_index, cache);
     }
 
     if(!res) {
@@ -795,12 +804,14 @@ extern "C" {
       res = Helpers::const_get(state, call_frame, sym, &found);
 
       if(found) {
+        GCTokenImpl gct;
+        OnStack<2> os(state, cache, res);
         if(Autoload* autoload = try_as<Autoload>(res)) {
-          res = autoload->resolve(state, call_frame);
+          res = autoload->resolve(state, gct, call_frame);
         }
 
         if(res) {
-          cache->update(state, res, call_frame->static_scope());
+          cache->update(state, res, call_frame->constant_scope());
         }
       } else {
         res = Helpers::const_missing(state, sym, call_frame);
@@ -852,7 +863,7 @@ extern "C" {
 
     if(!scope || scope->nil_p()) {
       Exception::internal_error(state, call_frame,
-                                "illegal set_local_depth usage, no parent");
+                                "illegal set_local_from usage, no parent");
       return 0;
     }
 
@@ -860,7 +871,7 @@ extern "C" {
       scope = scope->parent();
       if(!scope || scope->nil_p()) {
         Exception::internal_error(state, call_frame,
-                                  "illegal set_local_depth usage, no parent");
+                                  "illegal set_local_from usage, no parent");
         return 0;
       }
 
@@ -901,7 +912,7 @@ extern "C" {
         return 0;
       }
 
-      return scope->get_local(index);
+      return scope->get_local(state, index);
     }
   }
 
@@ -911,7 +922,7 @@ extern "C" {
 
     if(!scope || scope->nil_p()) {
       Exception::internal_error(state, call_frame,
-                                "illegal push_local_depth usage, no parent");
+                                "illegal push_local_from usage, no parent");
       return 0;
     }
 
@@ -920,12 +931,12 @@ extern "C" {
 
       if(!scope || scope->nil_p()) {
         Exception::internal_error(state, call_frame,
-                                  "illegal push_local_depth usage, no parent");
+                                  "illegal push_local_from usage, no parent");
         return 0;
       }
     }
 
-    return scope->get_local(index);
+    return scope->get_local(state, index);
   }
 
   Object* rbx_prologue_check(STATE, CallFrame* call_frame) {
@@ -1043,7 +1054,7 @@ extern "C" {
   }
 
   Object* rbx_set_const(STATE, CallFrame* call_frame, Symbol* name, Object* val) {
-    call_frame->static_scope()->module()->set_const(state, name, val);
+    call_frame->constant_scope()->module()->set_const(state, name, val);
     return val;
   }
 
@@ -1054,7 +1065,7 @@ extern "C" {
   }
 
   Object* rbx_set_literal(STATE, CallFrame* call_frame, int which, Object* val) {
-    call_frame->cm->literals()->put(state, which, val);
+    call_frame->compiled_code->literals()->put(state, which, val);
     return cNil;
   }
 
@@ -1265,17 +1276,17 @@ extern "C" {
   {
     LLVMState::get(state)->add_uncommons_taken();
 
-    VMMethod* vmm = call_frame->cm->backend_method();
+    MachineCode* mcode = call_frame->compiled_code->machine_code();
 
     /*
     InlineCache* cache = 0;
 
-    if(vmm->opcodes[call_frame->ip()] == InstructionSequence::insn_send_stack) {
-      cache = reinterpret_cast<InlineCache*>(vmm->opcodes[call_frame->ip() + 1]);
-    } else if(vmm->opcodes[call_frame->ip()] == InstructionSequence::insn_send_method) {
-      cache = reinterpret_cast<InlineCache*>(vmm->opcodes[call_frame->ip() + 1]);
-    } else if(vmm->opcodes[call_frame->ip()] == InstructionSequence::insn_send_stack_with_block) {
-      cache = reinterpret_cast<InlineCache*>(vmm->opcodes[call_frame->ip() + 1]);
+    if(mcode->opcodes[call_frame->ip()] == InstructionSequence::insn_send_stack) {
+      cache = reinterpret_cast<InlineCache*>(mcode->opcodes[call_frame->ip() + 1]);
+    } else if(mcode->opcodes[call_frame->ip()] == InstructionSequence::insn_send_method) {
+      cache = reinterpret_cast<InlineCache*>(mcode->opcodes[call_frame->ip() + 1]);
+    } else if(mcode->opcodes[call_frame->ip()] == InstructionSequence::insn_send_stack_with_block) {
+      cache = reinterpret_cast<InlineCache*>(mcode->opcodes[call_frame->ip() + 1]);
     }
 
     if(cache && cache->name->symbol_p()) {
@@ -1287,7 +1298,7 @@ extern "C" {
 
     if(call_frame->is_inline_frame()) {
       // Fix up this inlined block.
-      if(vmm->parent()) {
+      if(mcode->parent()) {
         CallFrame* creator = call_frame->previous->previous;
         assert(creator);
 
@@ -1295,18 +1306,18 @@ extern "C" {
         call_frame->scope->set_parent(parent);
 
         // Only support one depth!
-        assert(!creator->cm->backend_method()->parent());
+        assert(!creator->compiled_code->machine_code()->parent());
       }
     }
 
-    return VMMethod::uncommon_interpreter(state, vmm, call_frame,
+    return MachineCode::uncommon_interpreter(state, mcode, call_frame,
                                           entry_ip, sp,
                                           method_call_frame, rd,
                                           unwind_count, unwinds);
   }
 
   Object* rbx_restart_interp(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args) {
-    return VMMethod::execute(state, call_frame, exec, mod, args);
+    return MachineCode::execute(state, call_frame, exec, mod, args);
   }
 
   Object* rbx_continue_debugging(STATE, CallFrame* call_frame,
@@ -1316,11 +1327,11 @@ extern "C" {
                                  int32_t* input_unwinds,
                                  Object* top_of_stack)
   {
-    VMMethod* vmm = call_frame->cm->backend_method();
+    MachineCode* mcode = call_frame->compiled_code->machine_code();
 
     if(call_frame->is_inline_frame()) {
       // Fix up this inlined block.
-      if(vmm->parent()) {
+      if(mcode->parent()) {
         CallFrame* creator = call_frame->previous->previous;
         assert(creator);
 
@@ -1328,13 +1339,13 @@ extern "C" {
         call_frame->scope->set_parent(parent);
 
         // Only support one depth!
-        assert(!creator->cm->backend_method()->parent());
+        assert(!creator->compiled_code->machine_code()->parent());
       }
     }
 
     call_frame->ip_ = entry_ip;
 
-    VMMethod::InterpreterState is;
+    MachineCode::InterpreterState is;
     UnwindInfo unwinds[kMaxUnwindInfos];
 
     for(int i = 0, j = 0; j < unwind_count; i += 3, j++) {
@@ -1351,7 +1362,7 @@ extern "C" {
       call_frame->stk[++sp] = top_of_stack;
     }
 
-    return VMMethod::debugger_interpreter_continue(state, vmm, call_frame,
+    return MachineCode::debugger_interpreter_continue(state, mcode, call_frame,
                                           sp, is, unwind_count, unwinds);
   }
 
@@ -1506,8 +1517,13 @@ extern "C" {
   Object* rbx_make_proc(STATE, CallFrame* call_frame) {
     Object* obj = call_frame->scope->block();
     if(CBOOL(obj)) {
-      Object* prc = Proc::from_env(state, G(proc), obj);
-      if(prc == Primitives::failure()) {
+      Proc* prc;
+      if(BlockEnvironment *env = try_as<BlockEnvironment>(obj)) {
+        prc = Proc::create(state, G(proc));
+        prc->block(state, env);
+      } else if(Proc* p = try_as<Proc>(obj)) {
+        prc = p;
+      } else {
         Exception::internal_error(state, call_frame, "invalid block type");
         return 0;
       }

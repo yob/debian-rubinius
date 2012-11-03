@@ -18,7 +18,7 @@ class IO
   def self.binread(file, length=nil, offset=0)
     raise ArgumentError, "Negative length #{length} given" if !length.nil? && length < 0
 
-    File.open(file, "rb") do |f|
+    File.open(file, "r", :encoding => "ascii-8bit:-") do |f|
       f.seek(offset)
       f.read(length)
     end
@@ -39,6 +39,17 @@ class IO
     File.open(file, mode, :encoding => (external || "ASCII-8BIT")) do |f|
       f.seek(offset || 0)
       f.write(string)
+    end
+  end
+
+  def self.read_encode(io, str)
+    if io.internal and io.external
+      ec = Encoding::Converter.new io.external, io.internal
+      ec.convert str
+    elsif io.external
+      str.force_encoding io.external
+    else
+      str
     end
   end
 
@@ -282,14 +293,18 @@ class IO
 
     IO.setup self, Rubinius::Type.coerce_to(fd, Integer, :to_int), mode
 
-    binmode                          if binary
-    set_encoding(external, internal) if external or internal
+    binmode if binary
+    set_encoding external, internal
   end
 
   private :initialize
 
   def autoclose?
     @autoclose
+  end
+
+  def autoclose=(autoclose)
+    @autoclose = !!autoclose
   end
 
   # Argument matrix for IO#gets and IO#each:
@@ -488,6 +503,78 @@ class IO
 
   alias_method :each_line, :each
 
+  def read(length=nil, buffer=nil)
+    ensure_open_and_readable
+    buffer = StringValue(buffer) if buffer
+
+    unless length
+      str = IO.read_encode self, read_all
+      return str unless buffer
+
+      return buffer.replace(str)
+    end
+
+    if @ibuffer.exhausted?
+      buffer.clear if buffer
+      return nil
+    end
+
+    str = ""
+    needed = length
+    while needed > 0 and not @ibuffer.exhausted?
+      available = @ibuffer.fill_from self
+
+      count = available > needed ? needed : available
+      str << @ibuffer.shift(count)
+      str = nil if str.empty?
+
+      needed -= count
+    end
+
+    if str
+      if buffer
+        buffer.replace str.force_encoding(buffer.encoding)
+      else
+        str.force_encoding Encoding::ASCII_8BIT
+      end
+    else
+      buffer.clear if buffer
+      nil
+    end
+  end
+
+  def getbyte
+    ensure_open
+
+    if @ibuffer.size == 0
+      if @ibuffer.fill_from(self) == 0
+        return nil
+      end
+    end
+
+    return @ibuffer.get_first
+  end
+
+  def ungetbyte(obj)
+    ensure_open
+
+    case obj
+    when String
+      str = obj
+    when Integer
+      @ibuffer.put_back(obj & 0xff)
+      return
+    when nil
+      return
+    else
+      str = StringValue(obj)
+    end
+
+    str.bytes.reverse_each { |byte| @ibuffer.put_back byte }
+
+    nil
+  end
+
   def gets(sep_or_limit=$/, limit=nil)
     each sep_or_limit, limit do |line|
       $_ = line if line
@@ -541,26 +628,125 @@ class IO
     nil
   end
 
-  def set_encoding(external, internal=nil)
-    unless external.kind_of? Encoding or external.kind_of? String
-      external = StringValue(external) if external
+  def set_encoding(external, internal=nil, options=undefined)
+    case external
+    when Encoding
+      @external = external
+    when String
+      @external = nil
+    when nil
+      @external = Encoding.default_external unless @binmode
+    else
+      @external = nil
+      external = StringValue(external)
     end
 
-    unless internal.kind_of? Encoding or internal.kind_of? String
-      internal = StringValue(internal) if internal
+    unless @external
+      if index = external.index(":")
+        internal = external[index+1..-1]
+        external = external[0, index]
+      end
+
+      if external[3] == ?|
+        if encoding = strip_bom
+          external = encoding
+        else
+          external = external[4..-1]
+        end
+      end
+
+      @external = Encoding.find external
     end
 
-    if external.kind_of? String
-      external, internal = external.split(':') unless internal
+    unless options.equal? undefined
+      # TODO: set the encoding options on the IO instance
+      if options and not options.kind_of? Hash
+        options = Rubinius::Type.coerce_to options, Hash, :to_hash
+      end
     end
 
-    internal = nil if internal == "-"
+    case internal
+    when Encoding
+      internal = nil if @external == internal
+    when String
+      # do nothing
+    when nil
+      internal = Encoding.default_internal unless @binmode
+    else
+      internal = StringValue(internal)
+    end
 
-    external = Encoding.find external if external.kind_of? String
-    internal = Encoding.find internal if internal.kind_of? String
+    if internal.kind_of? String
+      return if internal == "-"
+      internal = Encoding.find internal
+    end
 
-    @external = external
-    @internal = internal unless internal == external
+    @internal = internal unless @external == internal
+  end
+
+  def read_bom_byte
+    read_ios, _, _ = IO.select [self], nil, nil, 0.1
+    return getbyte if read_ios
+  end
+
+  def strip_bom
+    return unless File::Stat.from_fd(@descriptor).file?
+
+    case b1 = getbyte
+    when 0x00
+      b2 = getbyte
+      if b2 == 0x00
+        b3 = getbyte
+        if b3 == 0xFE
+          b4 = getbyte
+          if b4 == 0xFF
+            return "UTF-32BE"
+          end
+          ungetbyte b4
+        end
+        ungetbyte b3
+      end
+      ungetbyte b2
+
+    when 0xFF
+      b2 = getbyte
+      if b2 == 0xFE
+        b3 = getbyte
+        if b3 == 0x00
+          b4 = getbyte
+          if b4 == 0x00
+            return "UTF-32LE"
+          end
+          ungetbyte b4
+        else
+          ungetbyte b3
+          return "UTF-16LE"
+        end
+        ungetbyte b3
+      end
+      ungetbyte b2
+
+    when 0xFE
+      b2 = getbyte
+      if b2 == 0xFF
+        return "UTF-16BE"
+      end
+      ungetbyte b2
+
+    when 0xEF
+      b2 = getbyte
+      if b2 == 0xBB
+        b3 = getbyte
+        if b3 == 0xBF
+          return "UTF-8"
+        end
+        ungetbyte b3
+      end
+      ungetbyt b2
+    end
+
+    ungetbyte b1
+    nil
   end
 
   def external_encoding
@@ -599,7 +785,7 @@ class IO
     (fcntl(F_GETFD) & FD_CLOEXEC) != 0
   end
 
-  def self.pipe(external_encoding=nil, internal_encoding=nil)
+  def self.pipe(external=nil, internal=nil, options=nil)
     lhs = allocate
     rhs = allocate
 
@@ -610,12 +796,7 @@ class IO
       connect_pipe(lhs, rhs)
     end
 
-    external_encoding ||= Encoding.default_external
-    internal_encoding ||= Encoding.default_internal
-
-    if external_encoding or internal_encoding
-      lhs.set_encoding(external_encoding, internal_encoding)
-    end
+    lhs.set_encoding external, internal, options
 
     lhs.sync = true
     rhs.sync = true
@@ -718,6 +899,13 @@ class IO
         else
           cmd = str
         end
+
+        if str.last.kind_of? Hash
+          redirects, options = Rubinius::Spawn.adjust_options(str.pop)
+          Rubinius::Spawn.setup_redirects(redirects)
+          Rubinius::Spawn.setup_options(options)
+        end
+
         Process.perform_exec cmd.first, cmd.map(&:to_s)
       else
         Process.perform_exec "/bin/sh", ["sh", "-c", str]
@@ -747,8 +935,8 @@ class IO
       raise ArgumentError, "IO is neither readable nor writable"
     end
 
-    pipe.binmode                          if binary
-    pipe.set_encoding(external, internal) if external or internal
+    pipe.binmode if binary
+    pipe.set_encoding external, internal
 
     pipe.pid = pid
 

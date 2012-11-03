@@ -4,6 +4,7 @@
 
 #include "helpers.hpp"
 #include "exception_point.hpp"
+#include "on_stack.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
@@ -141,6 +142,8 @@ extern "C" {
 
   /** @note   Shares code with rb_define_module_under, change there too. --rue */
   VALUE rb_define_class_under(VALUE outer, const char* name, VALUE super) {
+
+
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     Module* module = c_as<Module>(env->get_object(outer));
@@ -150,8 +153,17 @@ extern "C" {
     bool created = false;
 
     LEAVE_CAPI(env->state());
-    Class* opened_class = rubinius::Helpers::open_class(env->state(),
-        env->current_call_frame(), module, superclass, constant, &created);
+    Class* opened_class = NULL;
+
+    // Run in a block so OnStack is properly deallocated before we
+    // might do a longjmp because of an exception.
+    {
+      GCTokenImpl gct;
+      OnStack<3> os(env->state(), module, superclass, constant);
+
+      opened_class = rubinius::Helpers::open_class(env->state(), gct,
+          env->current_call_frame(), module, superclass, constant, &created);
+    }
 
     // The call above could have triggered an Autoload resolve, which may
     // raise an exception, so we have to check the value returned.

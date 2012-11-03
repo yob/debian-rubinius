@@ -56,13 +56,14 @@ namespace rubinius {
     attr_reader(num_bytes, Fixnum);
     attr_reader(data, ByteArray);
 
-    void update_handle();
+    void update_handle(STATE);
+    void update_handle(VM* vm);
 
     template <class T>
       void num_bytes(T state, Fixnum* obj) {
         num_bytes_ = obj;
         num_chars_ = nil<Fixnum>();
-        update_handle();
+        update_handle(state);
       }
 
     template <class T>
@@ -70,7 +71,7 @@ namespace rubinius {
         data_ = obj;
         if(mature_object_p()) this->write_barrier(state, obj);
 
-        update_handle();
+        update_handle(state);
       }
 
     attr_accessor(num_chars, Fixnum);
@@ -198,7 +199,7 @@ namespace rubinius {
 
     // Rubinius.primitive :string_tr_expand
     Fixnum* tr_expand(STATE, Object* limit, Object* invalid_as_empty);
-    Fixnum* tr_replace(STATE, struct tr_data* data);
+    native_int tr_replace(STATE, native_int first, native_int last, native_int start, native_int finish);
 
     // Rubinius.primitive :string_copy_from
     String* copy_from(STATE, String* other, Fixnum* start, Fixnum* size, Fixnum* dest);
@@ -227,7 +228,12 @@ namespace rubinius {
     String* byte_substring(STATE, native_int index, native_int length);
     String* char_substring(STATE, native_int index, native_int length);
 
+    OnigEncodingType* get_encoding_kcode_fallback(STATE);
     native_int find_character_byte_index(STATE, native_int index, native_int start = 0);
+    native_int find_byte_character_index(STATE, native_int index, native_int start = 0);
+
+    // Rubinius.primitive :string_character_index
+    Fixnum* find_byte_character_index_prim(STATE, Fixnum* index, Fixnum* start);
 
     // Rubinius.primitive :string_index
     Fixnum* index(STATE, String* pattern, Fixnum* start);
@@ -264,6 +270,9 @@ namespace rubinius {
 
     // Rubinius.primitive :string_codepoint
     Fixnum* codepoint(STATE);
+
+    // Rubinius.primitive :string_chr_at
+    Object* chr_at(STATE, Fixnum* byte);
 
     class Info : public TypeInfo {
     public:

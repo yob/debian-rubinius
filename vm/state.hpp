@@ -30,6 +30,10 @@ namespace rubinius {
       return 0;
     }
 
+    void set_vm(VM* vm) {
+      vm_ = vm;
+    }
+
     void set_call_frame(CallFrame* cf) {
       vm_->set_call_frame(cf);
     }
@@ -86,11 +90,14 @@ namespace rubinius {
 
     bool check_stack(CallFrame* call_frame, void* end) {
       // @TODO assumes stack growth direction
-      if(unlikely(reinterpret_cast<uintptr_t>(end) < vm_->stack_limit_)) {
-        raise_stack_error(call_frame);
-        return false;
+      if(vm_->stack_limit_ == vm_->stack_start_) {
+        vm_->reset_stack_limit();
+      } else {
+        if(unlikely(reinterpret_cast<uintptr_t>(end) < vm_->stack_limit_)) {
+          raise_stack_error(call_frame);
+          return false;
+        }
       }
-
       return true;
     }
 
@@ -140,9 +147,9 @@ namespace rubinius {
       vm_->unlock(vm_);
     }
 
-    void park(GCToken gct, CallFrame* call_frame);
+    Object* park(GCToken gct, CallFrame* call_frame);
 
-    void park_timed(GCToken gct, CallFrame* call_frame, struct timespec* ts);
+    Object* park_timed(GCToken gct, CallFrame* call_frame, struct timespec* ts);
   };
 }
 

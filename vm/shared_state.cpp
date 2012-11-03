@@ -7,7 +7,8 @@
 #include "instruments/tooling.hpp"
 #include "instruments/timing.hpp"
 #include "global_cache.hpp"
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
+#include "capi/tag.hpp"
 
 #include "util/thread.hpp"
 #include "inline_cache.hpp"
@@ -19,6 +20,9 @@
 #include "builtin/array.hpp"
 #include "builtin/thread.hpp"
 
+#include <iostream>
+#include <iomanip>
+
 #ifdef ENABLE_LLVM
 #include "llvm/state.hpp"
 #endif
@@ -27,14 +31,14 @@ namespace rubinius {
 
   SharedState::SharedState(Environment* env, Configuration& config, ConfigParser& cp)
     : initialized_(false)
+    , auxiliary_threads_(0)
     , signal_handler_(0)
     , global_handles_(new capi::Handles)
-    , cached_handles_(new capi::Handles)
     , global_serial_(0)
     , world_(new WorldState)
     , ic_registry_(new InlineCacheRegistry)
     , class_count_(0)
-    , thread_ids_(0)
+    , thread_ids_(1)
     , agent_(0)
     , root_vm_(0)
     , env_(env)
@@ -50,6 +54,8 @@ namespace rubinius {
   {
     ref();
 
+    auxiliary_threads_ = new AuxiliaryThreads();
+
     for(int i = 0; i < Primitives::cTotalPrimitives; i++) {
       primitive_hits_[i] = 0;
     }
@@ -61,7 +67,7 @@ namespace rubinius {
     if(!initialized_) return;
 
     if(config.gc_show) {
-      std::cerr << "Time spent waiting: " << world_->time_waiting() << "\n";
+      std::cerr << "Time spent waiting for the world to stop: " << world_->time_waiting() << "ns\n";
     }
 
 #ifdef ENABLE_LLVM
@@ -70,16 +76,17 @@ namespace rubinius {
     }
 #endif
 
-    delete tool_broker_;
-    delete world_;
-    delete ic_registry_;
-    delete om;
-    delete global_cache;
-    delete global_handles_;
-    delete cached_handles_;
     if(agent_) {
       delete agent_;
     }
+
+    delete global_handles_;
+    delete tool_broker_;
+    delete global_cache;
+    delete ic_registry_;
+    delete world_;
+    delete om;
+    delete auxiliary_threads_;
   }
 
   void SharedState::add_managed_thread(ManagedThread* thr) {
@@ -103,8 +110,7 @@ namespace rubinius {
   }
 
   uint32_t SharedState::new_thread_id() {
-    SYNC_TL;
-    return ++thread_ids_;
+    return atomic::fetch_and_add(&thread_ids_, 1);
   }
 
   VM* SharedState::new_vm() {
@@ -142,42 +148,93 @@ namespace rubinius {
         ++i) {
       if(VM* vm = (*i)->as_vm()) {
         Thread *thread = vm->thread.get();
-        if(!thread->signal_handler_thread_p() && CBOOL(thread->alive())) {
-          threads->append(state, (Object*)thread);
+        if(!thread->system_thread() && CBOOL(thread->alive())) {
+          threads->append(state, thread);
         }
       }
     }
     return threads;
   }
 
-  void SharedState::add_global_handle(STATE, capi::Handle* handle) {
-    SYNC(state);
-    global_handles_->add(handle);
+  capi::Handle* SharedState::add_global_handle(STATE, Object* obj) {
+    if(!obj->reference_p()) {
+      rubinius::bug("Trying to add a handle for a non reference");
+    }
+    uintptr_t handle_index = global_handles_->allocate_index(state, obj);
+    obj->set_handle_index(state, handle_index);
+    return obj->handle(state);
   }
 
   void SharedState::make_handle_cached(STATE, capi::Handle* handle) {
     SYNC(state);
-    global_handles_->move(handle, cached_handles_);
+    cached_handles_.push_back(handle);
   }
 
-
-  QueryAgent* SharedState::autostart_agent(STATE) {
-    SYNC(state);
-    if(agent_) return agent_;
-    agent_ = new QueryAgent(*this, state);
-    return agent_;
-  }
-
-  void SharedState::stop_agent(STATE) {
-    if(agent_) {
-      agent_->shutdown_i();
-      agent_ = NULL;
-    }
-  }
-
-  void SharedState::pre_exec() {
+  void SharedState::add_global_handle_location(capi::Handle** loc,
+                                               const char* file, int line)
+  {
     SYNC_TL;
-    if(agent_) agent_->cleanup();
+    if(*loc && REFERENCE_P(*loc)) {
+      if(!global_handles_->validate(*loc)) {
+        std::cerr << std::endl << "==================================== ERROR ====================================" << std::endl;
+        std::cerr << "| An extension is trying to add an invalid handle at the following location:  |" << std::endl;
+        std::ostringstream out;
+        out << file << ":" << line;
+        std::cerr << "| " << std::left << std::setw(75) << out.str() << " |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| An invalid handle means that it points to an invalid VALUE. This can happen |" << std::endl;
+        std::cerr << "| when you haven't initialized the VALUE pointer yet, in which case we        |" << std::endl;
+        std::cerr << "| suggest either initializing it properly or otherwise first initialize it to |" << std::endl;
+        std::cerr << "| NULL if you can only set it to a proper VALUE pointer afterwards. Consider  |" << std::endl;
+        std::cerr << "| the following example that could cause this problem:                        |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr;                                                                  |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| Either change this register after initializing                              |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr;                                                                  |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| Or initialize it with NULL:                                                 |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr = NULL;                                                           |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "================================== ERROR ======================================" << std::endl;
+        rubinius::bug("Halting due to invalid handle");
+      }
+    }
+
+    capi::GlobalHandle* global_handle = new capi::GlobalHandle(loc, file, line);
+    global_handle_locations_.push_back(global_handle);
+  }
+
+  void SharedState::del_global_handle_location(capi::Handle** loc) {
+    SYNC_TL;
+
+    for(std::list<capi::GlobalHandle*>::iterator i = global_handle_locations_.begin();
+        i != global_handle_locations_.end(); ++i) {
+      if((*i)->handle() == loc) {
+        delete *i;
+        global_handle_locations_.erase(i);
+        return;
+      }
+    }
+    rubinius::bug("Removing handle not in the list");
+  }
+
+  QueryAgent* SharedState::start_agent(STATE) {
+    SYNC(state);
+
+    if(!agent_) {
+      agent_ = new QueryAgent(state);
+    }
+
+    return agent_;
   }
 
   void SharedState::reinit(STATE) {
@@ -186,7 +243,7 @@ namespace rubinius {
 
     config.jit_inline_debug.set("no");
 
-    env_->state = state;
+    env_->set_root_vm(state->vm());
     threads_.clear();
     threads_.push_back(state->vm());
 
@@ -199,12 +256,6 @@ namespace rubinius {
     capi_lock_.init();
 
     world_->reinit();
-
-    if(agent_) {
-      agent_->on_fork();
-      delete agent_;
-      agent_ = 0;
-    }
   }
 
   bool SharedState::should_stop() {
@@ -273,10 +324,14 @@ namespace rubinius {
   }
 
   void SharedState::enter_capi(STATE, const char* file, int line) {
-    capi_lock_.lock(state->vm(), file, line);
+    if(use_capi_lock_) {
+      capi_lock_.lock(state->vm(), file, line);
+    }
   }
 
   void SharedState::leave_capi(STATE) {
-    capi_lock_.unlock(state->vm());
+    if(use_capi_lock_) {
+      capi_lock_.unlock(state->vm());
+    }
   }
 }

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "signature.h"
 #include "prelude.hpp"
 #include "environment.hpp"
 #include "config_parser.hpp"
@@ -52,9 +53,19 @@
 #endif
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <sys/param.h>
+#include <sys/stat.h>
 
 #include "missing/setproctitle.h"
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
+#ifdef __FreeBSD__
+#include <sys/sysctl.h>
+#endif
 
 namespace rubinius {
 
@@ -69,7 +80,6 @@ namespace rubinius {
     , argv_(argv)
     , signature_(0)
     , version_(0)
-    , agent(0)
   {
 #ifdef ENABLE_LLVM
     if(!llvm::llvm_start_multithreaded()) {
@@ -86,6 +96,8 @@ namespace rubinius {
     VM::init_stack_size();
 
     shared = new SharedState(this, config, config_parser);
+
+    load_vm_options(argc_, argv_);
     root_vm = shared->new_vm();
     state = new State(root_vm);
 
@@ -179,10 +191,18 @@ namespace rubinius {
 
     int fd = STDERR_FILENO;
 
-    if(getenv("RBX_PAUSE_ON_CRASH")) {
+    char* pause_env = getenv("RBX_PAUSE_ON_CRASH");
+
+    if(pause_env) {
+      long timeout = strtol(pause_env, NULL, 10);
+      if(timeout <= 0) {
+        timeout = 60;
+      } else {
+        timeout *= 60;
+      }
       std::cerr << "\n========== CRASH (" << getpid();
-      std::cerr << "), pausing for 60 seconds to attach debugger\n";
-      sleep(60);
+      std::cerr << "), pausing for " << timeout << " seconds to attach debugger\n";
+      sleep(timeout);
     }
 
     // If there is a report_path setup..
@@ -229,13 +249,13 @@ namespace rubinius {
     // write info to stderr about reporting the error.
     if(fd != STDERR_FILENO) {
       close(fd);
-      safe_write(2, "\n---------------------------------------------\n");
-      safe_write(2, "CRASH: A fatal error has occurred.\n\nBacktrace:\n");
+      safe_write(STDERR_FILENO, "\n---------------------------------------------\n");
+      safe_write(STDERR_FILENO, "CRASH: A fatal error has occurred.\n\nBacktrace:\n");
       backtrace_symbols_fd(array, size, 2);
-      safe_write(2, "\n\n");
-      safe_write(2, "Wrote full error report to: ");
-      safe_write(2, report_path);
-      safe_write(2, "\nRun 'rbx report' to submit this crash report!\n");
+      safe_write(STDERR_FILENO, "\n\n");
+      safe_write(STDERR_FILENO, "Wrote full error report to: ");
+      safe_write(STDERR_FILENO, report_path);
+      safe_write(STDERR_FILENO, "\nRun 'rbx report' to submit this crash report!\n");
     }
 
     exit(100);
@@ -243,27 +263,30 @@ namespace rubinius {
 #endif
 
   static void quit_handler(int sig) {
-    static const char msg[] = "Terminated: signal ";
-    if(write(2, msg, sizeof(msg)) == 0) exit(1);
 
-    switch(sig) {
-    case SIGTERM:
-      if(write(2, "SIGTERM\n", 7) == 0) exit(1);
-      break;
+    if(getpgrp() == getpid()) {
+      static const char msg[] = "Terminated: signal ";
+      if(write(STDERR_FILENO, msg, sizeof(msg)) == 0) exit(1);
+
+      switch(sig) {
+      case SIGTERM:
+        if(write(STDERR_FILENO, "SIGTERM\n", 8) == 0) exit(1);
+        break;
 #ifndef RBX_WINDOWS
-    case SIGHUP:
-      if(write(2, "SIGHUP\n", 6) == 0) exit(1);
-      break;
-    case SIGUSR1:
-      if(write(2, "SIGUSR1\n", 7) == 0) exit(1);
-      break;
-    case SIGUSR2:
-      if(write(2, "SIGUSR2\n", 7) == 0) exit(1);
-      break;
+      case SIGHUP:
+        if(write(STDERR_FILENO, "SIGHUP\n", 7) == 0) exit(1);
+        break;
+      case SIGUSR1:
+        if(write(STDERR_FILENO, "SIGUSR1\n", 8) == 0) exit(1);
+        break;
+      case SIGUSR2:
+        if(write(STDERR_FILENO, "SIGUSR2\n", 8) == 0) exit(1);
+        break;
 #endif
-    default:
-      if(write(2, "UNKNOWN\n", 8) == 0) exit(1);
-      break;
+      default:
+        if(write(STDERR_FILENO, "UNKNOWN\n", 9) == 0) exit(1);
+        break;
+      }
     }
 
     _exit(1);
@@ -280,8 +303,6 @@ namespace rubinius {
 
     state->vm()->set_run_signals(true);
     sig_handler_ = new SignalHandler(state);
-    shared->set_signal_handler(sig_handler_);
-    sig_handler_->run(state);
 
 #ifndef RBX_WINDOWS
     // Ignore sigpipe.
@@ -440,6 +461,8 @@ namespace rubinius {
         strncpy(report_path, config.report_path, sizeof(report_path) - 1);
       }
     }
+
+    state->shared().set_use_capi_lock(config.capi_lock);
   }
 
   void Environment::load_directory(std::string dir) {
@@ -492,19 +515,28 @@ namespace rubinius {
     state->vm()->initialize_as_root();
   }
 
-  void Environment::run_file(std::string file) {
-    std::ifstream stream(file.c_str());
-    if(!stream) {
+  static std::stringstream stream;
+  void Environment::run_file(std::string path) {
+    std::ifstream file(path.c_str(), std::ios::ate|std::ios::binary);
+
+    if(!file) {
       std::string msg = std::string("Unable to open file to run: ");
-      msg.append(file);
+      msg.append(path);
       throw std::runtime_error(msg);
     }
+
+    std::streampos length = file.tellg();
+    std::vector<char> buffer(length);
+    file.seekg(0, std::ios::beg);
+    file.read(&buffer[0], length);
+    stream.clear();
+    stream.rdbuf()->pubsetbuf(&buffer[0], length);
 
     CompiledFile* cf = CompiledFile::load(stream);
     if(cf->magic != "!RBIX") throw std::runtime_error("Invalid file");
     if((signature_ > 0 && cf->signature != signature_)
         || cf->version != version_) {
-      throw BadKernelFile(file);
+      throw BadKernelFile(path);
     }
 
     cf->execute(state);
@@ -560,14 +592,15 @@ namespace rubinius {
 
     NativeMethod::cleanup_thread(state);
 
-#ifdef ENABLE_LLVM
-    LLVMState::shutdown(state);
-#endif
-
-    SignalHandler::shutdown();
+    {
+      GCIndependent guard(state);
+      shared->auxiliary_threads()->shutdown(state);
+    }
 
     // Hold everyone.
-    while(!state->stop_the_world());
+    while(!state->stop_the_world()) {
+      state->checkpoint(gct, 0);
+    }
     shared->om->run_all_io_finalizers(state);
 
     // TODO: temporarily disable to sort out finalizing Pointer objects
@@ -600,14 +633,11 @@ namespace rubinius {
   }
 
   void Environment::start_agent(int port) {
-    agent = new QueryAgent(*shared, state);
+    QueryAgent* agent = state->shared().start_agent(state);
+
     if(config.agent_verbose) agent->set_verbose();
 
     if(!agent->bind(port)) return;
-
-    shared->set_agent(agent);
-
-    agent->run();
   }
 
   /**
@@ -627,21 +657,6 @@ namespace rubinius {
     std::ifstream stream(index.c_str());
     if(!stream) {
       std::string error = "Unable to load kernel index: " + root;
-      throw std::runtime_error(error);
-    }
-
-    // Pull in the signature file; this helps control when .rbc files need to
-    // be discarded and recompiled due to changes to the compiler since the
-    // .rbc files were created.
-    std::string sig_path = root + "/signature";
-    std::ifstream sig_stream(sig_path.c_str());
-    if(sig_stream) {
-      sig_stream >> signature_;
-      G(rubinius)->set_const(state, "Signature",
-                       Integer::from(state, signature_));
-      sig_stream.close();
-    } else {
-      std::string error = "Unable to load compiler signature file: " + sig_path;
       throw std::runtime_error(error);
     }
 
@@ -702,20 +717,145 @@ namespace rubinius {
     }
   }
 
+  std::string Environment::executable_name() {
+    char name[PATH_MAX];
+
+#ifdef __APPLE__
+    uint32_t size = PATH_MAX;
+    if(_NSGetExecutablePath(name, &size) == 0) {
+      return name;
+    } else if(realpath(argv_[0], name)) {
+      return name;
+    }
+#elif defined(__FreeBSD__)
+    size_t size = PATH_MAX;
+    int oid[4];
+
+    oid[0] = CTL_KERN;
+    oid[1] = KERN_PROC;
+    oid[2] = KERN_PROC_PATHNAME;
+    oid[3] = getpid();
+
+    if(sysctl(oid, 4, name, &size, 0, 0) == 0) {
+      return name;
+    } else if(realpath(argv_[0], name)) {
+      return name;
+    }
+#elif defined(__linux__)
+    {
+      if(readlink("/proc/self/exe", name, PATH_MAX) >= 0) {
+        return name;
+      } else if(realpath(argv_[0], name)) {
+        return name;
+      }
+    }
+#else
+    if(realpath(argv_[0], name)) {
+      return name;
+    }
+#endif
+
+    return argv_[0];
+  }
+
+  bool Environment::load_signature(std::string runtime) {
+    std::string path = runtime;
+
+    // TODO: Fix this
+    if(LANGUAGE_20_ENABLED(state)) {
+      path += "/20";
+    } else if(LANGUAGE_19_ENABLED(state)) {
+      path += "/19";
+    } else {
+      path += "/18";
+    }
+
+    path += "/signature";
+
+    std::ifstream signature(path.c_str());
+    if(signature) {
+      signature >> signature_;
+
+      if(signature_ != RBX_SIGNATURE) return false;
+
+      signature.close();
+
+      return true;
+    }
+
+    /*
+    } else {
+      std::string error = "Unable to load compiler signature file: " + sig_path;
+      throw std::runtime_error(error);
+     */
+    return false;
+  }
+
+  bool Environment::verify_paths(std::string prefix) {
+    struct stat st;
+
+    std::string dir = prefix + RBX_RUNTIME_PATH;
+    if(stat(dir.c_str(), &st) == -1 || !S_ISDIR(st.st_mode)) return false;
+
+    if(!load_signature(dir)) return false;
+
+    dir = prefix + RBX_BIN_PATH;
+    if(stat(dir.c_str(), &st) == -1 || !S_ISDIR(st.st_mode)) return false;
+
+    dir = prefix + RBX_KERNEL_PATH;
+    if(stat(dir.c_str(), &st) == -1 || !S_ISDIR(st.st_mode)) return false;
+
+    dir = prefix + RBX_LIB_PATH;
+    if(stat(dir.c_str(), &st) == -1 || !S_ISDIR(st.st_mode)) return false;
+
+    return true;
+  }
+
+  std::string Environment::system_prefix() {
+    if(!system_prefix_.empty()) return system_prefix_;
+
+    // 1. Check if our configure prefix is overridden by the environment.
+    const char* path = getenv("RBX_PREFIX_PATH");
+    if(path && verify_paths(path)) {
+      system_prefix_ = path;
+      return path;
+    }
+
+    // 2. Check if our configure prefix is valid.
+    path = RBX_PREFIX_PATH;
+    if(verify_paths(path)) {
+      system_prefix_ = path;
+      return path;
+    }
+
+    // 3. Check if we can derive paths from the executable name.
+    // TODO: For Windows, substitute '/' for '\\'
+    std::string name = executable_name();
+    size_t exe = name.rfind('/');
+
+    if(exe != std::string::npos) {
+      std::string prefix = name.substr(0, exe - strlen(RBX_BIN_PATH));
+      if(verify_paths(prefix)) {
+        system_prefix_ = prefix;
+        return prefix;
+      }
+    }
+
+    throw MissingRuntime("FATAL ERROR: unable to find Rubinius runtime directories.");
+  }
+
   /**
-   * Runs rbx from the filesystem, loading the Ruby kernel files relative to
-   * the supplied root directory.
-   *
-   * @param root The path to the Rubinius /runtime directory, which contains
-   * the loader.rbc and kernel files.
+   * Runs rbx from the filesystem. Searches for the Rubinius runtime files
+   * according to the algorithm in find_runtime().
    */
-  void Environment::run_from_filesystem(std::string root) {
+  void Environment::run_from_filesystem() {
     int i = 0;
     state->vm()->set_root_stack(reinterpret_cast<uintptr_t>(&i),
                                 VM::cStackDepthMax);
 
-    load_platform_conf(root);
-    load_vm_options(argc_, argv_);
+    std::string runtime = system_prefix() + RBX_RUNTIME_PATH;
+
+    load_platform_conf(runtime);
     boot_vm();
     load_argv(argc_, argv_);
 
@@ -723,19 +863,22 @@ namespace rubinius {
 
     load_tool();
 
-    if(LANGUAGE_20_ENABLED(state)) {
-      root += "/20";
-    } else if(LANGUAGE_19_ENABLED(state)) {
-      root += "/19";
-    } else {
-      root += "/18";
-    }
-    G(rubinius)->set_const(state, "RUNTIME_PATH", String::create(state, root.c_str(), root.size()));
+    G(rubinius)->set_const(state, "Signature", Integer::from(state, signature_));
 
-    load_kernel(root);
+    if(LANGUAGE_20_ENABLED(state)) {
+      runtime += "/20";
+    } else if(LANGUAGE_19_ENABLED(state)) {
+      runtime += "/19";
+    } else {
+      runtime += "/18";
+    }
+    G(rubinius)->set_const(state, "RUNTIME_PATH", String::create(state,
+                           runtime.c_str(), runtime.size()));
+
+    load_kernel(runtime);
 
     start_signals();
-    run_file(root + "/loader.rbc");
+    run_file(runtime + "/loader.rbc");
 
     state->vm()->thread_state()->clear();
 

@@ -73,7 +73,12 @@ module Rubinius
           when :in, :out, :err, Fixnum, IO
             redirects[key] = adjust_redirect_value(key, value)
           when :pgroup
-            raise ArgumentError, "negative process group ID : #{value}" if value && value < 0
+            if value == true
+              value = 0
+            elsif value
+              value = Rubinius::Type.coerce_to value, Integer, :to_int 
+              raise ArgumentError, "negative process group ID : #{value}" if value < 0
+            end
             others[key] = value
           when :chdir
             others[key] = Rubinius::Type.coerce_to_path(value)
@@ -205,7 +210,7 @@ module Rubinius
       [prog, argv]
     end
 
-    def self.exec(env, prog, argv, redirects, options)
+    def self.setup_redirects(redirects)
       redirects.each do |key, val|
         key = fd_to_io(key)
 
@@ -219,9 +224,10 @@ module Rubinius
           key.reopen(val)
         end
       end
+    end
 
+    def self.setup_options(options)
       ENV.clear if options[:unsetenv_others]
-      ENV.update(env)
 
       if chdir = options[:chdir]
         Dir.chdir(chdir)
@@ -235,7 +241,12 @@ module Rubinius
       if umask = options[:umask]
         File.umask(umask)
       end
+    end
 
+    def self.exec(env, prog, argv, redirects, options)
+      setup_redirects(redirects)
+      setup_options(options)
+      ENV.update(env)
       Process.perform_exec prog, argv
     end
   end
@@ -276,6 +287,15 @@ module Process
 
   def self.spawn(*args)
     env, prog, argv, redirects, options = Rubinius::Spawn.extract_arguments(*args)
+
+    unless options[:close_others] == false
+      3.upto(IO.max_open_fd).each do |fd|
+        begin
+          IO.for_fd(fd, :autoclose => false).close_on_exec = true
+        rescue Errno::EBADF
+        end
+      end
+    end
 
     IO.pipe do |read, write|
       pid = Process.fork do

@@ -33,17 +33,16 @@ namespace rubinius {
     JITInlineBlock* inline_block_;
     JITInlineBlock* block_info_;
 
-    TypedRoot<CompiledMethod*> method_;
+    TypedRoot<CompiledCode*> method_;
 
     llvm::BasicBlock* return_pad_;
     llvm::PHINode* return_phi_;
 
     TypedRoot<Class*> self_class_;
     LocalMap local_info_;
-    jit::RuntimeData* runtime_data_;
 
   public:
-    VMMethod* vmm;
+    MachineCode* machine_code;
     bool is_block;
     llvm::BasicBlock* inline_return;
     llvm::Value* return_value;
@@ -56,7 +55,7 @@ namespace rubinius {
     type::KnownType self_type;
 
   public:
-    JITMethodInfo(jit::Context& ctx, CompiledMethod* cm, VMMethod* v,
+    JITMethodInfo(jit::Context& ctx, CompiledCode* code, MachineCode* mcode,
                   JITMethodInfo* parent = 0);
 
     jit::Context& context() {
@@ -135,7 +134,7 @@ namespace rubinius {
       return variables_;
     }
 
-    CompiledMethod* method() {
+    CompiledCode* method() {
       return method_.get();
     }
 
@@ -272,13 +271,6 @@ namespace rubinius {
                                     const llvm::Twine& name = "");
 
     llvm::BasicBlock* new_block(const char* name);
-
-    void set_runtime_data(jit::RuntimeData* rd) {
-      runtime_data_ = rd;
-    }
-
-    jit::RuntimeData* runtime_data();
-
 
   };
 

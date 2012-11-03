@@ -11,6 +11,7 @@
 #include "call_frame.hpp"
 #include "objectmemory.hpp"
 #include "configuration.hpp"
+#include "on_stack.hpp"
 
 #include "builtin/array.hpp"
 #include "builtin/exception.hpp"
@@ -34,7 +35,7 @@
 
 namespace rubinius {
   /** Thread-local NativeMethodEnvironment instance. */
-  thread::ThreadData<NativeMethodEnvironment*> native_method_environment;
+  utilities::thread::ThreadData<NativeMethodEnvironment*> native_method_environment;
 
 /* Class methods */
 
@@ -62,9 +63,8 @@ namespace rubinius {
   }
 
   VALUE NativeMethodFrame::get_handle(STATE, Object* obj) {
-    InflatedHeader* ih = state->memory()->inflate_header(state, obj);
 
-    capi::Handle* handle = ih->handle();
+    capi::Handle* handle = obj->handle(state);
 
     if(handle) {
       if(handles_.add_if_absent(handle)) {
@@ -73,11 +73,7 @@ namespace rubinius {
         handle->update(NativeMethodEnvironment::get());
       }
     } else {
-      handle = new capi::Handle(state, obj);
-      ih->set_handle(handle);
-
-      state->shared().add_global_handle(state, handle);
-
+      handle = state->shared().add_global_handle(state, obj);
       handles_.add_if_absent(handle);
     }
 
@@ -95,13 +91,13 @@ namespace rubinius {
       handles_.flush_all(env);
     }
 
-    if(env->state()->vm()->shared.config.capi_global_flush) {
-      capi::Handles* handles = env->state()->vm()->shared.cached_handles();
+    if(env->state()->shared().config.capi_global_flush) {
+      std::list<capi::Handle*>* handles = env->state()->shared().cached_handles();
 
-      if(handles->size() > 0) {
-        for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
-          i->flush(env);
-        }
+      for(std::list<capi::Handle*>::iterator i = handles->begin();
+          i != handles->end();
+          ++i) {
+        (*i)->flush(env);
       }
     }
   }
@@ -113,13 +109,13 @@ namespace rubinius {
       handles_.update_all(env);
     }
 
-    if(env->state()->vm()->shared.config.capi_global_flush) {
-      capi::Handles* handles = env->state()->vm()->shared.cached_handles();
+    if(env->state()->shared().config.capi_global_flush) {
+      std::list<capi::Handle*>* handles = env->state()->shared().cached_handles();
 
-      if(handles->size() > 0) {
-        for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
-          i->update(env);
-        }
+      for(std::list<capi::Handle*>::iterator i = handles->begin();
+          i != handles->end();
+          ++i) {
+        (*i)->update(env);
       }
     }
   }
@@ -179,6 +175,14 @@ namespace rubinius {
   void NativeMethodEnvironment::update_cached_data() {
     if(!current_native_frame_) return;
     current_native_frame_->update_cached_data();
+  }
+
+  StackVariables* NativeMethodEnvironment::scope() {
+    CallFrame* cur = current_call_frame();
+    while(!cur->scope) {
+      cur = cur->previous;
+    }
+    return cur->scope;
   }
 
   void NativeMethod::init(STATE) {
@@ -547,7 +551,7 @@ namespace rubinius {
 
         /* A C function being used as a block */
       case ITERATE_BLOCK: {
-        VALUE cb = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
+        VALUE cb_data = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
 
         Object* ob = nm->get_ivar(state, state->symbol("original_block"));
         if(!ob->nil_p()) {
@@ -568,21 +572,41 @@ namespace rubinius {
           break;
         }
 
-        VALUE ret = nm->func()(val, cb, receiver);
+        VALUE ret = nm->func()(val, cb_data, receiver);
+        return env->get_object(ret);
+      }
+
+      case C_BLOCK_CALL: {
+        VALUE val;
+        VALUE* ary = (VALUE*)alloca(sizeof(VALUE) * args.total());
+        VALUE cb_data = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
+
+        if(args.total() > 0) {
+          val = env->get_handle(args.get_argument(0));
+        } else {
+          val = env->get_handle(cNil);
+        }
+
+        for (std::size_t i = 0; i < args.total(); ++i) {
+          ary[i] = env->get_handle(args.get_argument(i));
+        }
+
+        VALUE ret = nm->func()(val, cb_data, args.total(), ary);
+
         return env->get_object(ret);
       }
 
       case C_LAMBDA: {
-        VALUE cb = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
+        VALUE cb_data = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
         VALUE val = env->get_handle(args.as_array(state));
-        VALUE ret = nm->func()(val, cb);
+        VALUE ret = nm->func()(val, cb_data);
         return env->get_object(ret);
       }
 
       case C_CALLBACK: {
-        VALUE cb = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
+        VALUE cb_data = env->get_handle(nm->get_ivar(state, state->symbol("cb_data")));
 
-        nm->func()(cb);
+        nm->func()(cb_data);
 
         return cNil;
       }
@@ -616,12 +640,12 @@ namespace rubinius {
 
     // Optionally get the handles back to the proper state.
     if(state->shared().config.capi_global_flush) {
-      capi::Handles* handles = state->shared().cached_handles();
+      std::list<capi::Handle*>* handles = state->shared().cached_handles();
 
-      if(handles->size() > 0) {
-        for(capi::Handles::Iterator i(*handles); i.more(); i.advance()) {
-          i->update(env);
-        }
+      for(std::list<capi::Handle*>::iterator i = handles->begin();
+          i != handles->end();
+          ++i) {
+        (*i)->update(env);
       }
     }
 
@@ -631,10 +655,14 @@ namespace rubinius {
     NativeMethodFrame nmf(env->current_native_frame());
     CallFrame cf;
     cf.previous = call_frame;
-    cf.cm = 0;
-    cf.scope = 0;
+    cf.constant_scope_ = 0;
     cf.dispatch_data = (void*)&nmf;
+    cf.compiled_code = 0;
     cf.flags = CallFrame::cNativeMethod;
+    cf.optional_jit_data = 0;
+    cf.top_scope_ = 0;
+    cf.scope = 0;
+    cf.arguments = 0;
 
     CallFrame* saved_frame = env->current_call_frame();
     env->set_current_call_frame(&cf);
@@ -693,6 +721,7 @@ namespace rubinius {
     ep.pop(env);
 
     LEAVE_CAPI(state);
+    OnStack<1> os(state, ret);
 
     // Handle any signals that occurred while the native method
     // was running.

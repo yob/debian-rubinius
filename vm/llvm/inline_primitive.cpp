@@ -3,6 +3,15 @@
 #include "llvm/inline.hpp"
 #include "llvm/jit_context.hpp"
 
+// We use the i64 and i32 versions here. We do the bounds checking
+// manually later on, because using i63 / i31 is buggy in LLVM, also
+// see http://llvm.org/bugs/show_bug.cgi?id=13991
+#ifdef IS_X8664
+#define MUL_WITH_OVERFLOW "llvm.smul.with.overflow.i64"
+#else
+#define MUL_WITH_OVERFLOW "llvm.smul.with.overflow.i32"
+#endif
+
 namespace rubinius {
 
   enum MathOperation {
@@ -13,23 +22,23 @@ namespace rubinius {
   struct InlinePrimitive {
     JITOperations& ops;
     Inliner& i;
-    CompiledMethod* cm;
+    CompiledCode* compiled_code;
     Class* klass;
 
-    InlinePrimitive(JITOperations& _ops, Inliner& _i, CompiledMethod* _cm,
+    InlinePrimitive(JITOperations& _ops, Inliner& _i, CompiledCode* _code,
                     Class* _klass)
       : ops(_ops)
       , i(_i)
-      , cm(_cm)
+      , compiled_code(_code)
       , klass(_klass)
     {}
 
     void log(const char* name) {
       if(ops.state()->config().jit_inline_debug) {
         i.context().inline_log("inlining")
-          << ops.state()->enclosure_name(cm)
+          << ops.state()->enclosure_name(compiled_code)
           << "#"
-          << ops.state()->symbol_debug_str(cm->name())
+          << ops.state()->symbol_debug_str(compiled_code->name())
           << " into "
           << ops.state()->symbol_debug_str(ops.method_name())
           << ". primitive " << name << "\n";
@@ -354,8 +363,153 @@ namespace rubinius {
       i.context().leave_inline();
     }
 
-    void fixnum_compare(MathOperation op) {
+    void fixnum_mul() {
+      log("fixnum_mul");
+      i.context().enter_inline();
+
+      Value* recv = ops.cast_int(i.recv());
+      Value* arg = ops.cast_int(i.arg(0));
+
+      Value* anded = BinaryOperator::CreateAnd(recv, arg, "fixnums_anded",
+          ops.current_block());
+
+      Value* fix_mask = ConstantInt::get(ops.NativeIntTy, TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ops.NativeIntTy, TAG_FIXNUM);
+
+      Value* masked = BinaryOperator::CreateAnd(anded, fix_mask, "masked",
+          ops.current_block());
+
+      Value* cmp = ops.create_equal(masked, fix_tag, "is_fixnum");
+
+      BasicBlock* push = ops.new_block("push_mul");
+      BasicBlock* tagnow = ops.new_block("tagnow");
+      BasicBlock* less_max = ops.new_block("less_max");
+      BasicBlock* more_min = ops.new_block("more_min");
+      BasicBlock* send = i.failure();
+
+      ops.create_conditional_branch(push, send, cmp);
+
+      ops.set_block(push);
+
+      std::vector<Type*> types;
+      types.push_back(ops.NativeIntTy);
+      types.push_back(ops.NativeIntTy);
+
+      std::vector<Type*> struct_types;
+      struct_types.push_back(ops.NativeIntTy);
+      struct_types.push_back(ops.state()->Int1Ty);
+
+      StructType* st = StructType::get(ops.state()->ctx(), struct_types);
+
+      /*
+       * We use manual overflow checking here for the case where we do
+       * fit in a 64 bit value but overflow a 63 bit type. We can't
+       * directly use the LLVM types for this, because of a bug in
+       * LLVM:
+       *
+       * http://llvm.org/bugs/show_bug.cgi?id=13991
+       *
+       * In future versions this can be simplified if we depend on
+       * a version of LLVM that has incorporated this fix.
+       */
+      FunctionType* ft = FunctionType::get(st, types, false);
+      Function* func = cast<Function>(
+          ops.state()->module()->getOrInsertFunction(MUL_WITH_OVERFLOW, ft));
+
+      Value* recv_int = ops.tag_strip(recv, ops.NativeIntTy);
+      Value* arg_int = ops.tag_strip(arg, ops.NativeIntTy);
+      Value* call_args[] = { recv_int, arg_int };
+      Value* res = ops.b().CreateCall(func, call_args, "mul.overflow");
+
+      Value* sum = ops.b().CreateExtractValue(res, 0, "mul");
+      Value* dof = ops.b().CreateExtractValue(res, 1, "did_overflow");
+
+      ops.b().CreateCondBr(dof, send, tagnow);
+
+      ops.set_block(tagnow);
+
+      Value* fixnum_max = ConstantInt::get(ops.NativeIntTy, FIXNUM_MAX);
+      Value* smaller_max = ops.b().CreateICmpSLT(sum, fixnum_max, "fixnum.lt");
+      ops.create_conditional_branch(less_max, send, smaller_max);
+
+      ops.set_block(less_max);
+
+      Value* fixnum_min =  ConstantInt::get(ops.NativeIntTy, FIXNUM_MIN);
+      Value* bigger_min = ops.b().CreateICmpSGT(sum, fixnum_min, "fixnum.gt");
+      ops.create_conditional_branch(more_min, send, bigger_min);
+
+      ops.set_block(more_min);
+      Value* imm_value = ops.fixnum_tag(sum);
+
+      i.use_send_for_failure();
+      i.exception_safe();
+      i.set_result(ops.as_obj(imm_value));
+      i.context().leave_inline();
+    }
+
+    void fixnum_compare() {
       log("fixnum_compare");
+      i.context().enter_inline();
+
+      Value* lint = ops.cast_int(i.recv());
+      Value* rint = ops.cast_int(i.arg(0));
+
+      Value* anded = BinaryOperator::CreateAnd(lint, rint, "fixnums_anded",
+          ops.current_block());
+
+      Value* fix_mask = ConstantInt::get(ops.NativeIntTy, TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ops.NativeIntTy, TAG_FIXNUM);
+
+      Value* masked = BinaryOperator::CreateAnd(anded, fix_mask, "masked",
+          ops.current_block());
+
+      Value* cmp = ops.create_equal(masked, fix_tag, "is_fixnum");
+
+      BasicBlock* push   = ops.new_block("push_compare");
+      BasicBlock* eq     = ops.new_block("equal");
+      BasicBlock* neq    = ops.new_block("not_equal");
+      BasicBlock* result = ops.new_block("result");
+      BasicBlock* send   = i.failure();
+
+      ops.create_conditional_branch(push, send, cmp);
+
+      ops.set_block(push);
+
+      Value* equal = ops.b().CreateICmpEQ(lint, rint, "fixnum.eq");
+      ops.create_conditional_branch(eq, neq, equal);
+
+      ops.set_block(eq);
+
+      Value* eq_result = ops.fixnum_tag(ops.Zero);
+
+      ops.b().CreateBr(result);
+
+      ops.set_block(neq);
+
+      Value* big = ops.b().CreateICmpSLT(lint, rint, "fixnum.lt");
+
+      Value* neq_result = ops.b().CreateSelect(big,
+                               ops.fixnum_tag(ops.NegOne),
+                               ops.fixnum_tag(ops.One),
+                               "select_bool");
+
+      ops.b().CreateBr(result);
+
+      ops.set_block(result);
+
+      PHINode* res = ops.b().CreatePHI(ops.ObjType, 2, "result");
+      res->addIncoming(eq_result, eq);
+      res->addIncoming(neq_result, neq);
+
+      i.use_send_for_failure();
+      i.exception_safe();
+      i.set_result(ops.as_obj(res));
+      i.context().leave_inline();
+
+    }
+
+    void fixnum_compare_operation(MathOperation op) {
+      log("fixnum_compare_operation");
       i.context().enter_inline();
 
       Value* lint = ops.cast_int(i.recv());
@@ -506,7 +660,7 @@ namespace rubinius {
       i.context().leave_inline();
     }
 
-    void float_compare(MathOperation op) {
+    void float_compare() {
       log("float_compare");
       i.context().enter_inline();
 
@@ -515,7 +669,89 @@ namespace rubinius {
       i.check_recv(klass);
 
       // Support compare against Floats and Fixnums inline
-      BasicBlock* do_compare = ops.new_block("float_compare");
+      BasicBlock* do_compare = ops.new_block("float_compare_operation");
+      BasicBlock* check_fix =  ops.new_block("check_fixnum");
+
+      Value* arg = i.arg(0);
+      ops.check_class(arg, klass, check_fix);
+
+      Value* farg =  ops.b().CreateBitCast(arg, ops.state()->ptr_type("Float"),
+          "arg_float");
+
+      Value* unboxed_rhs = ops.b().CreateLoad(
+          ops.b().CreateConstGEP2_32(farg,  0, 1, "arg.value_pos"), "farg");
+
+      BasicBlock* unboxed_block = ops.current_block();
+
+      ops.b().CreateBr(do_compare);
+
+      ops.set_block(check_fix);
+      ops.verify_guard(ops.check_is_fixnum(arg), i.failure());
+      Value* converted_rhs = ops.b().CreateUIToFP(
+          ops.fixnum_to_native(arg), unboxed_rhs->getType());
+
+      BasicBlock* converted_block = ops.current_block();
+
+      ops.b().CreateBr(do_compare);
+
+      ops.set_block(do_compare);
+
+      do_compare->moveAfter(converted_block);
+
+      PHINode* rhs = ops.b().CreatePHI(converted_rhs->getType(), 2, "float_rhs");
+      rhs->addIncoming(unboxed_rhs, unboxed_block);
+      rhs->addIncoming(converted_rhs, converted_block);
+
+      Value* fself = ops.b().CreateBitCast(i.recv(), ops.state()->ptr_type("Float"),
+          "self_float");
+      Value* lhs = ops.b().CreateLoad(
+          ops.b().CreateConstGEP2_32(fself, 0, 1, "self.value_pos"), "fself");
+
+      BasicBlock* eq     = ops.new_block("equal");
+      BasicBlock* neq    = ops.new_block("not_equal");
+      BasicBlock* result = ops.new_block("result");
+
+      Value* equal = ops.b().CreateFCmpUEQ(lhs, rhs, "float.eq");
+      ops.create_conditional_branch(eq, neq, equal);
+
+      ops.set_block(eq);
+
+      Value* eq_result = ops.fixnum_tag(ops.Zero);
+
+      ops.b().CreateBr(result);
+
+      ops.set_block(neq);
+
+      Value* big = ops.b().CreateFCmpULT(lhs, rhs, "fixnum.lt");
+
+      Value* neq_result = ops.b().CreateSelect(big,
+                               ops.fixnum_tag(ops.NegOne),
+                               ops.fixnum_tag(ops.One),
+                               "select_bool");
+
+      ops.b().CreateBr(result);
+
+      ops.set_block(result);
+
+      PHINode* res = ops.b().CreatePHI(ops.ObjType, 2, "result");
+      res->addIncoming(eq_result, eq);
+      res->addIncoming(neq_result, neq);
+
+      i.exception_safe();
+      i.set_result(res);
+      i.context().leave_inline();
+    }
+
+    void float_compare_operation(MathOperation op) {
+      log("float_compare_operation");
+      i.context().enter_inline();
+
+      i.use_send_for_failure();
+
+      i.check_recv(klass);
+
+      // Support compare against Floats and Fixnums inline
+      BasicBlock* do_compare = ops.new_block("float_compare_operation");
       BasicBlock* check_fix =  ops.new_block("check_fixnum");
 
       Value* arg = i.arg(0);
@@ -669,9 +905,9 @@ namespace rubinius {
 
   };
 
-  bool Inliner::inline_primitive(Class* klass, CompiledMethod* cm, executor prim) {
+  bool Inliner::inline_primitive(Class* klass, CompiledCode* code, executor prim) {
 
-    InlinePrimitive ip(ops_, *this, cm, klass);
+    InlinePrimitive ip(ops_, *this, code, klass);
 
     if(prim == Primitives::tuple_at && count_ == 1) {
       ip.tuple_at();
@@ -683,16 +919,20 @@ namespace rubinius {
       ip.fixnum_or();
     } else if(prim == Primitives::fixnum_neg && count_ == 0) {
       ip.fixnum_neg();
+    } else if(prim == Primitives::fixnum_compare && count_ == 1) {
+      ip.fixnum_compare();
+    } else if(prim == Primitives::fixnum_mul && count_ == 1) {
+      ip.fixnum_mul();
     } else if(prim == Primitives::fixnum_equal && count_ == 1) {
-      ip.fixnum_compare(cEqual);
+      ip.fixnum_compare_operation(cEqual);
     } else if(prim == Primitives::fixnum_lt && count_ == 1) {
-      ip.fixnum_compare(cLessThan);
+      ip.fixnum_compare_operation(cLessThan);
     } else if(prim == Primitives::fixnum_le && count_ == 1) {
-      ip.fixnum_compare(cLessThanEqual);
+      ip.fixnum_compare_operation(cLessThanEqual);
     } else if(prim == Primitives::fixnum_gt && count_ == 1) {
-      ip.fixnum_compare(cGreaterThan);
+      ip.fixnum_compare_operation(cGreaterThan);
     } else if(prim == Primitives::fixnum_ge && count_ == 1) {
-      ip.fixnum_compare(cGreaterThanEqual);
+      ip.fixnum_compare_operation(cGreaterThanEqual);
     } else if(prim == Primitives::object_equal && count_ == 1) {
       ip.object_equal();
     } else if(prim == Primitives::float_add && count_ == 1) {
@@ -705,16 +945,18 @@ namespace rubinius {
       ip.float_op(cDivide);
     } else if(prim == Primitives::float_mod && count_ == 1) {
       ip.float_op(cMod);
+    } else if(prim == Primitives::float_compare && count_ == 1) {
+      ip.float_compare();
     } else if(prim == Primitives::float_equal && count_ == 1) {
-      ip.float_compare(cEqual);
+      ip.float_compare_operation(cEqual);
     } else if(prim == Primitives::float_lt && count_ == 1) {
-      ip.float_compare(cLessThan);
+      ip.float_compare_operation(cLessThan);
     } else if(prim == Primitives::float_le && count_ == 1) {
-      ip.float_compare(cLessThanEqual);
+      ip.float_compare_operation(cLessThanEqual);
     } else if(prim == Primitives::float_gt && count_ == 1) {
-      ip.float_compare(cGreaterThan);
+      ip.float_compare_operation(cGreaterThan);
     } else if(prim == Primitives::float_ge && count_ == 1) {
-      ip.float_compare(cGreaterThanEqual);
+      ip.float_compare_operation(cGreaterThanEqual);
 
     } else if(prim == Primitives::fixnum_s_eqq && count_ == 1) {
       if(!ip.static_fixnum_s_eqq()) {
@@ -755,13 +997,13 @@ namespace rubinius {
 
       JITStubResults stub_res;
 
-      if(Primitives::get_jit_stub(cm->prim_index(), stub_res)) {
+      if(Primitives::get_jit_stub(code->prim_index(), stub_res)) {
         if(stub_res.arg_count() == count_) {
           if(ops_.state()->config().jit_inline_debug) {
             context_.inline_log("inlining")
-              << ops_.state()->enclosure_name(cm)
+              << ops_.state()->enclosure_name(code)
               << "#"
-              << ops_.state()->symbol_debug_str(cm->name())
+              << ops_.state()->symbol_debug_str(code->name())
               << " into "
               << ops_.state()->symbol_debug_str(ops_.method_name())
               << ". generic primitive: " << stub_res.name() << "\n";
@@ -823,13 +1065,13 @@ namespace rubinius {
         // Add more primitive inlining!
         if(ops_.state()->config().jit_inline_debug) {
           context_.inline_log("NOT inlining")
-            << ops_.state()->enclosure_name(cm)
+            << ops_.state()->enclosure_name(code)
             << "#"
-            << ops_.state()->symbol_debug_str(cm->name())
+            << ops_.state()->symbol_debug_str(code->name())
             << " into "
             << ops_.state()->symbol_debug_str(ops_.method_name())
             << ". No fast stub. primitive: "
-            << ops_.state()->symbol_debug_str(cm->primitive())
+            << ops_.state()->symbol_debug_str(code->primitive())
             << "\n";
         }
 
@@ -840,9 +1082,9 @@ namespace rubinius {
     return true;
   }
 
-  int Inliner::detect_jit_intrinsic(Class* klass, CompiledMethod* cm) {
+  int Inliner::detect_jit_intrinsic(Class* klass, CompiledCode* code) {
     if(klass->instance_type()->to_native() == rubinius::Tuple::type) {
-      if(count_ == 2 && cm->name() == ops_.state()->symbol("swap")) {
+      if(count_ == 2 && code->name() == ops_.state()->symbol("swap")) {
         return 1;
       }
     }
@@ -850,8 +1092,8 @@ namespace rubinius {
     return 0;
   }
 
-  void Inliner::inline_intrinsic(Class* klass, CompiledMethod* cm, int which) {
-    InlinePrimitive ip(ops_, *this, cm, klass);
+  void Inliner::inline_intrinsic(Class* klass, CompiledCode* code, int which) {
+    InlinePrimitive ip(ops_, *this, code, klass);
 
     switch(which) {
     case 1: // Tuple#swap

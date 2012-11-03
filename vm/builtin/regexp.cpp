@@ -34,12 +34,15 @@
 #define OPTION_CAPTURE_GROUP      ONIG_OPTION_CAPTURE_GROUP
 #define OPTION_MASK               (OPTION_IGNORECASE|OPTION_EXTENDED|OPTION_MULTILINE|ONIG_OPTION_DONT_CAPTURE_GROUP|ONIG_OPTION_CAPTURE_GROUP)
 
-#define KCODE_ASCII       0
-#define KCODE_NONE        16
-#define KCODE_EUC         32
-#define KCODE_SJIS        48
-#define KCODE_UTF8        64
-#define KCODE_MASK        (KCODE_EUC|KCODE_SJIS|KCODE_UTF8)
+// Must match up with options/kcode definitions in grammar and regexp.rb
+#define KCODE_NONE        (1 << 9)
+#define KCODE_EUC         (2 << 9)
+#define KCODE_SJIS        (3 << 9)
+#define KCODE_UTF8        (4 << 9)
+#define KCODE_MASK        (KCODE_NONE|KCODE_EUC|KCODE_SJIS|KCODE_UTF8)
+
+#define OPTION_FIXEDENCODING 16
+#define OPTION_NOENCODING    32
 
 namespace rubinius {
 
@@ -86,51 +89,8 @@ namespace rubinius {
     return r;
   }
 
-  static int encoding_to_kcode(STATE, Encoding* enc) {
-    // TODO: Remove 1.8 kcode/options and add flags struct
-    if(enc == Encoding::usascii_encoding(state)) return KCODE_NONE;
-    if(enc == Encoding::utf8_encoding(state)) return KCODE_UTF8;
-    if(enc == Encoding::find(state, "EUC-JP")) return KCODE_EUC;
-    if(enc == Encoding::find(state, "Windows-31J")) return KCODE_SJIS;
-
-    return KCODE_NONE;
-  }
-
-  static Encoding* kcode_to_encoding(STATE, int kcode, Encoding* enc) {
-    switch(kcode & KCODE_MASK) {
-    case KCODE_NONE:
-      return 0;
-    case KCODE_EUC:
-      return Encoding::find(state, "EUC-JP");
-    case KCODE_SJIS:
-      return Encoding::find(state, "Windows-31J");
-    case KCODE_UTF8:
-      return Encoding::utf8_encoding(state);
-    case KCODE_ASCII:
-    default:
-      return enc;
-    }
-    return enc;
-  }
-
-  static OnigEncoding current_encoding(STATE) {
-    switch(state->shared().kcode_page()) {
-    default:
-    case kcode::eAscii:
-      return ONIG_ENCODING_ASCII;
-    case kcode::eEUC:
-      return ONIG_ENCODING_EUC_JP;
-    case kcode::eSJIS:
-      return ONIG_ENCODING_Shift_JIS;
-    case kcode::eUTF8:
-      return ONIG_ENCODING_UTF_8;
-    }
-  }
-
   int get_kcode_from_enc(OnigEncoding enc) {
-    int r;
-
-    r = KCODE_ASCII;
+    int r = 0;
     if (enc == ONIG_ENCODING_ASCII)       r = KCODE_NONE;
     if (enc == ONIG_ENCODING_EUC_JP)      r = KCODE_EUC;
     if (enc == ONIG_ENCODING_Shift_JIS)   r = KCODE_SJIS;
@@ -239,7 +199,7 @@ namespace rubinius {
   }
 
   // Called with the onig_lock held.
-  void Regexp::maybe_recompile(STATE) {
+  void Regexp::maybe_recompile(STATE, String* string) {
     const UChar *pat;
     const UChar *end;
     OnigEncoding enc;
@@ -248,7 +208,8 @@ namespace rubinius {
 
     if(fixed_encoding_) return;
 
-    enc = current_encoding(state);
+    enc = string->get_encoding_kcode_fallback(state);
+
     if(enc == onig_data->enc) return;
 
     pat = (UChar*)source()->byte_address();
@@ -288,20 +249,18 @@ namespace rubinius {
     const UChar *pat;
     const UChar *end;
     OnigErrorInfo err_info;
-    OnigOptionType opts;
     OnigEncoding enc;
-    int err, num_names, kcode;
 
-    opts  = options->to_native();
-    kcode = opts & KCODE_MASK;
-    opts &= OPTION_MASK;
+    OnigOptionType opts = options->to_native();
 
     if(LANGUAGE_18_ENABLED(state)) {
+      int kcode = opts & KCODE_MASK;
+
       pat = (UChar*)pattern->byte_address();
       end = pat + pattern->byte_size();
 
       if(kcode == 0) {
-          enc = current_encoding(state);
+        enc = pattern->get_encoding_kcode_fallback(state);
       } else {
         // Don't attempt to fix the encoding later, it's been specified by the
         // user.
@@ -309,9 +268,30 @@ namespace rubinius {
         fixed_encoding_ = true;
       }
     } else {
-      Encoding* source_enc = kcode_to_encoding(state, kcode, pattern->encoding(state));
+      fixed_encoding_ = opts & OPTION_FIXEDENCODING;
+      no_encoding_    = opts & OPTION_NOENCODING;
 
-      fixed_encoding_ = kcode && kcode != KCODE_NONE;
+      Encoding* source_enc = pattern->encoding(state);
+
+      switch(opts & KCODE_MASK) {
+      case KCODE_NONE:
+        source_enc = 0;
+        no_encoding_ = true;
+        break;
+      case KCODE_EUC:
+        source_enc = Encoding::find(state, "EUC-JP");
+        fixed_encoding_ = true;
+        break;
+      case KCODE_SJIS:
+        source_enc = Encoding::find(state, "Windows-31J");
+        fixed_encoding_ = true;
+        break;
+      case KCODE_UTF8:
+        source_enc = Encoding::utf8_encoding(state);
+        fixed_encoding_ = true;
+        break;
+      }
+
       String* converted = pattern->convert_escaped(state, source_enc, fixed_encoding_);
 
       pat = (UChar*)converted->byte_address();
@@ -322,9 +302,9 @@ namespace rubinius {
       pattern->encoding(state, source_enc);
     }
 
-    thread::Mutex::LockGuard lg(state->shared().onig_lock());
+    utilities::thread::Mutex::LockGuard lg(state->shared().onig_lock());
 
-    err = onig_new(&this->onig_data, pat, end, opts, enc, ONIG_SYNTAX_RUBY, &err_info);
+    int err = onig_new(&this->onig_data, pat, end, opts & OPTION_MASK, enc, ONIG_SYNTAX_RUBY, &err_info);
 
     if(err != ONIG_NORMAL) {
       UChar onig_err_buf[ONIG_MAX_ERROR_MESSAGE_LEN];
@@ -338,7 +318,7 @@ namespace rubinius {
 
     this->source(state, pattern);
 
-    num_names = onig_number_of_names(this->onig_data);
+    int num_names = onig_number_of_names(this->onig_data);
 
     if(num_names == 0) {
       this->names(state, nil<LookupTable>());
@@ -371,12 +351,16 @@ namespace rubinius {
 
     int result = ((int)onig_get_options(onig_data) & OPTION_MASK);
 
-    if(fixed_encoding_) {
-      // TODO: unify after removing 1.8 kcode
-      if(LANGUAGE_18_ENABLED(state)) {
+    if(LANGUAGE_18_ENABLED(state)) {
+      if(fixed_encoding_) {
         result |= get_kcode_from_enc(onig_get_encoding(onig_data));
-      } else {
-        result |= encoding_to_kcode(state, encoding(state));
+      }
+    } else {
+      if(fixed_encoding_) {
+        result |= OPTION_FIXEDENCODING;
+      }
+      if(no_encoding_) {
+        result |= OPTION_NOENCODING;
       }
     }
 
@@ -460,7 +444,7 @@ namespace rubinius {
 
     lock_.lock();
 
-    maybe_recompile(state);
+    maybe_recompile(state, string);
 
     int begin_reg[10] = { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
                          ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
@@ -526,7 +510,7 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    // thread::Mutex::LockGuard lg(state->shared().onig_lock());
+    // utilities::thread::Mutex::LockGuard lg(state->shared().onig_lock());
 
     max = string->byte_size();
     native_int pos = start->to_native();
@@ -540,7 +524,7 @@ namespace rubinius {
 
     lock_.lock();
 
-    maybe_recompile(state);
+    maybe_recompile(state, string);
 
     int begin_reg[10] = { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
                          ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
@@ -556,7 +540,6 @@ namespace rubinius {
     OnigRegion region = { 10, 0, begin_reg, end_reg, 0, 0 };
 
     int* back_match = onig_data->int_map_backward;
-
     beg = onig_match(onig_data, str, fin, str, &region,
                      ONIG_OPTION_NONE);
 
@@ -597,7 +580,7 @@ namespace rubinius {
 
     lock_.lock();
 
-    maybe_recompile(state);
+    maybe_recompile(state, string);
 
     max = string->byte_size();
     native_int pos = start->to_native();
@@ -658,15 +641,21 @@ namespace rubinius {
     native_int f = fin->to_native();
     native_int b = beg->to_native();
 
+    String* string;
+
     if(!beg || !fin ||
         f > max || b > max || b < 0) {
-      return String::create(state, 0, 0);
+      string = String::create(state, 0, 0);
+    } else {
+      const char* str = (char*)source_->byte_address();
+      native_int sz = fin->to_native() - beg->to_native();
+
+      string = String::create(state, str + beg->to_native(), sz);
     }
 
-    const char* str = (char*)source_->byte_address();
-    native_int sz = fin->to_native() - beg->to_native();
+    string->encoding(state, source_->encoding());
 
-    return String::create(state, str + beg->to_native(), sz);
+    return string;
   }
 
   String* MatchData::pre_matched(STATE) {
@@ -675,15 +664,21 @@ namespace rubinius {
     native_int max = source_->byte_size();
     native_int sz = beg->to_native();
 
+    String* string;
+
     if(!beg || sz <= 0) {
-      return String::create(state, 0, 0);
+      string = String::create(state, 0, 0);
+    } else {
+      if(sz > max) sz = max;
+
+      const char* str = (char*)source_->byte_address();
+
+      string = String::create(state, str, sz);
     }
 
-    if(sz > max) sz = max;
+    string->encoding(state, source_->encoding());
 
-    const char* str = (char*)source_->byte_address();
-
-    return String::create(state, str, sz);
+    return string;
   }
 
   String* MatchData::post_matched(STATE) {
@@ -692,16 +687,22 @@ namespace rubinius {
     native_int f = fin->to_native();
     native_int max = source_->byte_size();
 
+    String* string;
+
     if(!fin || f >= max) {
-      return String::create(state, 0, 0);
+      string = String::create(state, 0, 0);
+    } else {
+      const char* str = (char*)source_->byte_address();
+      native_int sz = max - f;
+
+      if(sz > max) sz = max;
+
+      string = String::create(state, str + f, sz);
     }
 
-    const char* str = (char*)source_->byte_address();
-    native_int sz = max - f;
+    string->encoding(state, source_->encoding());
 
-    if(sz > max) sz = max;
-
-    return String::create(state, str + f, sz);
+    return string;
   }
 
   Object* MatchData::nth_capture(STATE, native_int which) {
@@ -728,7 +729,10 @@ namespace rubinius {
 
     if(sz > max) sz = max;
 
-    return String::create(state, str + b, sz);
+    String* string = String::create(state, str + b, sz);
+    string->encoding(state, source_->encoding());
+
+    return string;
   }
 
   Object* MatchData::last_capture(STATE) {

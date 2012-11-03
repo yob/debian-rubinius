@@ -10,7 +10,7 @@ namespace llvm {
 
 namespace rubinius {
   class Object;
-  class CompiledMethod;
+  class CompiledCode;
   class Symbol;
   class Module;
   class GarbageCollector;
@@ -23,50 +23,21 @@ namespace rubinius {
   }
 
   namespace jit {
-    class GCLiteral {
-      Object* object_;
-      GCLiteral* next_;
-
-    public:
-      GCLiteral(Object* obj, GCLiteral* nxt)
-        : object_(obj)
-        , next_(nxt)
-      {}
-
-      Object* object() {
-        return object_;
-      }
-
-      void set_object(Object* obj) {
-        object_ = obj;
-      }
-
-      GCLiteral* next() {
-        return next_;
-      }
-
-      void* address_of_object() {
-        return &object_;
-      }
-    };
 
     class RuntimeData {
 
     public:
-      CompiledMethod* method_;
+      CompiledCode* method_;
       Symbol* name_;
       Module* module_;
 
-      GCLiteral* literals_;
-
-      RuntimeData(CompiledMethod* method, Symbol* name, Module* mod)
+      RuntimeData(CompiledCode* method, Symbol* name, Module* mod)
         : method_(method)
         , name_(name)
         , module_(mod)
-        , literals_(0)
       {}
 
-      CompiledMethod* method() {
+      CompiledCode* method() {
         return method_;
       }
 
@@ -76,15 +47,6 @@ namespace rubinius {
 
       Module* module() {
         return module_;
-      }
-
-      GCLiteral* literals() {
-        return literals_;
-      }
-
-      GCLiteral* new_literal(Object* obj) {
-        literals_ = new GCLiteral(obj, literals_);
-        return literals_;
       }
 
       // For GC access.

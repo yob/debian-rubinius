@@ -4,7 +4,7 @@ module Rubinius
   module AST
     class Send < Node
       attr_accessor :receiver, :name, :privately, :block, :variable
-      attr_accessor :check_for_local
+      attr_accessor :check_for_local, :vcall_style
 
       def initialize(line, receiver, name, privately=false, vcall_style=false)
         @line = line
@@ -453,6 +453,12 @@ module Rubinius
 
       def size
         @array.size
+      end
+
+      def stack_size
+        size = @array.size
+        size += 1 if splat?
+        size
       end
 
       def splat?

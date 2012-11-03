@@ -6,7 +6,7 @@
 
 #include "call_frame.hpp"
 #include "stack_variables.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/module.hpp"
 
 #include "instruments/tooling.hpp"
@@ -34,7 +34,7 @@ namespace jit {
        << "$block@" << ls_->add_jitted_method();
 
     llvm::Function* func = Function::Create(ft, GlobalValue::ExternalLinkage,
-                            ss.str().c_str(), ls_->module());
+                            ss.str(), ls_->module());
 
     Function::arg_iterator ai = func->arg_begin();
     llvm::Value* vm =   ai++; vm->setName("state");
@@ -55,9 +55,9 @@ namespace jit {
 
     alloc_frame("block_body");
 
-    initialize_frame(vmm_->stack_size);
+    initialize_frame(machine_code_->stack_size);
 
-    nil_stack(vmm_->stack_size, constant(cNil, obj_type));
+    nil_stack(machine_code_->stack_size, constant(cNil, obj_type));
 
     setup_block_scope();
 
@@ -80,7 +80,7 @@ namespace jit {
       sig << llvm::PointerType::getUnqual(ls_->Int8Ty);
       sig << "BlockEnvironment";
       sig << "Module";
-      sig << "CompiledMethod";
+      sig << "CompiledCode";
 
       Value* call_args[] = {
         vm,
@@ -146,7 +146,7 @@ namespace jit {
   }
 
   void BlockBuilder::initialize_frame(int stack_size) {
-    Value* cm_gep = get_field(call_frame, offset::CallFrame::cm);
+    Value* code_gep = get_field(call_frame, offset::CallFrame::compiled_code);
 
     method = b().CreateLoad(get_field(block_env, offset::BlockEnvironment::code),
                             "env.code");
@@ -154,11 +154,11 @@ namespace jit {
     // previous
     b().CreateStore(info_.previous(), get_field(call_frame, offset::CallFrame::previous));
 
-    // static_scope
-    Value* ss = b().CreateLoad(get_field(block_inv, offset::blockinv_static_scope),
-                               "invocation.static_scope");
+    // constant_scope
+    Value* cs = b().CreateLoad(get_field(block_inv, offset::blockinv_constant_scope),
+                               "invocation.constant_scope");
 
-    b().CreateStore(ss, get_field(call_frame, offset::CallFrame::static_scope));
+    b().CreateStore(cs, get_field(call_frame, offset::CallFrame::constant_scope));
 
     // arguments
     b().CreateStore(info_.args(), get_field(call_frame, offset::CallFrame::arguments));
@@ -167,14 +167,14 @@ namespace jit {
     b().CreateStore(Constant::getNullValue(ls_->Int8PtrTy),
         get_field(call_frame, offset::CallFrame::dispatch_data));
 
-    // cm
-    b().CreateStore(method, cm_gep);
+    // compiled_code
+    b().CreateStore(method, code_gep);
 
     // flags
     inv_flags_ = b().CreateLoad(get_field(block_inv, offset::blockinv_flags),
         "invocation.flags");
 
-    int block_flags = CallFrame::cCustomStaticScope |
+    int block_flags = CallFrame::cCustomConstantScope |
       CallFrame::cMultipleScopes |
       CallFrame::cBlock |
       CallFrame::cJITed;
@@ -208,7 +208,7 @@ namespace jit {
   }
 
   void BlockBuilder::import_args_19_style() {
-    if(vmm_->required_args > 1) {
+    if(machine_code_->required_args > 1) {
       Value* lambda_check =
         b().CreateICmpEQ(
           b().CreateAnd(
@@ -249,10 +249,10 @@ namespace jit {
                        "arg_ary");
 
     // The variables used in the 4 phases.
-    int P = vmm_->post_args;
+    int P = machine_code_->post_args;
     Value* Pv = cint(P);
 
-    int R = vmm_->required_args;
+    int R = machine_code_->required_args;
 
     int M = R - P;
     Value* Mv = cint(M);
@@ -261,13 +261,13 @@ namespace jit {
                  b().CreateConstGEP2_32(info_.args(), 0, offset::args_total),
                  "args.total");
 
-    int DT = vmm_->total_args;
+    int DT = machine_code_->total_args;
     Value* DTv = cint(DT);
 
     int O = DT - R;
     Value* Ov = cint(O);
 
-    int HS = vmm_->splat_position > 0 ? 1 : 0;
+    int HS = machine_code_->splat_position > 0 ? 1 : 0;
 
     Value* CT = HS ? T
                    : b().CreateSelect(b().CreateICmpSLT(T, DTv), T, DTv);
@@ -445,7 +445,7 @@ namespace jit {
     }
 
     // Phase 4 - splat
-    if(vmm_->splat_position >= 0) {
+    if(machine_code_->splat_position >= 0) {
       Signature sig(ls_, "Object");
       sig << "State";
       sig << "Arguments";
@@ -471,7 +471,7 @@ namespace jit {
       Value* idx3[] = {
         cint(0),
         cint(offset::vars_tuple),
-        cint(vmm_->splat_position)
+        cint(machine_code_->splat_position)
       };
 
       Value* pos = b().CreateGEP(vars, idx3, "splat_pos");

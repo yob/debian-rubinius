@@ -52,7 +52,7 @@
 
 #include "builtin/channel.hpp"
 
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/block_environment.hpp"
 
 #include "builtin/system.hpp"
@@ -149,13 +149,22 @@ namespace rubinius {
   //
   // HACK: remove this when performance is better and compiled_file.rb
   // unmarshal_data method works.
+  static std::stringstream stream;
   Object* System::compiledfile_load(STATE, String* path,
                                     Integer* signature, Integer* version)
   {
-    std::ifstream stream(path->c_str(state));
-    if(!stream) {
+    std::ifstream file(path->c_str(state), std::ios::ate|std::ios::binary);
+
+    if(!file) {
       return Primitives::failure();
     }
+
+    std::streampos length = file.tellg();
+    std::vector<char> buffer(length);
+    file.seekg(0, std::ios::beg);
+    file.read(&buffer[0], length);
+    stream.clear();
+    stream.rdbuf()->pubsetbuf(&buffer[0], length);
 
     CompiledFile* cf = CompiledFile::load(stream);
     if(cf->magic != "!RBIX") {
@@ -182,7 +191,8 @@ namespace rubinius {
     return obj;
   }
 
-  Object* System::vm_exec(STATE, String* path, Array* args) {
+  Object* System::vm_exec(STATE, String* path, Array* args,
+                          CallFrame* calling_environment) {
 
     const char* c_path = path->c_str_null_safe(state);
     size_t argc = args->size();
@@ -198,18 +208,14 @@ namespace rubinius {
       argv[i] = const_cast<char*>(as<String>(args->get(state, i))->c_str_null_safe(state));
     }
 
+    OnStack<2> os(state, path, args);
     // Some system (darwin) don't let execvp work if there is more
-    // than one thread running. So we kill off any background LLVM
-    // thread here.
-
-#ifdef ENABLE_LLVM
-    LLVMState::shutdown(state);
-#endif
-
-    SignalHandler::pause();
-    bool agent_running = QueryAgent::shutdown(state);
-
-    state->shared().pre_exec();
+    // than one thread running.
+    {
+      // TODO: Make this guard unnecessary
+      GCIndependent guard(state, calling_environment);
+      state->shared().auxiliary_threads()->before_exec(state);
+    }
 
     // TODO Need to stop and kill off any ruby threads!
     // We haven't run into this because exec is almost always called
@@ -221,7 +227,7 @@ namespace rubinius {
     // won't leak through. We need to use sigaction() here since signal()
     // provides no control over SA_RESTART and can use the wrong value causing
     // blocking I/O methods to become uninterruptable.
-    for(int i = 0; i < NSIG; i++) {
+    for(int i = 1; i < NSIG; i++) {
       struct sigaction action;
       struct sigaction old_action;
 
@@ -238,7 +244,7 @@ namespace rubinius {
 
     // Hmmm, execvp failed, we need to recover here.
 
-    for(int i = 0; i < NSIG; i++) {
+    for(int i = 1; i < NSIG; i++) {
       struct sigaction action;
 
       action.sa_handler = (void(*)(int))old_handlers[i];
@@ -250,15 +256,7 @@ namespace rubinius {
 
     delete[] argv;
 
-#ifdef ENABLE_LLVM
-    LLVMState::start(state);
-#endif
-
-    SignalHandler::on_fork(state);
-
-    if(agent_running) {
-      state->shared().autostart_agent(state);
-    }
+    state->shared().auxiliary_threads()->after_exec(state);
 
     /* execvp() returning means it failed. */
     Exception::errno_error(state, "execvp(2) failed", erno);
@@ -277,9 +275,17 @@ namespace rubinius {
 
     int fds[2];
 
+    OnStack<1> os(state, str);
+
     if(pipe(fds) != 0) return Primitives::failure();
 
-    pid_t pid = fork();
+    {
+      // TODO: Make this guard unnecessary
+      GCIndependent guard(state, calling_environment);
+      state->shared().auxiliary_threads()->before_fork(state);
+    }
+
+    pid_t pid = ::fork();
 
     // error
     if(pid == -1) {
@@ -345,6 +351,8 @@ namespace rubinius {
       // bad news, shouldn't be here.
       std::cerr << "execvp failed: " << strerror(errno) << std::endl;
       exit(1);
+    } else {
+      state->shared().auxiliary_threads()->after_fork_parent(state);
     }
 
     close(fds[1]);
@@ -468,12 +476,11 @@ namespace rubinius {
 #else
     int result = 0;
 
-#ifdef ENABLE_LLVM
     {
+      // TODO: Make this guard unnecessary
       GCIndependent guard(state, calling_environment);
-      LLVMState::pause(state);
+      state->shared().auxiliary_threads()->before_fork(state);
     }
-#endif
 
     /*
      * We have to bring all the threads to a safe point before we can
@@ -492,19 +499,13 @@ namespace rubinius {
       state->vm()->thread->init_lock();
       state->shared().reinit(state);
       state->shared().om->on_fork(state);
-      SignalHandler::on_fork(state, false);
-
-      // Re-initialize LLVM
-#ifdef ENABLE_LLVM
-      LLVMState::on_fork(state);
-#endif
+      state->shared().auxiliary_threads()->after_fork_child(state);
     } else {
-#ifdef ENABLE_LLVM
-    {
-      GCIndependent guard(state, calling_environment);
-      LLVMState::unpause(state);
-    }
-#endif
+      {
+        // TODO: Make this guard unnecessary
+        GCIndependent guard(state, calling_environment);
+        state->shared().auxiliary_threads()->after_fork_parent(state);
+      }
     }
 
     if(result == -1) {
@@ -527,6 +528,24 @@ namespace rubinius {
       state->vm()->collect_maybe(gct, call_frame);
     }
     return cNil;
+  }
+
+  Integer* System::vm_gc_count(STATE) {
+    return Integer::from(state, state->memory()->gc_stats.young_collection_count.read() +
+                                state->memory()->gc_stats.full_collection_count.read());
+  }
+
+  Integer* System::vm_gc_size(STATE) {
+    return Integer::from(state, state->shared().config.gc_bytes * 2 +
+                                state->memory()->immix_usage() +
+                                state->memory()->loe_usage() +
+                                state->memory()->code_usage() +
+                                state->shared().symbols.bytes_used());
+  }
+
+  Integer* System::vm_gc_time(STATE) {
+    return Integer::from(state, state->memory()->gc_stats.total_young_collection_time.read() +
+                                state->memory()->gc_stats.total_full_collection_time.read());
   }
 
   Object* System::vm_get_config_item(STATE, String* var) {
@@ -581,7 +600,7 @@ namespace rubinius {
     bool include_vars = CBOOL(inc_vars);
 
     for(native_int i = skip->to_native(); call_frame && i > 0; --i) {
-      call_frame = static_cast<CallFrame*>(call_frame->previous);
+      call_frame = call_frame->previous;
     }
 
     return Location::from_call_stack(state, call_frame, include_vars);
@@ -592,7 +611,7 @@ namespace rubinius {
     CallFrame* call_frame = calling_environment;
 
     for(native_int i = skip->to_native(); call_frame && i > 0; --i) {
-      call_frame = static_cast<CallFrame*>(call_frame->previous);
+      call_frame = call_frame->previous;
     }
 
     return Location::mri_backtrace(state, call_frame);
@@ -695,7 +714,7 @@ namespace rubinius {
       native_int i = sig->to_native();
       if(i < 0) {
         h->add_signal(state, -i, SignalHandler::eDefault);
-      } else {
+      } else if(i > 0) {
         h->add_signal(state, i, ignored == cTrue ? SignalHandler::eIgnore : SignalHandler::eCustom);
       }
 
@@ -738,14 +757,22 @@ namespace rubinius {
       ts.tv_sec  += tv.tv_sec + nano / NANOSECONDS;
       ts.tv_nsec  = nano % NANOSECONDS;
 
-      state->park_timed(gct, calling_environment, &ts);
+      if(!state->park_timed(gct, calling_environment, &ts)) return NULL;
     } else {
-      state->park(gct, calling_environment);
+      if(!state->park(gct, calling_environment)) return NULL;
     }
 
     if(!state->check_async(calling_environment)) return NULL;
 
     return Fixnum::from(time(0) - start);
+  }
+
+  Object* System::vm_check_interrupts(STATE, CallFrame* calling_environment) {
+    if(state->check_async(calling_environment)) {
+      return cNil;
+    } else {
+      return NULL;
+    }
   }
 
   static inline double tv_to_dbl(struct timeval* tv) {
@@ -814,7 +841,7 @@ namespace rubinius {
   }
 
   Class* System::vm_open_class(STATE, Symbol* name, Object* sup,
-                               StaticScope* scope)
+                               ConstantScope* scope)
   {
     Module* under;
 
@@ -866,7 +893,7 @@ namespace rubinius {
     return cls;
   }
 
-  Module* System::vm_open_module(STATE, Symbol* name, StaticScope* scope) {
+  Module* System::vm_open_module(STATE, Symbol* name, ConstantScope* scope) {
     Module* under = G(object);
 
     if(!scope->nil_p()) {
@@ -912,8 +939,8 @@ namespace rubinius {
   }
 
   Object* System::vm_add_method(STATE, GCToken gct, Symbol* name,
-                                CompiledMethod* method,
-                                StaticScope* scope, Object* vis)
+                                CompiledCode* method,
+                                ConstantScope* scope, Object* vis)
   {
     Module* mod = scope->for_method_definition();
 
@@ -971,8 +998,8 @@ namespace rubinius {
   }
 
   Object* System::vm_attach_method(STATE, GCToken gct, Symbol* name,
-                                   CompiledMethod* method,
-                                   StaticScope* scope, Object* recv)
+                                   CompiledCode* method,
+                                   ConstantScope* scope, Object* recv)
   {
     Module* mod = recv->singleton_class(state);
 
@@ -1032,10 +1059,10 @@ namespace rubinius {
 
     OnStack<2> os(state, env, show);
 
-    VMMethod* vmm = env->vmmethod(state, gct);
+    MachineCode* mcode = env->machine_code(state, gct);
 
     jit::Compiler jit(ls);
-    jit.compile_block(ls, env->code(), vmm);
+    jit.compile_block(ls, env->compiled_code(), mcode);
 
     if(show->true_p()) {
       jit.show_machine_code();
@@ -1063,10 +1090,18 @@ namespace rubinius {
 
     bool disable = CBOOL(o_disable);
 
+    // TODO: this should be inside tooling
+    bool tooling_interpreter = state->shared().tool_broker()->tooling_interpreter_p();
+
     while(obj) {
-      if(CompiledMethod* cm = try_as<CompiledMethod>(obj)) {
-        if(VMMethod* vmm = cm->backend_method()) {
-          vmm->deoptimize(state, cm, 0, disable);
+      if(CompiledCode* code = try_as<CompiledCode>(obj)) {
+        if(MachineCode* mcode = code->machine_code()) {
+          mcode->deoptimize(state, code, 0, disable);
+          if(tooling_interpreter) {
+            mcode->run = MachineCode::tooling_interpreter;
+          } else {
+            mcode->run = MachineCode::interpreter;
+          }
         }
         total++;
       }
@@ -1111,10 +1146,11 @@ namespace rubinius {
                            CallFrame* call_frame)
   {
     LookupData lookup(obj, obj->lookup_begin(state), G(sym_protected));
-    Dispatch dis(state->symbol("call"));
-    Arguments args(state->symbol("call"), 1, &dest);
+    Dispatch dis(G(sym_call));
+    Arguments args(G(sym_call), 1, &dest);
     args.set_recv(obj);
 
+    OnStack<1> os(state, dest);
     Object* ret = dis.send(state, call_frame, lookup, args);
 
     if(!ret && state->vm()->thread_state()->raise_reason() == cCatchThrow) {
@@ -1331,20 +1367,22 @@ namespace rubinius {
 #endif
   }
 
-  IO* System::vm_agent_io(STATE) {
-    QueryAgent* agent = state->shared().autostart_agent(state);
+  Object* System::vm_agent_start(STATE) {
+    state->shared().start_agent(state);
+    return cNil;
+  }
+
+  IO* System::vm_agent_loopback(STATE) {
+    QueryAgent* agent = state->shared().start_agent(state);
+
     int sock = agent->loopback_socket();
     if(sock < 0) {
       if(!agent->setup_local()) return nil<IO>();
-      if(agent->running()) {
-        agent->wakeup();
-      } else {
-        agent->run();
-      }
 
       sock = agent->loopback_socket();
     }
 
+    agent->wakeup();
     // dup the descriptor so the lifetime of socket is properly controlled.
     return IO::create(state, dup(sock));
   }
@@ -1377,6 +1415,25 @@ namespace rubinius {
         state->raise_exception(exc);
         return 0;
       }
+    }
+
+    return cNil;
+  }
+
+  Object* System::vm_object_uninterrupted_lock(STATE, GCToken gct, Object* obj,
+                                 CallFrame* call_frame)
+  {
+    if(!obj->reference_p()) return Primitives::failure();
+    state->set_call_frame(call_frame);
+
+    switch(obj->lock(state, gct, 0, false)) {
+    case eLocked:
+      return cTrue;
+    case eLockTimeout:
+    case eUnlocked:
+    case eLockError:
+    case eLockInterrupted:
+      return Primitives::failure();
     }
 
     return cNil;
@@ -1535,6 +1592,9 @@ namespace rubinius {
     case cCatchThrow:
       reason = state->symbol("catch_throw");
       break;
+    case cThreadKill:
+      reason = state->symbol("thread_kill");
+      break;
     default:
       reason = state->symbol("unknown");
     }
@@ -1548,25 +1608,25 @@ namespace rubinius {
     return tuple;
   }
 
-  Object* System::vm_run_script(STATE, GCToken gct, CompiledMethod* cm,
+  Object* System::vm_run_script(STATE, GCToken gct, CompiledCode* code,
                                 CallFrame* calling_environment)
   {
-    Dispatch msg(state->symbol("__script__"), G(object), cm);
+    Dispatch msg(state->symbol("__script__"), G(object), code);
     Arguments args(state->symbol("__script__"), G(main), cNil, 0, 0);
 
-    OnStack<1> os(state, cm);
+    OnStack<1> os(state, code);
 
-    cm->internalize(state, gct, 0, 0);
+    code->internalize(state, gct, 0, 0);
 
 #ifdef RBX_PROFILER
     if(unlikely(state->vm()->tooling())) {
-      tooling::ScriptEntry me(state, cm);
-      return cm->backend_method()->execute_as_script(state, cm, calling_environment);
+      tooling::ScriptEntry me(state, code);
+      return code->machine_code()->execute_as_script(state, code, calling_environment);
     } else {
-      return cm->backend_method()->execute_as_script(state, cm, calling_environment);
+      return code->machine_code()->execute_as_script(state, code, calling_environment);
     }
 #else
-    return cm->backend_method()->execute_as_script(state, cm, calling_environment);
+    return code->machine_code()->execute_as_script(state, code, calling_environment);
 #endif
   }
 

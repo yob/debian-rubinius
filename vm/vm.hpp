@@ -112,6 +112,7 @@ namespace rubinius {
     TypedRoot<Exception*> interrupted_exception_;
 
     bool interrupt_with_signal_;
+    bool interrupt_by_kill_;
     InflatedHeader* waiting_header_;
 
     void (*custom_wakeup_)(void*);
@@ -182,7 +183,7 @@ namespace rubinius {
 
     void reset_stack_limit() {
       // @TODO assumes stack growth direction
-      stack_limit_ = (stack_start_ - stack_size_) + (4096 * 3);
+      stack_limit_ = (stack_start_ - stack_size_) + (4096 * 10);
     }
 
     void set_stack_bounds(uintptr_t start, int length) {
@@ -294,7 +295,7 @@ namespace rubinius {
     static void init_stack_size();
 
     static VM* current();
-    static void set_current(VM* vm);
+    static void set_current(VM* vm, std::string name);
 
     static void discard(STATE, VM*);
 
@@ -407,6 +408,7 @@ namespace rubinius {
     }
 
     void register_raise(STATE, Exception* exc);
+    void register_kill(STATE);
 
     void gc_scan(GarbageCollector* gc);
 
@@ -473,11 +475,11 @@ namespace rubinius {
   };
 
   template <class T>
-  class GCIndependentLockGuard : public thread::LockGuardTemplate<T> {
+  class GCIndependentLockGuard : public utilities::thread::LockGuardTemplate<T> {
     State* state_;
   public:
     GCIndependentLockGuard(STATE, GCToken gct, T& in_lock)
-      : thread::LockGuardTemplate<T>(in_lock, false)
+      : utilities::thread::LockGuardTemplate<T>(in_lock, false)
       , state_(state)
     {
       state_->shared().gc_independent(state_);
@@ -490,7 +492,7 @@ namespace rubinius {
     }
   };
 
-   typedef GCIndependentLockGuard<thread::Mutex> GCLockGuard;
+   typedef GCIndependentLockGuard<utilities::thread::Mutex> GCLockGuard;
 };
 
 #endif

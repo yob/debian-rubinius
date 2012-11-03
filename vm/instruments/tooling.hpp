@@ -6,6 +6,7 @@
 namespace rubinius {
   class BlockEnvironment;
   class VM;
+  class MachineCode;
 namespace tooling {
 
   const static int cTotalToolDatas = 16;
@@ -34,6 +35,8 @@ namespace tooling {
 
     rbxti::at_gc_func at_gc_func_;
 
+    rbxti::at_ip_func at_ip_func_;
+
     rbxti::shutdown_func shutdown_func_;
 
   public:
@@ -51,8 +54,12 @@ namespace tooling {
       global_tool_data_ = d;
     }
 
+    bool tooling_interpreter_p() {
+      return at_ip_func_ != NULL;
+    }
+
   public:
-    void* enter_method(STATE, Executable* exec, Module* mod, Arguments& args, CompiledMethod* cm);
+    void* enter_method(STATE, Executable* exec, Module* mod, Arguments& args, CompiledCode* code);
     void  leave_method(STATE, void* tag);
 
     void* enter_block(STATE, BlockEnvironment* env, Module* mod);
@@ -61,7 +68,7 @@ namespace tooling {
     void* enter_gc(STATE, int level);
     void  leave_gc(STATE, void* tag);
 
-    void* enter_script(STATE, CompiledMethod* cm);
+    void* enter_script(STATE, CompiledCode* code);
     void  leave_script(STATE, void* tag);
 
     void shutdown(STATE);
@@ -70,6 +77,8 @@ namespace tooling {
     void thread_stop(STATE);
 
     void at_gc(STATE);
+
+    void at_ip(STATE, MachineCode* mcode, int ip);
 
     void set_tool_enter_method(rbxti::enter_method func);
     void set_tool_leave_method(rbxti::leave_func func);
@@ -93,6 +102,8 @@ namespace tooling {
 
     void set_tool_at_gc(rbxti::at_gc_func func);
 
+    void set_tool_at_ip(rbxti::at_ip_func func);
+
     Object* results(STATE);
     void enable(STATE);
     bool available(STATE);
@@ -113,10 +124,10 @@ namespace tooling {
 
   class MethodEntry : public Entry {
   public:
-    MethodEntry(STATE, Executable* exec, Module* mod, Arguments& args, CompiledMethod* cm=0)
+    MethodEntry(STATE, Executable* exec, Module* mod, Arguments& args, CompiledCode* code=0)
       : Entry(state)
     {
-      tag_ = broker_->enter_method(state, exec, mod, args, cm);
+      tag_ = broker_->enter_method(state, exec, mod, args, code);
     }
 
     ~MethodEntry() {
@@ -156,10 +167,10 @@ namespace tooling {
 
   class ScriptEntry : public Entry {
   public:
-    ScriptEntry(STATE, CompiledMethod* cm)
+    ScriptEntry(STATE, CompiledCode* code)
       : Entry(state)
     {
-      tag_ = broker_->enter_script(state, cm);
+      tag_ = broker_->enter_script(state, code);
     }
 
     ~ScriptEntry() {

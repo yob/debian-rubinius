@@ -34,7 +34,9 @@ namespace rubinius {
   }
 
   Object* Tuple::put(STATE, native_int idx, Object* val) {
-    assert(idx >= 0 && idx < num_fields());
+    if(idx < 0 || idx >= num_fields()) {
+      rubinius::bug("Invalid tuple index");
+    }
 
     this->field[idx] = val;
     if(val->reference_p()) write_barrier(state, val);
@@ -60,7 +62,9 @@ namespace rubinius {
   }
 
   Tuple* Tuple::create(STATE, native_int fields) {
-    assert(fields >= 0 && fields < INT32_MAX);
+    if(fields < 0 || fields >= INT32_MAX) {
+      rubinius::bug("Invalid tuple size");
+    }
 
     // Fast path using GC optimized tuple creation
     Tuple* tup = state->vm()->new_young_tuple_dirty(fields);
@@ -75,14 +79,14 @@ namespace rubinius {
 
     // Slow path.
 
-    size_t bytes;
+    size_t bytes = 0;
 
     tup = state->vm()->new_object_variable<Tuple>(G(tuple), fields, bytes);
     if(unlikely(!tup)) {
       Exception::memory_error(state);
+    } else {
+      tup->full_size_ = bytes;
     }
-
-    tup->full_size_ = bytes;
     return tup;
   }
 
@@ -99,7 +103,9 @@ namespace rubinius {
   }
 
   Tuple* Tuple::from(STATE, native_int fields, ...) {
-    assert(fields >= 0);
+    if(fields < 0 || fields >= INT32_MAX) {
+      rubinius::bug("Invalid tuple size");
+    }
 
     va_list ar;
     Tuple* tup = create(state, fields);

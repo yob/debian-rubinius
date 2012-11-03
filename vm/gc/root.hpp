@@ -20,7 +20,7 @@ namespace rubinius {
    *  @todo Document methods. --rue
    */
   class Roots : public LinkedList {
-    thread::Mutex lock_;
+    utilities::thread::Mutex lock_;
 
   public:   /* Ctors */
     Roots()
@@ -91,7 +91,7 @@ namespace rubinius {
     }
 
     ~Root() {
-      if(roots_ && object_) roots_->remove(this);
+      if(roots_ && object_ && object_ != cUndef) roots_->remove(this);
     }
 
   public: /** Methods */

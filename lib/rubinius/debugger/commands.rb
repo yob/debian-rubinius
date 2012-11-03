@@ -73,7 +73,7 @@ class Rubinius::Debugger
     # As such, they're grouped by similar action.
 
     class Help < Command
-      pattern "help"
+      pattern "help", "h"
       help "Show information about debugger commands"
 
       def run(args)
@@ -115,8 +115,13 @@ To breakpoint on class method start of Debugger line 4, use:
   Debugger.start:4
       HELP
 
+      # provide this method so it can be overriden for other languages wanting to use this debugger
+      def match_method(method_identifier)
+        /([A-Z]\w*(?:::[A-Z]\w*)*)([.#]|::)([a-zA-Z0-9_\[\]]+[!?=]?)(?:[:](\d+))?/.match(method_identifier)
+      end
+
       def run(args, temp=false)
-        m = /([A-Z]\w*(?:::[A-Z]\w*)*)([.#]|::)([a-zA-Z0-9_\[\]]+[!?=]?)(?:[:](\d+))?/.match(args)
+        m = match_method(args)
         unless m
           error "Unrecognized position: '#{args}'"
           return
@@ -612,6 +617,19 @@ The optional argument is which variable specificly to show the value of.
 
       end
     end
+
+    class Quit < Command
+      pattern "quit", "q", "exit", "ex"
+      help "Quit the debugger"
+      ext_help <<-HELP
+Quits your current session and shuts down the complete process
+      HELP
+
+      def run(args)
+        Process.exit!(1)
+      end
+    end
+
   end
 
 end

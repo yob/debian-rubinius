@@ -96,6 +96,7 @@ namespace rubinius {
     llvm::Type* CallFrameTy;
 
     // Commonly used constants
+    llvm::Value* NegOne;
     llvm::Value* Zero;
     llvm::Value* One;
 
@@ -126,6 +127,7 @@ namespace rubinius {
 
       One = ConstantInt::get(NativeIntTy, 1);
       Zero = ConstantInt::get(NativeIntTy, 0);
+      NegOne = ConstantInt::get(NativeIntTy, -1);
 
       ObjType = ptr_type("Object");
       ObjArrayTy = llvm::PointerType::getUnqual(ObjType);
@@ -186,7 +188,7 @@ namespace rubinius {
     }
 
     void init_policy() {
-      inline_policy_ = InlinePolicy::create_policy(vmmethod());
+      inline_policy_ = InlinePolicy::create_policy(machine_code());
       own_policy_ = true;
     }
 
@@ -202,19 +204,19 @@ namespace rubinius {
       return method_info_;
     }
 
-    VMMethod* vmmethod() {
-      return method_info_.vmm;
+    MachineCode* machine_code() {
+      return method_info_.machine_code;
     }
 
     Symbol* method_name() {
-      return vmmethod()->name();
+      return machine_code()->name();
     }
 
-    VMMethod* root_vmmethod() {
+    MachineCode* root_machine_code() {
       if(method_info_.root) {
-        return method_info_.root->vmm;
+        return method_info_.root->machine_code;
       } else {
-        return vmmethod();
+        return machine_code();
       }
     }
 
@@ -259,12 +261,12 @@ namespace rubinius {
     llvm::Type* ptr_type(std::string name) {
       std::string full_name = std::string("struct.rubinius::") + name;
       return llvm::PointerType::getUnqual(
-          module_->getTypeByName(full_name.c_str()));
+          module_->getTypeByName(full_name));
     }
 
     llvm::Type* type(std::string name) {
       std::string full_name = std::string("struct.rubinius::") + name;
-      return module_->getTypeByName(full_name.c_str());
+      return module_->getTypeByName(full_name);
     }
 
     Value* ptr_gep(Value* ptr, int which, const char* name) {
@@ -303,12 +305,12 @@ namespace rubinius {
       Value* word = create_load(gep, "flags");
       Value* flags = b().CreatePtrToInt(word, ls_->Int64Ty, "word2flags");
 
-      // 10 bits worth of mask
-      Value* mask = ConstantInt::get(ls_->Int64Ty, ((1 << 10) - 1));
+      // 9 bits worth of mask
+      Value* mask = ConstantInt::get(ls_->Int64Ty, ((1 << 9) - 1));
       Value* obj_type = b().CreateAnd(flags, mask, "mask");
 
-      // Compare all 10 bits.
-      Value* tag = ConstantInt::get(ls_->Int64Ty, type << 2);
+      // Compare all 9 bits.
+      Value* tag = ConstantInt::get(ls_->Int64Ty, type << 1);
 
       return b().CreateICmpEQ(obj_type, tag, name);
     }
@@ -480,7 +482,7 @@ namespace rubinius {
     // Stack manipulations
     //
     Value* stack_slot_position(int which) {
-      assert(which >= 0 && which < vmmethod()->stack_size);
+      assert(which >= 0 && which < machine_code()->stack_size);
       return b().CreateConstGEP1_32(stack_, which, "stack_pos");
     }
 
@@ -490,7 +492,7 @@ namespace rubinius {
 
     void set_sp(int sp) {
       sp_ = sp;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
       hints_.clear();
     }
 
@@ -514,7 +516,7 @@ namespace rubinius {
 
     Value* stack_position(int amount) {
       int pos = sp_ + amount;
-      assert(pos >= 0 && pos < vmmethod()->stack_size);
+      assert(pos >= 0 && pos < machine_code()->stack_size);
 
       return b().CreateConstGEP1_32(stack_, pos, "stack_pos");
     }
@@ -535,12 +537,12 @@ namespace rubinius {
 
     void stack_ptr_adjust(int amount) {
       sp_ += amount;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
     }
 
     void stack_remove(int count=1) {
       sp_ -= count;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
     }
 
     void stack_push(Value* val) {
@@ -974,12 +976,6 @@ namespace rubinius {
       Value* call_args[] = { val };
 
       sig.call("rbx_jit_debug_spot", call_args, 1, "", b());
-    }
-
-    Value* gc_literal(Object* obj, Type* type) {
-      jit::GCLiteral* lit = method_info_.runtime_data()->new_literal(obj);
-      Value* ptr = constant(lit->address_of_object(), llvm::PointerType::getUnqual(type));
-      return b().CreateLoad(ptr, "gc_literal");
     }
 
     virtual void check_for_exception(llvm::Value* val, bool pass_top=true) = 0;

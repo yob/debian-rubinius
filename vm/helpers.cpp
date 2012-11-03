@@ -4,9 +4,9 @@
 #include "builtin/autoload.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/module.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/class.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/lookuptable.hpp"
 #include "global_cache.hpp"
 #include "objectmemory.hpp"
@@ -30,14 +30,17 @@
 
 namespace rubinius {
   namespace Helpers {
-    Object* const_get_under(STATE, Module* mod, Symbol* name, bool* found) {
-      Object* res;
+    Object* const_get_under(STATE, Module* mod, Symbol* name, bool* found, Object* filter) {
+      Object* result;
 
       *found = false;
 
       while(!mod->nil_p()) {
-        res = mod->get_const(state, name, found);
-        if(*found) return res;
+        result = mod->get_const(state, name, found);
+        if(*found) {
+          if(result != filter) return result;
+          *found = false;
+        }
 
         // Don't stop when you see Object, because we need to check any
         // includes into Object as well, and they're found via superclass
@@ -47,8 +50,8 @@ namespace rubinius {
       return cNil;
     }
 
-    Object* const_get(STATE, CallFrame* call_frame, Symbol* name, bool* found) {
-      StaticScope *cur;
+    Object* const_get(STATE, CallFrame* call_frame, Symbol* name, bool* found, Object* filter) {
+      ConstantScope *cur;
       Object* result;
 
       *found = false;
@@ -58,9 +61,11 @@ namespace rubinius {
       // Ok, this has to be explained or it will be considered black magic.
       // The scope chain always ends with an entry at the top that contains
       // a parent of nil, and a module of Object. This entry is put in
-      // regardless of lexical scoping, it's the default scope.
+      // regardless of lexical scoping, it's the fallback scope (the default
+      // scope). This is not case when deriving from BasicObject, which is
+      // explained later.
       //
-      // When looking up a constant, we don't want to consider the default
+      // When looking up a constant, we don't want to consider the fallback
       // scope (ie, Object) initially because we need to lookup up
       // the superclass chain first, because falling back on the default.
       //
@@ -85,32 +90,59 @@ namespace rubinius {
       //
       // So, in this case, foo would print "1", not "2".
       //
-      cur = call_frame->static_scope();
+      // As indicated above, the fallback scope isn't used when the superclass
+      // chain directly rooted from BasicObject. To determine this is the
+      // case, we record whether Object is seen when looking up the superclass
+      // chain. If Object isn't seen, this means we are directly deriving from
+      // BasicObject.
+
+      cur = call_frame->constant_scope();
       while(!cur->nil_p()) {
         // Detect the toplevel scope (the default) and get outta dodge.
         if(cur->top_level_p(state)) break;
 
         result = cur->module()->get_const(state, name, found);
-        if(*found) return result;
+        if(*found) {
+          if(result != filter) return result;
+          *found = false;
+        }
 
         cur = cur->parent();
       }
 
       // Now look up the superclass chain.
-      cur = call_frame->static_scope();
+      Module *fallback = G(object);
+      bool object_seen = false;
+
+      cur = call_frame->constant_scope();
       if(!cur->nil_p()) {
         Module* mod = cur->module();
         while(!mod->nil_p()) {
+          if(mod == G(object)) {
+            object_seen = true;
+          }
+          if(!object_seen && mod == G(basicobject)) {
+            fallback = NULL;
+          }
+
           result = mod->get_const(state, name, found);
-          if(*found) return result;
+          if(*found) {
+            if(result != filter) return result;
+            *found = false;
+          }
 
           mod = mod->superclass();
         }
       }
 
-      // Lastly, check Object specifically
-      result = G(object)->get_const(state, name, found, true);
-      if(*found) return result;
+      // Lastly, check the fallback scope (=Object) specifically if needed
+      if(fallback) {
+        result = fallback->get_const(state, name, found, true);
+        if(*found) {
+          if(result != filter) return result;
+          *found = false;
+        }
+      }
 
       return cNil;
     }
@@ -126,7 +158,7 @@ namespace rubinius {
 
       call_frame = call_frame->top_ruby_frame();
 
-      StaticScope* scope = call_frame->static_scope();
+      ConstantScope* scope = call_frame->constant_scope();
       if(scope->nil_p()) {
         under = G(object);
       } else {
@@ -150,18 +182,18 @@ namespace rubinius {
       return Tuple::from(state, 2, dis.method, dis.module);
     }
 
-    Class* open_class(STATE, CallFrame* call_frame, Object* super, Symbol* name, bool* created) {
+    Class* open_class(STATE, GCToken gct, CallFrame* call_frame, Object* super, Symbol* name, bool* created) {
       Module* under;
 
       call_frame = call_frame->top_ruby_frame();
 
-      if(call_frame->static_scope()->nil_p()) {
+      if(call_frame->constant_scope()->nil_p()) {
         under = G(object);
       } else {
-        under = call_frame->static_scope()->module();
+        under = call_frame->constant_scope()->module();
       }
 
-      return open_class(state, call_frame, under, super, name, created);
+      return open_class(state, gct, call_frame, under, super, name, created);
     }
 
     static Class* add_class(STATE, Module* under, Object* super, Symbol* name) {
@@ -192,17 +224,20 @@ namespace rubinius {
       return cls;
     }
 
-    Class* open_class(STATE, CallFrame* call_frame, Module* under, Object* super, Symbol* name, bool* created) {
+    Class* open_class(STATE, GCToken gct, CallFrame* call_frame, Module* under, Object* super, Symbol* name, bool* created) {
       bool found;
 
       *created = false;
 
       Object* obj = under->get_const(state, name, &found);
+
+      OnStack<4> os(state, under, super, name, obj);
+
       if(found) {
         TypedRoot<Object*> sup(state, super);
 
         if(Autoload* autoload = try_as<Autoload>(obj)) {
-          obj = autoload->resolve(state, call_frame, true);
+          obj = autoload->resolve(state, gct, call_frame, under, true);
 
           // Check if an exception occurred
           if(!obj) return NULL;
@@ -219,27 +254,29 @@ namespace rubinius {
       return add_class(state, under, super, name);
     }
 
-    Module* open_module(STATE, CallFrame* call_frame, Symbol* name) {
+    Module* open_module(STATE, GCToken gct, CallFrame* call_frame, Symbol* name) {
       Module* under = G(object);
 
       call_frame = call_frame->top_ruby_frame();
 
-      if(!call_frame->static_scope()->nil_p()) {
-        under = call_frame->static_scope()->module();
+      if(!call_frame->constant_scope()->nil_p()) {
+        under = call_frame->constant_scope()->module();
       }
 
-      return open_module(state, call_frame, under, name);
+      return open_module(state, gct, call_frame, under, name);
     }
 
-    Module* open_module(STATE, CallFrame* call_frame, Module* under, Symbol* name) {
+    Module* open_module(STATE, GCToken gct, CallFrame* call_frame, Module* under, Symbol* name) {
       Module* module;
       bool found;
 
       Object* obj = under->get_const(state, name, &found);
 
+      OnStack<3> os(state, under, name, obj);
+
       if(found) {
         if(Autoload* autoload = try_as<Autoload>(obj)) {
-          obj = autoload->resolve(state, call_frame, true);
+          obj = autoload->resolve(state, gct, call_frame, under, true);
         }
 
         // Check if an exception occurred

@@ -5,7 +5,6 @@ binding.rbc
 proc.rbc
 proc19.rbc
 autoload.rbc
-autoload19.rbc
 module.rbc
 module19.rbc
 enumerable19.rbc
@@ -18,6 +17,7 @@ tuple.rbc
 exception.rbc
 exception19.rbc
 undefined.rbc
+hash.rbc
 hash19.rbc
 hash_hamt.rbc
 type.rbc
@@ -45,12 +45,12 @@ bytearray.rbc
 bytearray19.rbc
 channel.rbc
 executable.rbc
-static_scope.rbc
-static_scope19.rbc
+constant_scope.rbc
+constant_scope19.rbc
 hook.rbc
 codeloader.rbc
 codeloader19.rbc
-compiled_method.rbc
+compiled_code.rbc
 continuation.rbc
 delegated_method.rbc
 fixnum.rbc
@@ -105,7 +105,10 @@ random19.rbc
 regexp.rbc
 regexp19.rbc
 signal.rbc
+splitter.rbc
+splitter19.rbc
 sprinter.rbc
+sprinter19.rbc
 symbol.rbc
 symbol19.rbc
 thread.rbc

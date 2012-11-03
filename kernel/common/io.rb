@@ -461,6 +461,10 @@ class IO
     io.sync     ||= STDERR.fileno == fd if STDERR.respond_to?(:fileno)
   end
 
+  def self.max_open_fd
+    @max_open_fd.get
+  end
+
   ##
   # Obtains a new duplicate descriptor for the current one.
   def initialize_copy(original) # :nodoc:
@@ -764,12 +768,6 @@ class IO
     return @ibuffer.get_first
   end
 
-  def getbyte
-    char = read 1
-    return nil if char.nil?
-    char.bytes.to_a[0]
-  end
-
   ##
   # Returns the current line number in ios. The
   # stream must be opened for reading. lineno
@@ -895,56 +893,6 @@ class IO
     end
 
     return obj
-  end
-
-  ##
-  # Reads at most _length_ bytes from the I/O stream, or to the
-  # end of file if _length_ is omitted or is +nil+. _length_
-  # must be a non-negative integer or +nil+. If the optional
-  # _buffer_ argument is present, it must reference a String,
-  # which will receive the data.
-  #
-  # At end of file, it returns +nil+ or +""+ depending on
-  # _length_. +_ios_.read()+ and +_ios_.read(nil)+ returns +""+.
-  # +_ios_.read(_positive-integer_)+ returns +nil+.
-  #
-  #   f = File.new("testfile")
-  #   f.read(16)   #=> "This is line one"
-  def read(length=nil, buffer=nil)
-    ensure_open_and_readable
-    buffer = StringValue(buffer) if buffer
-
-    unless length
-      str = read_all
-      return str unless buffer
-
-      buffer.replace str
-      return buffer
-    end
-
-    return nil if @ibuffer.exhausted?
-
-    str = ""
-    needed = length
-    while needed > 0 and not @ibuffer.exhausted?
-      available = @ibuffer.fill_from self
-
-      count = available > needed ? needed : available
-      str << @ibuffer.shift(count)
-      str = nil if str.empty?
-
-      needed -= count
-    end
-
-    return str unless buffer
-
-    if str
-      buffer.replace str
-      buffer
-    else
-      buffer.replace ''
-      nil
-    end
   end
 
   ##

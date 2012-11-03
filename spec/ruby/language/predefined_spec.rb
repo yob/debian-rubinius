@@ -88,6 +88,38 @@ describe "Predefined global $~" do
     lambda { $~ = Object.new }.should raise_error(TypeError)
     lambda { $~ = 1 }.should raise_error(TypeError)
   end
+
+  it "changes the value of derived capture globals when assigned" do
+    "foo" =~ /(f)oo/
+    foo_match = $~
+    "bar" =~ /(b)ar/
+    $~ = foo_match
+    $1.should == "f"
+  end
+
+  it "changes the value of the derived preceding match global" do
+    "foo hello" =~ /hello/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $`.should == "foo "
+  end
+
+  it "changes the value of the derived following match global" do
+    "foo hello" =~ /foo/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $'.should == " hello"
+  end
+
+  it "changes the value of the derived full match global" do
+    "foo hello" =~ /foo/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $&.should == "foo"
+  end
 end
 
 describe "Predefined global $&" do
@@ -95,6 +127,13 @@ describe "Predefined global $&" do
     /foo/ =~ 'barfoobaz'
     $&.should == $~[0]
     $&.should == 'foo'
+  end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $&.encoding.should equal(Encoding::EUC_JP)
+    end
   end
 end
 
@@ -104,6 +143,18 @@ describe "Predefined global $`" do
     $`.should == $~.pre_match
     $`.should == 'bar'
   end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $`.encoding.should equal(Encoding::EUC_JP)
+    end
+
+    it "sets an empty result to the encoding of the source String" do
+      "abc".force_encoding(Encoding::ISO_8859_1) =~ /a/
+      $`.encoding.should equal(Encoding::ISO_8859_1)
+    end
+  end
 end
 
 describe "Predefined global $'" do
@@ -112,6 +163,18 @@ describe "Predefined global $'" do
     $'.should == $~.post_match
     $'.should == 'baz'
   end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $'.encoding.should equal(Encoding::EUC_JP)
+    end
+
+    it "sets an empty result to the encoding of the source String" do
+      "abc".force_encoding(Encoding::ISO_8859_1) =~ /c/
+      $'.encoding.should equal(Encoding::ISO_8859_1)
+    end
+  end
 end
 
 describe "Predefined global $+" do
@@ -119,6 +182,13 @@ describe "Predefined global $+" do
     /(f(o)o)/ =~ 'barfoobaz'
     $+.should == $~.captures.last
     $+.should == 'o'
+  end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /(b)/
+      $+.encoding.should equal(Encoding::EUC_JP)
+    end
   end
 end
 
@@ -141,6 +211,13 @@ describe "Predefined globals $1..N" do
       end
     end
     test("-").should == nil
+  end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /(b)/
+      $1.encoding.should equal(Encoding::EUC_JP)
+    end
   end
 end
 

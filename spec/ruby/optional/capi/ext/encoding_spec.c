@@ -7,6 +7,16 @@
 extern "C" {
 #endif
 
+#ifdef HAVE_ENC_CODERANGE_ASCIIONLY
+static VALUE encoding_spec_ENC_CODERANGE_ASCIIONLY(VALUE self, VALUE obj) {
+  if(ENC_CODERANGE_ASCIIONLY(obj)) {
+    return Qtrue;
+  } else {
+    return Qfalse;
+  }
+}
+#endif
+
 #ifdef HAVE_RB_USASCII_ENCODING
 static VALUE encoding_spec_rb_usascii_encoding(VALUE self) {
   return rb_str_new2(rb_usascii_encoding()->name);
@@ -94,13 +104,13 @@ static VALUE encoding_spec_rb_encdb_alias(VALUE self, VALUE alias, VALUE orig) {
 
 #if defined(HAVE_RB_ENC_ASSOCIATE) && defined(HAVE_RB_ENC_FIND)
 static VALUE encoding_spec_rb_enc_associate(VALUE self, VALUE obj, VALUE enc) {
-  return rb_enc_associate(obj, rb_enc_find(RSTRING_PTR(enc)));
+  return rb_enc_associate(obj, NIL_P(enc) ? NULL : rb_enc_find(RSTRING_PTR(enc)));
 }
 #endif
 
 #if defined(HAVE_RB_ENC_ASSOCIATE_INDEX) && defined(HAVE_RB_ENC_FIND_INDEX)
-static VALUE encoding_spec_rb_enc_associate_index(VALUE self, VALUE obj, VALUE enc) {
-  return rb_enc_associate_index(obj, rb_enc_find_index(RSTRING_PTR(enc)));
+static VALUE encoding_spec_rb_enc_associate_index(VALUE self, VALUE obj, VALUE index) {
+  return rb_enc_associate_index(obj, FIX2INT(index));
 }
 #endif
 
@@ -167,14 +177,14 @@ static VALUE encoding_spec_rb_enc_set_index(VALUE self, VALUE obj, VALUE index) 
 }
 #endif
 
-#ifdef HAVE_RB_ENCODING_GET
-static VALUE encoding_spec_rb_ENCODING_GET(VALUE self, VALUE obj) {
+#ifdef HAVE_ENCODING_GET
+static VALUE encoding_spec_ENCODING_GET(VALUE self, VALUE obj) {
   return INT2NUM(ENCODING_GET(obj));
 }
 #endif
 
-#ifdef HAVE_RB_ENCODING_SET
-static VALUE encoding_spec_rb_ENCODING_SET(VALUE self, VALUE obj, VALUE index) {
+#ifdef HAVE_ENCODING_SET
+static VALUE encoding_spec_ENCODING_SET(VALUE self, VALUE obj, VALUE index) {
   int i = NUM2INT(index);
 
   rb_encoding* enc = rb_enc_from_index(i);
@@ -187,7 +197,7 @@ static VALUE encoding_spec_rb_ENCODING_SET(VALUE self, VALUE obj, VALUE index) {
 
 #if defined(HAVE_RB_ENC_TO_INDEX) && defined(HAVE_RB_ENC_FIND)
 static VALUE encoding_spec_rb_enc_to_index(VALUE self, VALUE name) {
-  return INT2NUM(rb_enc_to_index(rb_enc_find(RSTRING_PTR(name))));
+  return INT2NUM(rb_enc_to_index(NIL_P(name) ? NULL : rb_enc_find(RSTRING_PTR(name))));
 }
 #endif
 
@@ -203,9 +213,23 @@ static VALUE encoding_spec_rb_to_encoding_index(VALUE self, VALUE obj) {
 }
 #endif
 
+#ifdef HAVE_RB_ENC_NTH
+static VALUE encoding_spec_rb_enc_nth(VALUE self, VALUE str, VALUE index) {
+  char* start = RSTRING_PTR(str);
+  char* end = start + RSTRING_LEN(str);
+  char* ptr = rb_enc_nth(start, end, FIX2LONG(index), rb_enc_get(str));
+  return LONG2NUM(ptr - start);
+}
+#endif
+
 void Init_encoding_spec() {
   VALUE cls;
   cls = rb_define_class("CApiEncodingSpecs", rb_cObject);
+
+#ifdef HAVE_ENC_CODERANGE_ASCIIONLY
+  rb_define_method(cls, "ENC_CODERANGE_ASCIIONLY",
+                   encoding_spec_ENC_CODERANGE_ASCIIONLY, 1);
+#endif
 
 #ifdef HAVE_RB_USASCII_ENCODING
   rb_define_method(cls, "rb_usascii_encoding", encoding_spec_rb_usascii_encoding, 0);
@@ -307,12 +331,12 @@ void Init_encoding_spec() {
   rb_define_method(cls, "rb_enc_set_index", encoding_spec_rb_enc_set_index, 2);
 #endif
 
-#ifdef HAVE_RB_ENCODING_GET
-  rb_define_method(cls, "rb_ENCODING_GET", encoding_spec_rb_ENCODING_GET, 1);
+#ifdef HAVE_ENCODING_GET
+  rb_define_method(cls, "ENCODING_GET", encoding_spec_ENCODING_GET, 1);
 #endif
 
-#ifdef HAVE_RB_ENCODING_SET
-  rb_define_method(cls, "rb_ENCODING_SET", encoding_spec_rb_ENCODING_SET, 1);
+#ifdef HAVE_ENCODING_SET
+  rb_define_method(cls, "ENCODING_SET", encoding_spec_ENCODING_SET, 2);
 #endif
 
 #if defined(HAVE_RB_ENC_TO_INDEX) && defined(HAVE_RB_ENC_FIND)
@@ -325,6 +349,10 @@ void Init_encoding_spec() {
 
 #ifdef HAVE_RB_TO_ENCODING_INDEX
   rb_define_method(cls, "rb_to_encoding_index", encoding_spec_rb_to_encoding_index, 1);
+#endif
+
+#ifdef HAVE_RB_ENC_NTH
+  rb_define_method(cls, "rb_enc_nth", encoding_spec_rb_enc_nth, 2);
 #endif
 }
 

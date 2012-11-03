@@ -2,21 +2,21 @@
 
 class WeakRef
 
-  class RefError < RuntimeError; end
+  class RefError < ::RuntimeError; end
 
   def self.new
     Rubinius.primitive :weakref_new
-    raise PrimitiveFailure, "WeakRef.new failed"
+    raise PrimitiveFailure, "WeakRef.new primitive failed"
   end
 
   def __setobj__(obj)
     Rubinius.primitive :weakref_set_object
-    ::Kernel.raise PrimitiveFailure, "WeakRef#__setobj__ failed"
+    ::Kernel.raise PrimitiveFailure, "WeakRef#__setobj__ primitive failed"
   end
 
   def __object__
     Rubinius.primitive :weakref_object
-    ::Kernel.raise PrimitiveFailure, "WeakRef#__object__ failed"
+    ::Kernel.raise PrimitiveFailure, "WeakRef#__object__ primitive failed"
   end
 
   def __getobj__

@@ -84,7 +84,7 @@ class Time
 
   def nsec
     Rubinius.primitive :time_nseconds
-    raise PrimitiveFailure, "Time#nsec failed"
+    raise PrimitiveFailure, "Time#nsec primitive failed"
   end
 
   alias_method :tv_nsec, :nsec
@@ -197,5 +197,23 @@ class Time
       return  1 if r < 0
       0
     end
+  end
+
+  #
+  # Rounds sub seconds to a given precision in decimal digits 
+  #
+  # Returns a new time object. 
+  #
+  # places should be nonnegative, it is 0 by default.
+  #
+  def round(places = 0)
+    return dup if nsec == 0
+
+    roundable_time = (to_i + subsec.to_r).round(places)
+
+    sec = roundable_time.floor
+    nano = ((roundable_time - sec) * 1_000_000_000).floor 
+
+    Time.specific(sec, nano, gmt?, utc_offset)
   end
 end

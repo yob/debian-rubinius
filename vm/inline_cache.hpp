@@ -5,7 +5,8 @@
 #include "builtin/object.hpp"
 #include "builtin/module.hpp"
 #include "builtin/class.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
+#include "builtin/cache.hpp"
 #include "lock.hpp"
 #include "object_utils.hpp"
 
@@ -19,34 +20,36 @@ namespace rubinius {
   struct CallFrame;
   class Arguments;
   class CallUnit;
-  class MethodCacheEntry;
 
   // How many receiver class have been seen to keep track of inside an IC
   const static int cTrackedICHits = 3;
 
   class InlineCacheHit {
-    Class* seen_class_;
+    MethodCacheEntry* entry_;
+    int hits_;
 
   public:
 
     InlineCacheHit()
-      : seen_class_(0)
+      : hits_(0)
     {}
 
-    void assign(Class* mod) {
-      seen_class_ = mod;
+    void assign(MethodCacheEntry* entry) {
+      hits_ = 0;
+      atomic::write(&entry_, entry);
     }
 
-    Class* klass() {
-      return seen_class_;
+    void hit() {
+      ++hits_;
     }
 
-    void set_klass(Class* mod) {
-      seen_class_ = mod;
+    int hits() {
+      return hits_;
     }
 
-    friend class InlineCache;
-    friend class CompiledMethod::Info;
+    MethodCacheEntry* entry() {
+      return entry_;
+    }
   };
 
   class InlineCache {
@@ -54,7 +57,8 @@ namespace rubinius {
     Symbol* name;
 
   private:
-    MethodCacheEntry* cache_;
+    InlineCacheHit cache_[cTrackedICHits];
+
     CallUnit* call_unit_;
 
     typedef Object* (*CacheExecutor)(STATE, InlineCache*, CallFrame*, Arguments& args);
@@ -64,16 +68,14 @@ namespace rubinius {
 
 #ifdef TRACK_IC_LOCATION
     int ip_;
-    VMMethod* vmm_;
+    MachineCode* machine_code_;
 #endif
 
     int seen_classes_overflow_;
-    InlineCacheHit seen_classes_[cTrackedICHits];
-    thread::SpinLock private_lock_;
 
   public:
 
-    friend class CompiledMethod::Info;
+    friend class CompiledCode::Info;
 
     static Object* empty_cache(STATE, InlineCache* cache, CallFrame* call_frame,
                                Arguments& args);
@@ -114,6 +116,9 @@ namespace rubinius {
     static Object* check_cache_super_mm(STATE, InlineCache* cache, CallFrame* call_frame,
                                   Arguments& args);
 
+    static Object* check_cache_poly(STATE, InlineCache* cache, CallFrame* call_frame,
+                                  Arguments& args);
+
     static Object* disabled_cache(STATE, InlineCache* cache, CallFrame* call_frame,
                                   Arguments& args);
     static Object* disabled_cache_private(STATE, InlineCache* cache, CallFrame* call_frame,
@@ -122,38 +127,39 @@ namespace rubinius {
                                   Arguments& args);
 
     MethodMissingReason fill_public(STATE, Object* self, Symbol* name, Class* klass,
-                                    MethodCacheEntry*& mce);
+                                    MethodCacheEntry*& mce, bool super = false);
     bool fill_private(STATE, Symbol* name, Module* start, Class* klass,
-                      MethodCacheEntry*& mce);
-    bool fill_method_missing(STATE, Class* klass, MethodCacheEntry*& mce);
+                      MethodCacheEntry*& mce, bool super = false);
+    bool fill_method_missing(STATE, Class* klass, MethodMissingReason reason, MethodCacheEntry*& mce);
 
     MethodCacheEntry* update_and_validate(STATE, CallFrame* call_frame, Object* recv);
     MethodCacheEntry* update_and_validate_private(STATE, CallFrame* call_frame, Object* recv);
 
     InlineCache()
       : name(0)
-      , cache_(0)
       , call_unit_(0)
       , initial_backend_(empty_cache)
       , execute_backend_(empty_cache)
       , seen_classes_overflow_(0)
-    {}
+    {
+      clear();
+    }
 
 #ifdef TRACK_IC_LOCATION
-    void set_location(int ip, VMMethod* vmm) {
+    void set_location(int ip, MachineCode* mcode) {
       ip_ = ip;
-      vmm_ = vmm;
+      machine_code_ = mcode;
     }
 
     int ip() {
       return ip_;
     }
 
-    VMMethod* vmmethod() {
-      return vmm_;
+    MachineCode* machine_code() {
+      return machine_code_;
     }
 #else
-    void set_location(int ip, VMMethod* vmm) { }
+    void set_location(int ip, MachineCode* mcode) { }
 #endif
 
     void print_location(STATE, std::ostream& stream);
@@ -163,7 +169,7 @@ namespace rubinius {
       name = sym;
     }
 
-    MethodCacheEntry* cache() {
+    InlineCacheHit* caches() {
       return cache_;
     }
 
@@ -196,82 +202,105 @@ namespace rubinius {
     }
 
     void clear() {
-      cache_ = 0;
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        cache_[i].assign(NULL);
+      }
     }
 
-    void update_seen_classes(MethodCacheEntry* mce);
+    MethodCacheEntry* get_cache(Object* const recv_class) {
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        MethodCacheEntry* mce = cache_[i].entry();
+        if(likely(mce && mce->receiver_class() == recv_class)) return mce;
+      }
+      return NULL;
+    }
+
+    InlineCacheHit* get_inline_cache(Object* const recv_class, MethodCacheEntry*& mce) {
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        mce = cache_[i].entry();
+        if(likely(mce && mce->receiver_class() == recv_class)) return &cache_[i];
+      }
+      return NULL;
+    }
+
+    MethodCacheEntry* get_single_cache() {
+      if(cache_size() == 1) {
+        return cache_[0].entry();
+      }
+      return NULL;
+    }
+
+    int cache_size() {
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        if(!cache_[i].entry()) return i;
+      }
+      return cTrackedICHits;
+    }
+
+    void set_cache(MethodCacheEntry* mce) {
+      // Make sure we sync here, so the MethodCacheEntry mce is
+      // guaranteed completely initialized. Otherwise another thread
+      // might see an incompletely initialized MethodCacheEntry.
+      int least_used = cTrackedICHits - 1;
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        if(!cache_[i].entry()) {
+          cache_[i].assign(mce);
+          return;
+        }
+        if(cache_[i].entry()->receiver_class() == mce->receiver_class()) return;
+        if(cache_[i].hits() < cache_[least_used].hits()) {
+          least_used = i;
+        }
+      }
+
+      seen_classes_overflow_++;
+      cache_[least_used].assign(mce);
+    }
 
     int seen_classes_overflow() {
       return seen_classes_overflow_;
     }
 
     int classes_seen() {
-      int seen = 0;
-      for(int i = 0; i < cTrackedICHits; i++) {
-        if(seen_classes_[i].klass()) seen++;
-      }
-
-      return seen;
+      return cache_size();
     }
 
     Class* tracked_class(int which) {
-      return seen_classes_[which].klass();
+      return cache_[which].entry()->receiver_class();
     }
 
     Class* find_class_by_id(int64_t id) {
       for(int i = 0; i < cTrackedICHits; i++) {
-        Class* cls = seen_classes_[i].klass();
-        if(cls && cls->class_id() == id) return cls;
+        if(cache_[i].entry()) {
+          Class* cls = cache_[i].entry()->receiver_class();
+          if(cls && cls->class_id() == id) return cls;
+        }
       }
 
-      return 0;
+      return NULL;
     }
 
     Class* find_singletonclass(int64_t id) {
       for(int i = 0; i < cTrackedICHits; i++) {
-        if(Class* cls = seen_classes_[i].klass()) {
-          if(SingletonClass* sc = try_as<SingletonClass>(cls)) {
-            if(Class* ref = try_as<Class>(sc->attached_instance())) {
-              if(ref->class_id() == id) return cls;
+        if(cache_[i].entry()) {
+          if(Class* cls = cache_[i].entry()->receiver_class()) {
+            if(SingletonClass* sc = try_as<SingletonClass>(cls)) {
+              if(Class* ref = try_as<Class>(sc->attached_instance())) {
+                if(ref->class_id() == id) return cls;
+              }
             }
           }
         }
       }
 
-      return 0;
+      return NULL;
     }
 
-
-    Class* dominating_class() {
-      int seen = classes_seen();
-      switch(seen) {
-      case 0:
-        return NULL;
-      case 1:
-        return seen_classes_[0].klass();
-      /*
-       *  These are disabled because they hurt performance.
-      case 2: {
-        int h1 = seen_classes_[0].hits();
-        int h2 = seen_classes_[1].hits();
-        if(h2 * 10 < h1) return seen_classes_[0].klass();
-        if(h1 * 10 < h2) return seen_classes_[1].klass();
-        return NULL;
-      }
-
-      case 3: {
-        int h1 = seen_classes_[0].hits();
-        int h2 = seen_classes_[1].hits();
-        int h3 = seen_classes_[2].hits();
-
-        if(h2 * 10 < h1 && h3 * 10 < h1) return seen_classes_[0].klass();
-        if(h1 * 10 < h2 && h3 * 10 < h2) return seen_classes_[1].klass();
-        if(h1 * 10 < h3 && h2 * 10 < h3) return seen_classes_[2].klass();
-
-        return NULL;
-      }
-      */
-      default:
+    Class* get_class(int idx) {
+       MethodCacheEntry* entry = cache_[idx].entry();
+      if(entry) {
+        return entry->receiver_class();
+      } else {
         return NULL;
       }
     }

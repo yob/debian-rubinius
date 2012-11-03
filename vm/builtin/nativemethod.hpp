@@ -23,6 +23,7 @@ namespace rubinius {
   class ExceptionPoint;
   class NativeMethodFrame;
   class Pointer;
+  class StackVariables;
 
   /** Tracks RARRAY and RSTRING structs */
   typedef std::tr1::unordered_map<capi::Handle*, void*> CApiStructs;
@@ -134,6 +135,10 @@ namespace rubinius {
       current_ep_ = ep;
     }
 
+    SharedState& shared() {
+      return state_->shared();
+    }
+
     /** Set of Handles available in current Frame (convenience.) */
     capi::HandleSet& handles();
 
@@ -144,6 +149,8 @@ namespace rubinius {
 
     /** Updates cached data with changes to the Ruby objects. */
     void update_cached_data();
+
+    StackVariables* scope();
   };
 
 
@@ -254,6 +261,7 @@ namespace rubinius {
     ITERATE_BLOCK = -98,
     C_CALLBACK = -97,
     C_LAMBDA = -96,
+    C_BLOCK_CALL = -95,
     ARGS_IN_RUBY_ARRAY = -3,
     RECEIVER_PLUS_ARGS_IN_RUBY_ARRAY = -2,
     ARG_COUNT_ARGS_IN_C_ARRAY_PLUS_RECEIVER = -1
