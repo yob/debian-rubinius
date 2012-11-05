@@ -16,6 +16,7 @@ CONFIGURE       = \
     --bindir=/usr/bin \
     --mandir=/usr/share/man/man1 \
     --includedir=/usr/include/rubinius \
+    --appdir=/usr/lib/rubinius \
     --vendordir=/usr/lib/ruby/vendor_ruby \
     --sitedir=/usr/local/lib/site_ruby \
     --gemsdir=/usr/local/lib/rubinius/gems \
@@ -31,7 +32,7 @@ override_dh_auto_build:
 	rake build
 
 override_dh_auto_install:
-	FAKEROOT=$(DESTDIR) rake install
+	DESTDIR=$(DESTDIR) rake install
 	mkdir -p debian/rubinius-doc/usr/share/doc/rubinius
 	mv debian/rubinius/usr/lib/rubinius/2.0/lib/rubinius/documentation debian/rubinius-doc/usr/share/doc/rubinius/html
 	dh_link -p rubinius-doc usr/share/doc/rubinius/html usr/lib/rubinius/2.0/lib/rubinius/documentation
