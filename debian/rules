@@ -10,6 +10,7 @@ LLVM_CONFIG	= /usr/bin/llvm-config-3.0
 
 CONFIGURE       = \
   ./configure \
+    --default-version=19 \
     --llvm-config=/usr/bin/llvm-config-3.0 \
     --libdir=/usr/lib \
     --bindir=/usr/bin \
