@@ -33,6 +33,7 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	DESTDIR=$(DESTDIR) rake install
+	find debian/rubinius -name "*.so" -exec chrpath -d {} \;
 	mkdir -p debian/rubinius-doc/usr/share/doc/rubinius
 	mv debian/rubinius/usr/lib/rubinius/lib/rubinius/documentation debian/rubinius-doc/usr/share/doc/rubinius/html
 	dh_link -p rubinius-doc usr/share/doc/rubinius/html usr/lib/rubinius/lib/rubinius/documentation
