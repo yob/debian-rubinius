@@ -23,7 +23,7 @@ CONFIGURE       = \
     --no-bin-links
 
 %:
-	dh --with quilt $@
+	dh $@ --with quilt
 
 override_dh_auto_configure:
 	$(CONFIGURE)
