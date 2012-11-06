@@ -40,6 +40,7 @@ override_dh_auto_install:
 	mv debian/rubinius/usr/bin/testrb debian/rubinius/usr/bin/testrb-rbx
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
+	pod2man --center "" --release "" --name testrb-rbx --utf8 debian/testrb.1.pod $(DESTDIR)/usr/share/man/man1/testrb-rbx.1
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
