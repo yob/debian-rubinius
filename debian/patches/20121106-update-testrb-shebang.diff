@@ -1,0 +1,10 @@
+diff --git a/bin/testrb b/bin/testrb
+index 8f7952c..a5579a9 100755
+--- a/bin/testrb
++++ b/bin/testrb
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env rbx
++#!/usr/bin/rbx
+ require 'test/unit'
+ tests = Test::Unit::AutoRunner.new(true)
+ tests.options.banner.sub!(/\[options\]/, '\& tests...')
