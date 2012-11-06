@@ -1,0 +1,21 @@
+diff --git a/rakelib/ext_helper.rb b/rakelib/ext_helper.rb
+index 3b4f7c6..a459d22 100644
+--- a/rakelib/ext_helper.rb
++++ b/rakelib/ext_helper.rb
+@@ -22,6 +22,7 @@ $LDSHARED = env "LDSHARED", $CXX
+ $YACC     = env "YACC", "bison"
+ 
+ $CFLAGS   = env "CFLAGS", Rubinius::BUILD_CONFIG[:user_cflags]
++$CPPFLAGS = env "CPPFLAGS", Rubinius::BUILD_CONFIG[:user_cppflags]
+ $CXXFLAGS = env "CXXFLAGS", Rubinius::BUILD_CONFIG[:user_cppflags]
+ 
+ $DEBUGFLAGS = "-O0" if ENV["DEV"]
+@@ -541,7 +542,7 @@ end
+ 
+ rule ".o" => ".c" do |t|
+   report_command "CC #{t.source}"
+-  qsh "#{$CC} -c -o #{t.name} #{$CFLAGS} #{$DEBUGFLAGS} #{t.source}"
++  qsh "#{$CC} -c -o #{t.name} #{$CPPFLAGS} #{$CFLAGS} #{$DEBUGFLAGS} #{t.source}"
+ end
+ 
+ rule ".o" => ".cpp" do |t|

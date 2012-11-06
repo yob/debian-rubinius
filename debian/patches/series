@@ -1,3 +1,4 @@
 20120520-dont-preinstall-gems.diff
 20120520-remove-hashbangs.diff
 20121106-update-testrb-shebang.diff
+20121106-fix-cppflags.diff
